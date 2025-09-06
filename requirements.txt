@@ -6,7 +6,7 @@ pip>=23.0.1
 # базовые библиотеки бота
 pyTelegramBotAPI==4.12.0
 # см. примечание про OpenAI ниже
-openai==1.4.0
+openai==0.28.1
 Flask==2.2.5
 python-dotenv==1.0.0
 
