@@ -1,14 +1,19 @@
-# сначала инструменты сборки
+# Важно: сначала инструменты сборки
 setuptools>=65.5.0
 wheel
 pip>=23.0.1
 
-# библиотеки бота
+# Бот
 pyTelegramBotAPI==4.12.0
-openai==0.28.1     # важно: это старый SDK, совместим со стилем openai.ChatCompletion.create(...)
+
+# Новый OpenAI SDK (>=1,<2)
+openai>=1.0.0,<2
+
+# Веб-сервер для Render
 Flask==2.2.5
+
+# Env
 python-dotenv==1.0.0
 
-# стабильные версии под Python 3.11
+# Для косинусной близости и простых векторов (RAG)
 numpy==1.24.4
-scikit-learn==1.2.2
