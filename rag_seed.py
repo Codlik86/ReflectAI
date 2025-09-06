@@ -1,59 +1,48 @@
+# rag_seed.py — создаёт локальный индекс embeddings_index.json из текстов в data/corpus
+# Использует новый SDK OpenAI (>=1.x)
+
 import os
 import json
+from dotenv import load_dotenv
 from openai import OpenAI
 
-# --- Настройки ---
-API_KEY = os.getenv("OPENAI_API_KEY")  # или вставь ключ прямо строкой
-BASE_URL = "https://api.proxyapi.ru/openai/v1"
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CORPUS_FOLDER = os.getenv("RAG_FOLDER", "data/corpus")
+OUT_FILE = "embeddings_index.json"
 
-DATA_DIR = "data/corpus"
-OUTPUT_FILE = "embeddings_index.json"
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- Инициализация клиента с прокси ---
-client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-
-def load_corpus(data_dir):
-    """Загружаем все тексты из файлов в папке"""
+def get_texts(folder: str):
     items = []
-    for filename in os.listdir(data_dir):
-        path = os.path.join(data_dir, filename)
-        if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as f:
-                text = f.read().strip()
-                if text:
-                    items.append({"filename": filename, "text": text})
-    print(f"Found {len(items)} files in {data_dir}")
+    if not os.path.exists(folder):
+        print(f"Создай папку {folder} и положи туда .txt файлы")
+        return items
+    for fname in os.listdir(folder):
+        if not fname.lower().endswith(".txt"):
+            continue
+        path = os.path.join(folder, fname)
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        if text:
+            items.append({"id": fname, "text": text})
     return items
 
 def embed_texts(items):
-    """Создаем эмбеддинги через OpenAI API с прокси"""
-    embeddings = {}
-    for item in items:
-        try:
-            resp = client.embeddings.create(
-                model="text-embedding-3-small",
-                input=item["text"]
-            )
-            embeddings[item["filename"]] = resp.data[0].embedding
-        except Exception as e:
-            print(f"Ошибка при обработке {item['filename']}: {e}")
-    return embeddings
-
-def save_embeddings(embeddings, output_file):
-    """Сохраняем эмбеддинги в JSON файл"""
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(embeddings, f, ensure_ascii=False, indent=2)
-    print(f"Эмбеддинги сохранены в {output_file}")
+    out = []
+    for it in items:
+        resp = client.embeddings.create(model="text-embedding-3-small", input=it["text"])
+        vec = resp.data[0].embedding
+        out.append({"id": it["id"], "text": it["text"], "embedding": vec})
+    return out
 
 if __name__ == "__main__":
-    if not API_KEY:
-        print("Ошибка: API_KEY не установлен. Установите переменную окружения OPENAI_API_KEY")
+    docs = get_texts(CORPUS_FOLDER)
+    print(f"Найдено файлов: {len(docs)}")
+    if not docs:
         exit(1)
 
-    items = load_corpus(DATA_DIR)
-    if not items:
-        print("Нет файлов для обработки в", DATA_DIR)
-        exit(1)
-
-    embeddings = embed_texts(items)
-    save_embeddings(embeddings, OUTPUT_FILE)
+    idx = embed_texts(docs)
+    with open(OUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False)
+    print(f"✅ Индекс сохранён в {OUT_FILE}")
