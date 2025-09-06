@@ -71,11 +71,11 @@ EMBEDDINGS_INDEX = load_embeddings_index()
 
 # --- Embedding a single text ---
 def embed_text(text):
-    resp = client.embeddings.create(
+    resp = openai.Embedding.create(
         model="text-embedding-3-small",
         input=text
     )
-    vec = resp.data[0].embedding
+    vec = resp["data"][0]["embedding"]
     return np.array(vec, dtype=np.float32)
 
 # --- Cosine similarity ---
@@ -119,13 +119,13 @@ def chat_with_openai(user_text, rag_contexts=None):
         messages.append({"role": "system", "content": context_message})
     messages.append({"role": "user", "content": user_text})
 
-    resp = client.chat.completions.create(
+    resp = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=messages,
         max_tokens=450,
         temperature=0.7,
     )
-    reply = resp.choices[0].message.content.strip()
+    reply = resp["choices"][0]["message"]["content"].strip()
     return reply
 
 # --- Telegram handlers ---
