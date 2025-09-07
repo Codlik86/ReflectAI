@@ -3,24 +3,20 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ВНИМАНИЕ: используем абсолютные импорты из пакета app.*
 from app.llm_adapter import LLMAdapter
 from app.prompts import SYSTEM_PROMPT
 from app.safety import is_crisis, CRISIS_REPLY
 from app.db import db_session, User, Insight
-from app.tools import REFRAMING_STEPS, BODY_SCAN_TEXT, breathing_60s
+from app.tools import (
+    REFRAMING_STEPS, BODY_SCAN_TEXT,
+    start_breathing_task, stop_user_task, has_running_task, debounce_ok
+)
 
 router = Router()
-
-# Ленивая инициализация LLM (чтобы не падать, если нет ключей во время импорта)
 adapter = None
-
-# Простейшая in-memory FSM для рефрейминга (MVP)
-# (При рестарте процесса состояние очищается — это ок для MVP)
 _reframe_state: dict[str, dict] = {}  # user_id -> {"step_idx": int, "answers": dict}
 
 def tools_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура с практиками."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Рефрейминг", callback_data="tool_reframe")],
         [InlineKeyboardButton(text="🫁 Дыхательная пауза 60 сек", callback_data="tool_breathe")],
@@ -28,21 +24,23 @@ def tools_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def save_insight_keyboard() -> InlineKeyboardMarkup:
-    """Кнопка сохранить инсайт + ссылка на практики."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💾 Сохранить инсайт", callback_data="save_insight")],
         [InlineKeyboardButton(text="🧰 Практики", callback_data="open_tools")],
     ])
 
+def stop_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏹️ Стоп", callback_data="tool_stop")]
+    ])
+
 @router.message(CommandStart())
 async def start(m: Message):
-    # Гарантируем, что пользователь есть в БД
     with db_session() as s:
         u = s.query(User).filter(User.tg_id == str(m.from_user.id)).first()
         if not u:
             s.add(User(tg_id=str(m.from_user.id), privacy_level="insights"))
             s.commit()
-
     await m.answer(
         "Привет! Я ReflectAI — ассистент для рефлексии на основе КПТ.\n"
         "Можешь просто выговориться — я рядом.\n\n"
@@ -63,7 +61,11 @@ async def help_cmd(m: Message):
         reply_markup=tools_keyboard()
     )
 
-# --- PRIVACY ---
+@router.message(Command("test"))
+async def test_cmd(m: Message):
+    await m.answer("Тест клавиатуры 👇", reply_markup=tools_keyboard())
+
+# === PRIVACY ===
 @router.message(Command("privacy"))
 async def privacy_cmd(m: Message):
     await m.answer(
@@ -82,22 +84,17 @@ async def set_privacy(m: Message):
             s.commit()
     await m.answer(f"Ок. Уровень приватности: {m.text.strip()}")
 
-# --- TEST (для диагностики клавиатуры) ---
-@router.message(Command("test"))
-async def test_cmd(m: Message):
-    await m.answer("Тест клавиатуры 👇", reply_markup=tools_keyboard())
-
-# --- MAIN CHAT ---
+# === MAIN CHAT ===
 @router.message(F.text)
 async def on_text(m: Message):
     global adapter
     if adapter is None:
-        adapter = LLMAdapter()  # создаём при первом тексте, не на импорте
+        adapter = LLMAdapter()
 
     user_id = str(m.from_user.id)
     text = (m.text or "").strip()
 
-    # Если пользователь в процессе рефрейминга — ведём его по шагам
+    # Если пользователь внутри рефрейминга — ведём по шагам
     if user_id in _reframe_state:
         st = _reframe_state[user_id]
         step_idx = st["step_idx"]
@@ -107,10 +104,9 @@ async def on_text(m: Message):
         if step_idx + 1 < len(REFRAMING_STEPS):
             st["step_idx"] += 1
             _, next_prompt = REFRAMING_STEPS[st["step_idx"]]
-            await m.answer(next_prompt)
+            await m.answer(next_prompt, reply_markup=stop_keyboard())
             return
         else:
-            # Финальная сводка
             a = st["answers"]
             summary = (
                 "🧩 Итог рефрейминга\n\n"
@@ -124,7 +120,7 @@ async def on_text(m: Message):
             await m.answer(summary, reply_markup=save_insight_keyboard())
             return
 
-    # Обычный диалог с LLM
+    # Обычный диалог
     if is_crisis(text):
         await m.answer(CRISIS_REPLY)
         return
@@ -141,7 +137,7 @@ async def on_text(m: Message):
 
     await m.answer(answer, reply_markup=save_insight_keyboard())
 
-# --- INLINE: сохранить инсайт ---
+# === INLINE: сохранить инсайт ===
 @router.callback_query(F.data == "save_insight")
 async def on_save_insight(cb: CallbackQuery):
     msg = cb.message
@@ -156,35 +152,66 @@ async def on_save_insight(cb: CallbackQuery):
         s.commit()
     await cb.answer("Сохранено ✅", show_alert=False)
 
-# --- INLINE: открыть меню практик ---
+# === INLINE: открыть меню практик ===
 @router.callback_query(F.data == "open_tools")
 async def on_open_tools(cb: CallbackQuery):
+    user_id = str(cb.from_user.id)
+    if not debounce_ok(user_id):
+        await cb.answer()  # тихо игнорим дабл-клик
+        return
     await cb.message.answer("Выбери практику:", reply_markup=tools_keyboard())
     await cb.answer()
 
-# --- INLINE: рефрейминг ---
+# === INLINE: рефрейминг ===
 @router.callback_query(F.data == "tool_reframe")
 async def on_tool_reframe(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
+    if not debounce_ok(user_id):
+        await cb.answer()
+        return
+    # если что-то уже крутится (дыхание и т.п.) — остановим
+    stop_user_task(user_id)
     _reframe_state[user_id] = {"step_idx": 0, "answers": {}}
     _, prompt = REFRAMING_STEPS[0]
-    await cb.message.answer("🔄 Запускаем рефрейминг: 4 шага, займёт ~2 минуты.")
-    await cb.message.answer(prompt)
+    await cb.message.answer("🔄 Запускаем рефрейминг: 4 шага, займёт ~2 минуты.", reply_markup=stop_keyboard())
+    await cb.message.answer(prompt, reply_markup=stop_keyboard())
     await cb.answer()
 
-# --- INLINE: дыхательная пауза ---
+# === INLINE: дыхательная пауза (остановим всё и запустим новую) ===
 @router.callback_query(F.data == "tool_breathe")
 async def on_tool_breathe(cb: CallbackQuery):
-    await cb.message.answer("🫁 Хорошо. Я буду подсказывать ритм в этом сообщении.")
-    await breathing_60s(cb.message)  # «тикающая» пауза ~60 сек
-    await cb.message.answer(
-        "Если хочешь, сохрани ключевую мысль или ощущение как инсайт.",
-        reply_markup=save_insight_keyboard()
-    )
+    user_id = str(cb.from_user.id)
+    if not debounce_ok(user_id):
+        await cb.answer()
+        return
+    # Сброс любых текущих активностей
+    _reframe_state.pop(user_id, None)
+    stop_user_task(user_id)
+
+    await cb.message.answer("🫁 Хорошо. Я буду подсказывать ритм в этом сообщении.", reply_markup=stop_keyboard())
+    start_breathing_task(cb.message, user_id)  # запускаем асинхронно
     await cb.answer()
 
-# --- INLINE: body scan ---
+# === INLINE: body scan (просто текст + возможность стопа, на случай будущих аудио) ===
 @router.callback_query(F.data == "tool_bodyscan")
 async def on_tool_bodyscan(cb: CallbackQuery):
+    user_id = str(cb.from_user.id)
+    if not debounce_ok(user_id):
+        await cb.answer()
+        return
+    # Сброс параллельных активностей
+    _reframe_state.pop(user_id, None)
+    stop_user_task(user_id)
     await cb.message.answer(BODY_SCAN_TEXT, reply_markup=save_insight_keyboard())
+    await cb.answer()
+
+# === INLINE: Стоп (останавливает любую текущую практику) ===
+@router.callback_query(F.data == "tool_stop")
+async def on_tool_stop(cb: CallbackQuery):
+    user_id = str(cb.from_user.id)
+    # Остановим дыхание/таймеры
+    stop_user_task(user_id)
+    # Сбросим рефрейминг, если шёл
+    _reframe_state.pop(user_id, None)
+    await cb.message.answer("⏹️ Остановлено. Чем я могу помочь дальше?", reply_markup=tools_keyboard())
     await cb.answer()
