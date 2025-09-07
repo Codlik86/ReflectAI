@@ -2,7 +2,7 @@ from dotenv import load_dotenv  # NEW
 load_dotenv()                   # NEW
 
 import os
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Response
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from aiogram.enums import ParseMode
@@ -28,6 +28,14 @@ dp.include_router(router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.head("/health")                # ← добавили HEAD-обработчик
+async def health_head():
+    return Response(status_code=200)
+
+@app.get("/")                       # ← необязательно, но удобно: корень не 404
+async def root():
+    return {"ok": True}
 
 @app.get("/ready")
 async def ready():
