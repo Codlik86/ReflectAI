@@ -1,19 +1,6 @@
-# Важно: сначала инструменты сборки
-setuptools>=65.5.0
-wheel
-pip>=23.0.1
-
-# Бот
-pyTelegramBotAPI==4.12.0
-
-# Новый OpenAI SDK (>=1,<2)
-openai>=1.0.0,<2
-
-# Веб-сервер для Render
-Flask==2.2.5
-
-# Env
-python-dotenv==1.0.0
-
-# Для косинусной близости и простых векторов (RAG)
-numpy==1.24.4
+aiogram>=3.4
+fastapi
+uvicorn[standard]
+python-dotenv
+httpx
+pydantic
