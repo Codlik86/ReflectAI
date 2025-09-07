@@ -9,12 +9,17 @@ from app.safety import is_crisis, CRISIS_REPLY
 from app.db import db_session, User, Insight
 from app.tools import (
     REFRAMING_STEPS, BODY_SCAN_TEXT,
-    start_breathing_task, stop_user_task, has_running_task, debounce_ok
+    start_breathing_task, stop_user_task, debounce_ok
 )
+from app.rag_qdrant import search as rag_search  # ← Qdrant RAG
 
 router = Router()
 adapter = None
-_reframe_state: dict[str, dict] = {}  # user_id -> {"step_idx": int, "answers": dict}
+
+# Простейшее состояние рефрейминга: user_id -> {"step_idx": int, "answers": dict}
+_reframe_state: dict[str, dict] = {}
+
+# ---------------- UI ----------------
 
 def tools_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -33,6 +38,8 @@ def stop_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏹️ Стоп", callback_data="tool_stop")]
     ])
+
+# ---------------- Команды ----------------
 
 @router.message(CommandStart())
 async def start(m: Message):
@@ -65,7 +72,8 @@ async def help_cmd(m: Message):
 async def test_cmd(m: Message):
     await m.answer("Тест клавиатуры 👇", reply_markup=tools_keyboard())
 
-# === PRIVACY ===
+# ---------------- Privacy ----------------
+
 @router.message(Command("privacy"))
 async def privacy_cmd(m: Message):
     await m.answer(
@@ -84,7 +92,8 @@ async def set_privacy(m: Message):
             s.commit()
     await m.answer(f"Ок. Уровень приватности: {m.text.strip()}")
 
-# === MAIN CHAT ===
+# ---------------- Основной чат + Qdrant RAG ----------------
+
 @router.message(F.text)
 async def on_text(m: Message):
     global adapter
@@ -94,7 +103,7 @@ async def on_text(m: Message):
     user_id = str(m.from_user.id)
     text = (m.text or "").strip()
 
-    # Если пользователь внутри рефрейминга — ведём по шагам
+    # Если пользователь внутри сценария рефрейминга — ведём по шагам
     if user_id in _reframe_state:
         st = _reframe_state[user_id]
         step_idx = st["step_idx"]
@@ -120,16 +129,30 @@ async def on_text(m: Message):
             await m.answer(summary, reply_markup=save_insight_keyboard())
             return
 
-    # Обычный диалог
+    # Safety
     if is_crisis(text):
         await m.answer(CRISIS_REPLY)
         return
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": text},
-    ]
+    # --- Qdrant RAG: тихо подмешиваем контекст из базы ---
+    try:
+        rag_ctx = await rag_search(text, k=3, max_chars=1200)
+    except Exception:
+        rag_ctx = ""  # если Qdrant недоступен — ответим без контекста
 
+    if rag_ctx:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": "Короткий контекст (выписки из проверенных материалов):\n" + rag_ctx},
+            {"role": "user",   "content": text},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": text},
+        ]
+
+    # Вызов модели
     try:
         answer = await adapter.chat(messages, temperature=0.7)
     except Exception as e:
@@ -137,7 +160,8 @@ async def on_text(m: Message):
 
     await m.answer(answer, reply_markup=save_insight_keyboard())
 
-# === INLINE: сохранить инсайт ===
+# ---------------- Инсайты ----------------
+
 @router.callback_query(F.data == "save_insight")
 async def on_save_insight(cb: CallbackQuery):
     msg = cb.message
@@ -152,66 +176,61 @@ async def on_save_insight(cb: CallbackQuery):
         s.commit()
     await cb.answer("Сохранено ✅", show_alert=False)
 
-# === INLINE: открыть меню практик ===
+# ---------------- Практики ----------------
+
 @router.callback_query(F.data == "open_tools")
 async def on_open_tools(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
     if not debounce_ok(user_id):
-        await cb.answer()  # тихо игнорим дабл-клик
+        await cb.answer()
         return
     await cb.message.answer("Выбери практику:", reply_markup=tools_keyboard())
     await cb.answer()
 
-# === INLINE: рефрейминг ===
 @router.callback_query(F.data == "tool_reframe")
 async def on_tool_reframe(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
     if not debounce_ok(user_id):
         await cb.answer()
         return
-    # если что-то уже крутится (дыхание и т.п.) — остановим
+    # Остановим любые текущие «длинные» процессы (дыхание и т.д.)
     stop_user_task(user_id)
+    # Сбросим возможный старый сценарий
     _reframe_state[user_id] = {"step_idx": 0, "answers": {}}
     _, prompt = REFRAMING_STEPS[0]
     await cb.message.answer("🔄 Запускаем рефрейминг: 4 шага, займёт ~2 минуты.", reply_markup=stop_keyboard())
     await cb.message.answer(prompt, reply_markup=stop_keyboard())
     await cb.answer()
 
-# === INLINE: дыхательная пауза (остановим всё и запустим новую) ===
 @router.callback_query(F.data == "tool_breathe")
 async def on_tool_breathe(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
     if not debounce_ok(user_id):
         await cb.answer()
         return
-    # Сброс любых текущих активностей
+    # Остановим прочие активности и сценарии
     _reframe_state.pop(user_id, None)
     stop_user_task(user_id)
 
     await cb.message.answer("🫁 Хорошо. Я буду подсказывать ритм в этом сообщении.", reply_markup=stop_keyboard())
-    start_breathing_task(cb.message, user_id)  # запускаем асинхронно
+    start_breathing_task(cb.message, user_id)  # асинхронно
     await cb.answer()
 
-# === INLINE: body scan (просто текст + возможность стопа, на случай будущих аудио) ===
 @router.callback_query(F.data == "tool_bodyscan")
 async def on_tool_bodyscan(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
     if not debounce_ok(user_id):
         await cb.answer()
         return
-    # Сброс параллельных активностей
     _reframe_state.pop(user_id, None)
     stop_user_task(user_id)
     await cb.message.answer(BODY_SCAN_TEXT, reply_markup=save_insight_keyboard())
     await cb.answer()
 
-# === INLINE: Стоп (останавливает любую текущую практику) ===
 @router.callback_query(F.data == "tool_stop")
 async def on_tool_stop(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
-    # Остановим дыхание/таймеры
     stop_user_task(user_id)
-    # Сбросим рефрейминг, если шёл
     _reframe_state.pop(user_id, None)
     await cb.message.answer("⏹️ Остановлено. Чем я могу помочь дальше?", reply_markup=tools_keyboard())
     await cb.answer()
