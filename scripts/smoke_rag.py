@@ -1,17 +1,16 @@
-# scripts/smoke_rag.py
+# scripts/smoke_rag.py (верх файла)
+
 import os
 import argparse
 import asyncio
 from typing import List, Dict, Any
 
 from dotenv import load_dotenv
+load_dotenv()  # 👈 СНАЧАЛА грузим .env
+
 from qdrant_client import QdrantClient
-
-# берём готовые функции/настройки из вашего кода
-from app.qdrant_client import get_client
-from app.rag_qdrant import embed, _diversify, _bucket_of  # "приватные", но импортируемые
-
-load_dotenv()
+from app.qdrant_client import get_client           # 👈 потом импортируем модуль, который читает env
+from app.rag_qdrant import embed, _diversify, _bucket_of
 
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "reflectai_corpus")
 
