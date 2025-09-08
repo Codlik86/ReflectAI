@@ -1,0 +1,93 @@
+--- a/app/rag_qdrant.py
++++ b/app/rag_qdrant.py
+@@
++from typing import List, Optional
++
++# Корзины/темы — чтобы ответы были разнообразными
++PREFERRED_BUCKETS = [
++    {"name": "cognitive", "tags": {"cognitive_restructuring","socratic_questioning","cognitive_model","defusion"}},
++    {"name": "behavioral", "tags": {"behavioural_activation","behavioral_experiments","exposure","problem_solving","values"}},
++    {"name": "psychoeducation", "tags": {"psychoeducation","expectations","homework","session_structure","relapse_prevention"}},
++]
++DEPRIORITIZE = {"breathing"}  # не запрещаем, но отодвигаем, если только что предлагали
++
++def _bucket_of(tagset: set) -> Optional[str]:
++    for b in PREFERRED_BUCKETS:
++        if tagset & b["tags"]:
++            return b["name"]
++    return None
++
++def _diversify(scored_points, k: int, last_suggested_tag: Optional[str] = None):
++    """
++    Вход: список результатов Qdrant (c .payload и .score)
++    Выход: подобранные k элементов с разнообразием по корзинам и мягким анти-повтором.
++    """
++    pool = []
++    for p in scored_points:
++        payload = (p.payload or {})
++        tags = set(payload.get("tags") or [])
++        pool.append({"p": p, "tags": tags, "bucket": _bucket_of(tags), "score": getattr(p, "score", 0.0)})
++
++    # 1) Мягко уменьшаем "breathing", если в прошлом ответе уже было дыхание
++    if last_suggested_tag == "breathing":
++        pool = [x for x in pool if "breathing" not in x["tags"]] or pool
++
++    picked = []
++    # 2) Постараемся закрыть ключевые корзины по одному элементу
++    for bucket_name in ["cognitive", "behavioral", "psychoeducation"]:
++        cand = [x for x in pool if x["bucket"] == bucket_name]
++        if cand:
++            best = sorted(cand, key=lambda x: x["score"], reverse=True)[0]
++            picked.append(best)
++            pool.remove(best)
++            if len(picked) >= k:
++                break
++
++    # 3) Добираем оставшиеся по убыванию score, избегая перенасыщения одними и теми же тегами
++    seen_tags = set().union(*[x["tags"] for x in picked]) if picked else set()
++    for x in sorted(pool, key=lambda x: x["score"], reverse=True):
++        if len(picked) >= k:
++            break
++        if (x["tags"] & seen_tags) and (x["tags"] & DEPRIORITIZE):
++            continue
++        picked.append(x)
++        seen_tags |= x["tags"]
++    return [x["p"] for x in picked]
+@@
+-def search(query, k=3, max_chars=1200):
+-    # ваш текущий код поиска в Qdrant…
+-    # return context_snippet
++def search(query: str, k: int = 4, max_chars: int = 1400, last_suggested_tag: Optional[str] = None) -> str:
++    """
++    Возвращает компактный контекст из k фрагментов с диверсификацией.
++    last_suggested_tag — опционально, чтобы мягко не повторять «breathing».
++    """
++    # 1) Считаем эмбеддинг (используй ваш существующий адаптер)
++    from app.llm_adapter import get_embedding  # если у вас другое имя — оставьте своё
++    vec = get_embedding(query)
++
++    # 2) Поиск в Qdrant — возьми ваш клиент и коллекцию
++    from app.qdrant_client import get_client_and_collection
++    client, collection = get_client_and_collection()
++
++    # NB: важно включить payload, чтобы видеть tags/text
++    scored = client.search(
++        collection_name=collection,
++        query_vector=vec,
++        limit=16,
++        with_payload=True,
++    )
++
++    selected = _diversify(scored, k=k, last_suggested_tag=last_suggested_tag)
++
++    # 3) Склеиваем тексты; сначала ищем payload["text"], иначе — p.document/другое ваше поле
++    texts: List[str] = []
++    for p in selected:
++        payload = p.payload or {}
++        t = payload.get("text") or getattr(p, "document", None) or ""
++        if t:
++            texts.append(t)
++    context = "\n\n---\n\n".join(texts)
++    if len(context) > max_chars:
++        context = context[:max_chars].rstrip() + "…"
++    return context
