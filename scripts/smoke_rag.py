@@ -5,8 +5,8 @@ import argparse
 import asyncio
 from typing import List, Dict, Any
 
-from dotenv import load_dotenv
-load_dotenv()  # 👈 СНАЧАЛА грузим .env
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=True))
 
 from qdrant_client import QdrantClient
 from app.qdrant_client import get_client           # 👈 потом импортируем модуль, который читает env
