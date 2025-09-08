@@ -1,7 +1,7 @@
 # app/qdrant_client.py
 import os
-from dotenv import load_dotenv
-load_dotenv()  # 👈 Подхватываем .env при любом импорте
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=True))  # было: load_dotenv()
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
 
