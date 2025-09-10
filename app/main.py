@@ -64,3 +64,16 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
+
+
+# ---- version marker (для быстрой проверки прод-версии) ----
+POMNI_VERSION = "pomni-v1.0"
+try:
+    app  # noqa
+except NameError:
+    from fastapi import FastAPI
+    app = FastAPI()
+
+@app.get("/version")
+async def version():
+    return {"version": POMNI_VERSION}
