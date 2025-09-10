@@ -71,7 +71,7 @@ async def start_cmd(message: Message):
         await message.answer("Привет! Я Помни — друг-психолог-дневник.")
 
     await message.answer(
-        "Выбери стиль в /tone (мягкий 💛, практичный 🧰, короткий ✂️, честный 🖤). "
+        "Выбери стиль в /tone (мягкий 💛, практичный ��, короткий ✂️, честный 🖤). "
         "С чего начнём — 🗣 Поговорить или 🛠 Разобраться?",
         reply_markup=MAIN_KB
     )
@@ -148,7 +148,7 @@ async def triage_pick(cb: CallbackQuery):
         "prod": "Прокрастинация и продуктивность",
         "other": "Самопомощь и рефлексия"
     }.get(topic, "Самопомощь")
-    chunks = rag_search(topic_q, last_suggested_tag=LAST_SUGGESTED.get(cb.message.chat.id), mode="assist")
+    chunks = rag_search(topic_q, last_suggested_tag=LAST_SUGGESTED.get(cb.message.chat.id))
     ctx = "\n\n".join([c.get("text","") for c in chunks])[:1400]
     reply = await LLM.complete_chat(
         system=ASSISTANT_PROMPT.format(
@@ -207,7 +207,7 @@ async def diary_or_general(message: Message):
         }.get(method_key, "КПТ")
 
         # 4) Контекст из RAG
-        chunks = rag_search(text, last_suggested_tag=LAST_SUGGESTED.get(chat_id), mode="chat")
+        chunks = rag_search(text, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
         ctx = "\n\n".join([c.get("text","") for c in chunks])[:1400]
 
         # 5) Friend-first vs ассистентность
@@ -232,7 +232,7 @@ async def diary_or_general(message: Message):
         return
 
     # Fallback (если внезапно не в дневнике)
-    chunks = rag_search(text, last_suggested_tag=LAST_SUGGESTED.get(chat_id), mode="assist")
+    chunks = rag_search(text, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
     ctx = "\n\n".join([c.get("text","") for c in chunks])[:1400]
     reply = await LLM.complete_chat(
         system=POMNI_MASTER_PROMPT.format(tone_desc="тёплый", method_desc="КПТ"),
