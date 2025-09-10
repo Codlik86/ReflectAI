@@ -90,3 +90,41 @@ class MemoryManager:
         with db_session() as s:
             ev = BotEvent(user_id=None, event_type=event_type, payload=payload, created_at=datetime.utcnow())  # type: ignore
             s.add(ev); s.commit()
+
+
+# ---- Backward-compatible function wrappers (for legacy bot.py imports) ----
+def ensure_user(tg_id):
+    return MemoryManager().ensure_user(tg_id)
+
+def add_journal_entry(tg_id, text):
+    """Alias: save diary/insight entry; returns ID."""
+    return MemoryManager().save_diary_entry(tg_id, text)
+
+def list_journal_entries(tg_id, limit=20):
+    """Alias: list diary/insight entries."""
+    return MemoryManager().list_diary(tg_id, limit=limit)
+
+def get_privacy(tg_id):
+    return MemoryManager().get_privacy(tg_id)
+
+# legacy names compatibility
+def get_privacy_mode(tg_id):
+    return get_privacy(tg_id)
+
+def set_privacy(tg_id, value):
+    return MemoryManager().set_privacy(tg_id, value)
+
+def set_privacy_mode(tg_id, value):
+    return set_privacy(tg_id, value)
+
+def save_diary_entry(tg_id, text):
+    """Keep legacy name if someone imports it directly."""
+    return add_journal_entry(tg_id, text)
+
+def save_insight(tg_id, text):
+    """Another possible legacy alias used elsewhere."""
+    return add_journal_entry(tg_id, text)
+
+def log_event(tg_id, event_type, payload=None):
+    return MemoryManager().log_event(tg_id, event_type, payload)
+
