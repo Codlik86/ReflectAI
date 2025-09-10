@@ -213,3 +213,35 @@ async def diary_or_general(message: Message):
                                         tone_desc="тёплый", method_desc="КПТ"),
                                     user=text + "\n\n" + ctx)
     await message.answer(reply, reply_markup=MAIN_KB)
+
+
+# ====== Помни: приватность и дневник ======
+from aiogram.filters import Command, CommandObject
+from aiogram.types import Message
+try:
+    from .memory import MemoryManager
+    _mem = MemoryManager()
+except Exception:
+    _mem = None
+
+@router.message(Command("privacy"))
+async def cmd_privacy(message: Message, command: CommandObject):
+    if _mem is None:
+        await message.answer("Память временно недоступна.")
+        return
+    tg_id = str(message.from_user.id)
+    arg = (command.args or "").strip().lower()
+    if not arg:
+        mode = _mem.get_privacy(tg_id)
+        await message.answer(
+            f"Приватность: *{mode}*.
+Варианты: `ask` (спрашивать), `none` (не сохранять), `all` (сохранять всё).
+Пример: `/privacy ask`",
+            parse_mode="Markdown",
+        )
+        return
+    if arg not in {"ask","none","all","insights"}:
+        await message.answer("Выбери: ask | none | all")
+        return
+    _mem.set_privacy(tg_id, arg)
+    await message.answer(f"Ок, режим приватности: *{arg}*", parse_mode="Markdown")
