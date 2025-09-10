@@ -64,3 +64,17 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
+
+
+# --- version endpoint (Pomni) ---
+try:
+    app
+except NameError:
+    from fastapi import FastAPI
+    app = FastAPI()
+
+POMNI_VERSION = globals().get("POMNI_VERSION", "pomni-v1.0")
+
+@app.get("/version")
+async def version():
+    return {"version": POMNI_VERSION}
