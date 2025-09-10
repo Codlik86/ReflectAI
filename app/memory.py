@@ -158,11 +158,30 @@ def set_privacy_mode(tg_id, value):
     return set_privacy(tg_id, value)
 
 
+
 def log_event(tg_id, event_type, payload=None):
-    return MemoryManager().log_event(str(tg_id), event_type, payload)
+    """Надёжная запись события: гарантируем user.id, пишем BotEvent, не падаем."""
+    try:
+        from app.db import db_session, User, BotEvent
+        tid = str(tg_id)
+        with db_session() as s:
+            user = s.query(User).filter(User.tg_id == tid).first()
+            if user is None:
+                user = User(tg_id=tid)
+                s.add(user)
+                s.flush()     # присваивает user.id
+            ev = BotEvent(
+                user_id=user.id,
+                event_type=str(event_type or ""),
+                payload="" if payload is None else str(payload),
+            )
+            s.add(ev)
+            s.commit()
+        return True
+    except Exception as e:
+        print(f"[memory.log_event wrapper] error: {e}")
+        return False
 
-
-# Лёгкое API «настроек/памяти» (совместимость со старым кодом)
 def update_user_memory(tg_id, key=None, value=None, **data):
     """
     Универсальная запись «настроек/памяти».
