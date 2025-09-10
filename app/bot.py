@@ -226,7 +226,10 @@ async def diary_or_general(message: Message):
             user=f"Память:\n{summary}\n\nСообщение:\n{text}\n\nКонтекст:\n{ctx}"
         )
         await message.answer(reply, reply_markup=MAIN_KB)
-        log_event(user_id, "diary_message", "")
+        try:
+            log_event(user_id, "diary_message", "")
+        except Exception as e:
+            print(f"[bot] log_event error: {e}")
 
         # 6) Если режим ask — предложим сохранить явным кликом
         if privacy == "ask":
