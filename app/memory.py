@@ -128,3 +128,63 @@ def save_insight(tg_id, text):
 def log_event(tg_id, event_type, payload=None):
     return MemoryManager().log_event(tg_id, event_type, payload)
 
+# ---- Backward-compatible wrappers & light preferences API ----
+import json as _json
+
+def update_user_memory(tg_id, key=None, value=None, **data):
+    """
+    Лёгкая запись «настроек/памяти».
+    Приоритет: BotEvent(event_type='mem_update', payload=JSON) -> иначе Insight "[mem] ..."
+    Поддерживает вызовы: update_user_memory(tg_id, key, value) ИЛИ update_user_memory(tg_id, **data)
+    """
+    mm = MemoryManager()
+    payload = {}
+    if key is not None:
+        payload = {"key": str(key), "value": value}
+    elif data:
+        payload = dict(data)
+    else:
+        payload = {}
+    try:
+        # Пишем как событие, если модель есть
+        mm.log_event(str(tg_id), "mem_update", _json.dumps(payload, ensure_ascii=False))
+        return True
+    except Exception:
+        # Фолбэк — как текстовую заметку (не ломаемся)
+        try:
+            text = "[mem] " + _json.dumps(payload, ensure_ascii=False)
+            mm.save_diary_entry(str(tg_id), text)
+        except Exception:
+            pass
+        return True
+
+def get_user_memory(tg_id):
+    """
+    Возврат «памяти настроек». Сейчас — минимальный заглушечный дикт,
+    чтобы совместимый код не падал. Позже можно читать из отдельной таблицы.
+    """
+    return {}
+
+# Сохраняем совместимость с другими возможными именами:
+def add_journal_entry(tg_id, text):
+    return MemoryManager().save_diary_entry(str(tg_id), text)
+
+def list_journal_entries(tg_id, limit=20):
+    return MemoryManager().list_diary(str(tg_id), limit=limit)
+
+def save_insight(tg_id, text):
+    return add_journal_entry(tg_id, text)
+
+def get_privacy(tg_id):
+    return MemoryManager().get_privacy(str(tg_id))
+
+def set_privacy(tg_id, value):
+    return MemoryManager().set_privacy(str(tg_id), value)
+
+# Старые псевдонимы (если где-то используются):
+def get_privacy_mode(tg_id):
+    return get_privacy(tg_id)
+
+def set_privacy_mode(tg_id, value):
+    return set_privacy(tg_id, value)
+
