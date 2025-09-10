@@ -226,22 +226,32 @@ except Exception:
 
 @router.message(Command("privacy"))
 async def cmd_privacy(message: Message, command: CommandObject):
+    try:
+        from .memory import MemoryManager
+        _mem = MemoryManager()
+    except Exception:
+        _mem = None
+
     if _mem is None:
         await message.answer("Память временно недоступна.")
         return
+
     tg_id = str(message.from_user.id)
     arg = (command.args or "").strip().lower()
+
     if not arg:
         mode = _mem.get_privacy(tg_id)
-        await message.answer(
-            f"Приватность: *{mode}*.
-Варианты: `ask` (спрашивать), `none` (не сохранять), `all` (сохранять всё).
-Пример: `/privacy ask`",
-            parse_mode="Markdown",
-        )
+        text = (
+            "Приватность: *{mode}*\n"
+            "Варианты: `ask` (спрашивать), `none` (не сохранять), `all` (сохранять всё).\n"
+            "Пример: `/privacy ask`"
+        ).format(mode=mode)
+        await message.answer(text, parse_mode="Markdown")
         return
+
     if arg not in {"ask","none","all","insights"}:
         await message.answer("Выбери: ask | none | all")
         return
+
     _mem.set_privacy(tg_id, arg)
-    await message.answer(f"Ок, режим приватности: *{arg}*", parse_mode="Markdown")
+    await message.answer("Ок, режим приватности: *{arg}*".format(arg=arg), parse_mode="Markdown")
