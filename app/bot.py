@@ -237,7 +237,6 @@ async def diary_or_general(message: Message):
                 [InlineKeyboardButton(text="💾 Сохранить", callback_data="diary_save:yes"),
                  InlineKeyboardButton(text="🚫 Не сохранять", callback_data="diary_save:no")]
             ])
-            await message.answer("Сохранить это как заметку?", reply_markup=kb)
         return
 
     # Fallback (если внезапно не в дневнике)
