@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -14,7 +14,7 @@ from app.prompts import POMNI_MASTER_PROMPT, ASSISTANT_PROMPT
 from app.memory import (
     add_journal_entry, update_user_memory, get_user_memory,
     get_user_settings, set_user_tone, set_user_method,
-    is_help_intent, log_event
+    is_help_intent, log_event, MemoryManager
 )
 
 router = Router()
@@ -40,7 +40,7 @@ async def _set_bot_commands(bot):
         BotCommand(command="start", description="начать"),
         BotCommand(command="tone", description="стиль общения"),
         BotCommand(command="method", description="подход (КПТ/ACT/...)"),
-        BotCommand(command="privacy", description="приватность дневника"),  # UI добавим следующим шагом
+        BotCommand(command="privacy", description="приватность дневника"),
     ]
     await bot.set_my_commands(cmds)
 
@@ -69,7 +69,7 @@ async def start_cmd(message: Message):
         await message.answer("Привет! Я Помни — друг-психолог-дневник.")
 
     await message.answer(
-        "Выбери стиль в /tone (мягкий 💛, практичный ��, короткий ✂️, честный 🖤). "
+        "Выбери стиль в /tone (мягкий 💛, практичный 🧰, короткий ✂️, честный 🖤). "
         "С чего начнём — 🗣 Поговорить или 🛠 Разобраться?",
         reply_markup=MAIN_KB
     )
@@ -159,7 +159,8 @@ async def triage_pick(cb: CallbackQuery):
 
 
 # ---------- Главный обработчик (свободный дневник по умолчанию) ----------
-@router.message()
+# Обрабатываем только текст БЕЗ слеша впереди, чтобы не перехватывать команды
+@router.message(F.text & ~F.text.startswith("/"))
 async def diary_or_general(message: Message):
     text = message.text or ""
     if is_crisis(text):
@@ -171,25 +172,30 @@ async def diary_or_general(message: Message):
     DIARY_MODE.setdefault(chat_id, True)  # по умолчанию — «Поговорить»
 
     if DIARY_MODE[chat_id]:
-        # 1) Сохраняем запись и обновляем персональную память (пока без UI приватности)
-        add_journal_entry(user_id=user_id, text=text)
-        update_user_memory(user_id=user_id, new_text=text, adapter=LLM)
-        summary = get_user_memory(user_id)
+        # 1) Сохраняем запись и обновляем персональную память (без передачи несерилизуемых объектов)
+        add_journal_entry(user_id, text)
+        update_user_memory(user_id, new_text=text)  # только JSON-поля
 
-        # 2) Достаём настройки тона/подхода
-        st = get_user_settings(user_id)
+        summary = get_user_memory(user_id)  # dict (может быть пустым)
+
+        # 2) Достаём настройки тона/подхода (dict-access, не атрибуты)
+        st = get_user_settings(user_id) or {}
+        tone_key = (st.get("tone") or "soft").lower()
+        method_key = (st.get("method") or "cbt").lower()
+
         tone_desc = {
-            "soft":"очень тёплый и бережный",
-            "practical":"спокойный и ориентированный на действия",
-            "concise":"краткий и по делу",
-            "honest":"прямой, без приукрас, но уважительный"
-        }.get(st.tone, "тёплый")
+            "soft": "очень тёплый и бережный",
+            "practical": "спокойный и ориентированный на действия",
+            "concise": "краткий и по делу",
+            "honest": "прямой, без приукрас, но уважительный",
+        }.get(tone_key, "тёплый")
+
         method_desc = {
-            "cbt":"КПТ (мысли↔эмоции↔поведение)",
-            "act":"ACT (ценности, принятие, дефузия)",
-            "gestalt":"гештальт (осознавание, контакт)",
-            "supportive":"поддерживающий"
-        }.get(st.method, "КПТ")
+            "cbt": "КПТ (мысли↔эмоции↔поведение)",
+            "act": "ACT (ценности, принятие, дефузия)",
+            "gestalt": "гештальт (осознавание, контакт)",
+            "supportive": "поддерживающий",
+        }.get(method_key, "КПТ")
 
         # 3) Контекст из RAG: в режиме свободного чата скрытно фильтруем «breathing»
         chunks = rag_search(text, last_suggested_tag=LAST_SUGGESTED.get(chat_id), mode="chat")
@@ -200,8 +206,10 @@ async def diary_or_general(message: Message):
         if is_help_intent(text):
             system = ASSISTANT_PROMPT.format(tone_desc=tone_desc, method_desc=method_desc)
 
-        reply = await LLM.complete_chat(system=system,
-                                        user=f"Память:\n{summary}\n\nСообщение:\n{text}\n\nКонтекст:\n{ctx}")
+        reply = await LLM.complete_chat(
+            system=system,
+            user=f"Память:\n{summary}\n\nСообщение:\n{text}\n\nКонтекст:\n{ctx}"
+        )
         await message.answer(reply, reply_markup=MAIN_KB)
         log_event(user_id, "diary_message", "")
         return
@@ -209,29 +217,18 @@ async def diary_or_general(message: Message):
     # Fallback (если внезапно не в дневнике)
     chunks = rag_search(text, last_suggested_tag=LAST_SUGGESTED.get(chat_id), mode="assist")
     ctx = "\n\n".join([c.get("text","") for c in chunks])[:1400]
-    reply = await LLM.complete_chat(system=POMNI_MASTER_PROMPT.format(
-                                        tone_desc="тёплый", method_desc="КПТ"),
-                                    user=text + "\n\n" + ctx)
+    reply = await LLM.complete_chat(
+        system=POMNI_MASTER_PROMPT.format(tone_desc="тёплый", method_desc="КПТ"),
+        user=text + "\n\n" + ctx
+    )
     await message.answer(reply, reply_markup=MAIN_KB)
 
 
 # ====== Помни: приватность и дневник ======
-from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
-try:
-    from .memory import MemoryManager
-    _mem = MemoryManager()
-except Exception:
-    _mem = None
+_mem = MemoryManager()
 
 @router.message(Command("privacy"))
 async def cmd_privacy(message: Message, command: CommandObject):
-    try:
-        from .memory import MemoryManager
-        _mem = MemoryManager()
-    except Exception:
-        _mem = None
-
     if _mem is None:
         await message.answer("Память временно недоступна.")
         return
