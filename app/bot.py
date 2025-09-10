@@ -24,6 +24,8 @@ LLM = LLMAdapter()
 LAST_SUGGESTED = {}   # chat_id -> tag
 # Режим дневника
 DIARY_MODE = {}       # chat_id -> bool
+# Буфер «последнее сказанное» для ask-приватности (на уровне чата)
+STAGED_DIARY = {}     # chat_id -> text
 
 # Главное меню (ReplyKeyboard)
 MAIN_KB = ReplyKeyboardMarkup(
@@ -159,7 +161,7 @@ async def triage_pick(cb: CallbackQuery):
 
 
 # ---------- Главный обработчик (свободный дневник по умолчанию) ----------
-# Обрабатываем только текст БЕЗ слеша впереди, чтобы не перехватывать команды
+# Обрабатываем только текст БЕЗ слеша (чтобы не перехватывать команды)
 @router.message(F.text & ~F.text.startswith("/"))
 async def diary_or_general(message: Message):
     text = message.text or ""
@@ -171,14 +173,21 @@ async def diary_or_general(message: Message):
     user_id = message.from_user.id
     DIARY_MODE.setdefault(chat_id, True)  # по умолчанию — «Поговорить»
 
-    if DIARY_MODE[chat_id]:
-        # 1) Сохраняем запись и обновляем персональную память (без передачи несерилизуемых объектов)
-        add_journal_entry(user_id, text)
-        update_user_memory(user_id, new_text=text)  # только JSON-поля
+    # Приватность пользователя
+    privacy = MemoryManager().get_privacy(str(user_id))  # ask|all|none
 
+    if DIARY_MODE[chat_id]:
+        # 1) Сохранение/буфер по приватности
+        if privacy == "all":
+            add_journal_entry(user_id, text)
+        elif privacy == "ask":
+            STAGED_DIARY[chat_id] = text  # предложим сохранить после ответа
+
+        # 2) Обновляем «мягкую» память (только JSON-данные)
+        update_user_memory(user_id, new_text=text)
         summary = get_user_memory(user_id)  # dict (может быть пустым)
 
-        # 2) Достаём настройки тона/подхода (dict-access, не атрибуты)
+        # 3) Настройки тона/подхода
         st = get_user_settings(user_id) or {}
         tone_key = (st.get("tone") or "soft").lower()
         method_key = (st.get("method") or "cbt").lower()
@@ -197,11 +206,11 @@ async def diary_or_general(message: Message):
             "supportive": "поддерживающий",
         }.get(method_key, "КПТ")
 
-        # 3) Контекст из RAG: в режиме свободного чата скрытно фильтруем «breathing»
+        # 4) Контекст из RAG
         chunks = rag_search(text, last_suggested_tag=LAST_SUGGESTED.get(chat_id), mode="chat")
         ctx = "\n\n".join([c.get("text","") for c in chunks])[:1400]
 
-        # 4) Friend-first или ассистентность по явному намерению
+        # 5) Friend-first vs ассистентность
         system = POMNI_MASTER_PROMPT.format(tone_desc=tone_desc, method_desc=method_desc)
         if is_help_intent(text):
             system = ASSISTANT_PROMPT.format(tone_desc=tone_desc, method_desc=method_desc)
@@ -212,6 +221,14 @@ async def diary_or_general(message: Message):
         )
         await message.answer(reply, reply_markup=MAIN_KB)
         log_event(user_id, "diary_message", "")
+
+        # 6) Если режим ask — предложим сохранить явным кликом
+        if privacy == "ask":
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💾 Сохранить", callback_data="diary_save:yes"),
+                 InlineKeyboardButton(text="🚫 Не сохранять", callback_data="diary_save:no")]
+            ])
+            await message.answer("Сохранить это как заметку?", reply_markup=kb)
         return
 
     # Fallback (если внезапно не в дневнике)
@@ -222,6 +239,25 @@ async def diary_or_general(message: Message):
         user=text + "\n\n" + ctx
     )
     await message.answer(reply, reply_markup=MAIN_KB)
+
+
+# ---------- Callback: сохранить/не сохранять при privacy=ask ----------
+@router.callback_query(F.data.startswith("diary_save:"))
+async def diary_save_cb(cb: CallbackQuery):
+    chat_id = cb.message.chat.id
+    action = cb.data.split(":")[1]
+    text = STAGED_DIARY.get(chat_id)
+    if action == "yes" and text:
+        add_journal_entry(cb.from_user.id, text)
+        STAGED_DIARY.pop(chat_id, None)
+        await cb.message.edit_text("💾 Сохранил как заметку.")
+    else:
+        STAGED_DIARY.pop(chat_id, None)
+        try:
+            await cb.message.edit_text("Ок, не сохраняю.")
+        except Exception:
+            await cb.message.answer("Ок, не сохраняю.")
+    await cb.answer()
 
 
 # ====== Помни: приватность и дневник ======
