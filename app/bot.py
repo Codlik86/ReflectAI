@@ -26,6 +26,29 @@ from app.memory import (
 router = Router()
 LLM = LLMAdapter()
 
+
+# --- Safe helpers for user settings (dict or object) ---
+def _as_keys(st):
+    if isinstance(st, dict):
+        return (st.get("tone") or "soft", st.get("method") or "cbt")
+    return (getattr(st, "tone", "soft"), getattr(st, "method", "cbt"))
+
+def _tone_desc(key: str) -> str:
+    return {
+        "soft":"очень тёплый и бережный",
+        "practical":"спокойный и ориентированный на действия",
+        "concise":"краткий и по делу",
+        "honest":"прямой, без приукрас, но уважительный"
+    }.get(key, "тёплый")
+
+def _method_desc(key: str) -> str:
+    return {
+        "cbt":"КПТ (мысли↔эмоции↔поведение)",
+        "act":"ACT (ценности, принятие, дефузия)",
+        "gestalt":"гештальт (осознавание, контакт)",
+        "supportive":"поддерживающий"
+    }.get(key, "КПТ")
+
 # --------- Простое хранение состояния чата (in-memory) ----------
 LAST_SUGGESTED: Dict[int, Optional[str]] = {}   # chat_id -> last rag tag
 DIARY_MODE: Dict[int, bool] = {}                # chat_id -> bool (true = "Поговорить")
@@ -306,7 +329,9 @@ async def triage_pick(cb: CallbackQuery):
     chunks = await rag_search(topic_q, last_suggested_tag=LAST_SUGGESTED.get(cb.message.chat.id))
     ctx = "\n\n".join([c.get("text","") for c in (chunks or [])])[:1400]
 
-    st = get_user_settings(cb.from_user.id)
+    st = get_user_settings(user_id)
+
+    tone_key, method_key = _as_keys(st)
     system = ASSISTANT_PROMPT.format(tone_desc=_tone_desc(st.tone), method_desc=_method_desc(st.method))
     reply = await _call_llm(system=system, user=f"Тема: {topic_q}\nКонтекст:\n{ctx}")
     await cb.message.answer(reply, reply_markup=_main_kb())
@@ -322,7 +347,9 @@ async def flow_pick(cb: CallbackQuery):
     focus = CURRENT_FOCUS.get(chat_id, "").strip()
     topic = CURRENT_TOPIC.get(chat_id)
 
-    st = get_user_settings(cb.from_user.id)
+    st = get_user_settings(user_id)
+
+    tone_key, method_key = _as_keys(st)
     tone = _tone_desc(st.tone)
     method = _method_desc(st.method)
 
@@ -391,6 +418,7 @@ async def diary_or_general(message: Message):
 
         # 2) Настройки тона/подхода
         st = get_user_settings(user_id)
+        tone_key, method_key = _as_keys(st)
         tone_desc = _tone_desc(st.tone)
         method_desc = _method_desc(st.method)
 
