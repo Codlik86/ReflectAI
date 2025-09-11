@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=True))
 from typing import Optional, Dict, Any, List
 
 import httpx
