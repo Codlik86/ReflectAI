@@ -385,8 +385,8 @@ async def diary_or_general(message: Message):
 
     if DIARY_MODE[chat_id]:
         # 1) Сохраняем запись и обновляем персональную память
-        add_journal_entry(user_id=user_id, text=text)
-        update_user_memory(user_id=user_id, new_text=text, adapter=LLM)
+        add_journal_entry(user_id, text)
+        update_user_memory(user_id, text, LLM)
         summary = get_user_memory(user_id)
 
         # 2) Настройки тона/подхода
