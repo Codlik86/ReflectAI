@@ -118,7 +118,7 @@ ONB_IMAGES = {
 
 def onb_start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👋 Привет, друг!», callback_data="onb_hi")]
+        [InlineKeyboardButton(text="👋 Привет, друг!", callback_data="onb_hi")]
     ])
 
 def onb_goals_kb() -> InlineKeyboardMarkup:
@@ -168,7 +168,7 @@ async def start(m: Message):
     DIALOG_HISTORY.pop(m.chat.id, None)
 
     caption = (
-        "Привет! Я здесь, чтобы поддержать, выслушать и сохранить важное — не стесняйся.\n\n»
+        "Привет! Я здесь, чтобы поддержать, выслушать и сохранить важное — не стесняйся.\n\n"
         "Перед тем как начать, подтвердим правила и активируем персонализацию.\n"
         "Продолжая, ты принимаешь наши правила и политику:\n"
         "https://tinyurl.com/5n98a7j8 • https://tinyurl.com/5n98a7j8\n\n"
