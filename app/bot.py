@@ -26,6 +26,15 @@ from app.memory import (
 router = Router()
 LLM = LLMAdapter()
 
+# --- RAG safe wrapper: если Qdrant упал/недоступен — просто вернём пустой контекст
+async def _safe_rag(q, **kw):
+    try:
+        return await _safe_rag(q, **kw)
+    except Exception as e:
+        print(f"[rag] error: {e}")
+        return []
+
+
 
 # --- Safe helpers for user settings (dict or object) ---
 def _as_keys(st):
@@ -326,7 +335,7 @@ async def triage_pick(cb: CallbackQuery):
         "other": "Самопомощь и рефлексия"
     }.get(topic, "Самопомощь")
 
-    chunks = await rag_search(topic_q, last_suggested_tag=LAST_SUGGESTED.get(cb.message.chat.id))
+    chunks = await _safe_rag(topic_q, last_suggested_tag=LAST_SUGGESTED.get(cb.message.chat.id))
     ctx = "\n\n".join([c.get("text","") for c in (chunks or [])])[:1400]
 
     st = get_user_settings(user_id)
@@ -355,7 +364,7 @@ async def flow_pick(cb: CallbackQuery):
 
     # Контекст RAG по теме
     rag_query = " ".join(filter(None, [focus, _topic_title(topic)]))
-    chunks = await rag_search(rag_query or "эмоции и самопомощь", last_suggested_tag=LAST_SUGGESTED.get(chat_id))
+    chunks = await _safe_rag(rag_query or "эмоции и самопомощь", last_suggested_tag=LAST_SUGGESTED.get(chat_id))
     ctx = "\n\n".join([c.get("text","") for c in (chunks or [])])[:1200]
 
     if mode == "reflect":
@@ -425,7 +434,7 @@ async def diary_or_general(message: Message):
         # 3) Контекст из RAG: учитываем и текст, и тему
         topic = CURRENT_TOPIC.get(chat_id)
         rag_query = " ".join(filter(None, [text, _topic_title(topic)]))
-        chunks = await rag_search(rag_query, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
+        chunks = await _safe_rag(rag_query, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
         ctx = "\n\n".join([c.get("text","") for c in (chunks or [])])[:1400]
 
         # 4) Выбор потока (по кнопке/по тексту)
@@ -503,7 +512,7 @@ async def diary_or_general(message: Message):
     # ----- Если не в режиме дневника: ассистентный ответ по RAG -----
     topic = CURRENT_TOPIC.get(chat_id)
     rag_query = " ".join(filter(None, [text, _topic_title(topic)]))
-    chunks = await rag_search(rag_query, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
+    chunks = await _safe_rag(rag_query, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
     ctx = "\n\n".join([c.get("text","") for c in (chunks or [])])[:1400]
     system = ASSISTANT_PROMPT.format(tone_desc="тёплый", method_desc="КПТ")
     reply = await _call_llm(system=system, user=f"Текущая подтема: {_topic_title(topic)}\n" + text + "\n\n" + ctx)
