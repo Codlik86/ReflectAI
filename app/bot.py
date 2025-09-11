@@ -332,7 +332,7 @@ async def triage_pick(cb: CallbackQuery):
     st = get_user_settings(user_id)
 
     tone_key, method_key = _as_keys(st)
-    system = ASSISTANT_PROMPT.format(tone_desc=_tone_desc(st.tone), method_desc=_method_desc(st.method))
+    system = ASSISTANT_PROMPT.format(tone_desc=_tone_desc(tone_key), method_desc=_method_desc(method_key))
     reply = await _call_llm(system=system, user=f"Тема: {topic_q}\nКонтекст:\n{ctx}")
     await cb.message.answer(reply, reply_markup=_main_kb())
     await cb.answer()
@@ -350,8 +350,8 @@ async def flow_pick(cb: CallbackQuery):
     st = get_user_settings(user_id)
 
     tone_key, method_key = _as_keys(st)
-    tone = _tone_desc(st.tone)
-    method = _method_desc(st.method)
+    tone = _tone_desc(tone_key)
+    method = _method_desc(method_key)
 
     # Контекст RAG по теме
     rag_query = " ".join(filter(None, [focus, _topic_title(topic)]))
@@ -412,15 +412,15 @@ async def diary_or_general(message: Message):
 
     if DIARY_MODE[chat_id]:
         # 1) Сохраняем запись и обновляем персональную память
-        add_journal_entry(user_id, text)
+        add_journal_entry(tg_id=str(user_id), text=text)
         update_user_memory(user_id, text, LLM)
         summary = get_user_memory(user_id)
 
         # 2) Настройки тона/подхода
         st = get_user_settings(user_id)
         tone_key, method_key = _as_keys(st)
-        tone_desc = _tone_desc(st.tone)
-        method_desc = _method_desc(st.method)
+        tone_desc = _tone_desc(tone_key)
+        method_desc = _method_desc(method_key)
 
         # 3) Контекст из RAG: учитываем и текст, и тему
         topic = CURRENT_TOPIC.get(chat_id)
