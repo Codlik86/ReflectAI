@@ -26,13 +26,7 @@ from app.memory import (
 router = Router()
 LLM = LLMAdapter()
 
-# безопасная обёртка над RAG — никогда не бросает исключение
-async def safe_rag_search(query: str, chat_id: int):
-    try:
-        return await rag_search(query, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
-    except Exception as e:
-        print("[rag] error:", repr(e))
-        return []
+
 
 # --- RAG safe wrapper: если Qdrant упал/недоступен — просто вернём пустой контекст
 async def _safe_rag(q, **kw):
@@ -120,14 +114,11 @@ def _main_kb() -> ReplyKeyboardMarkup:
 
 def _flow_kb(show_change_focus: bool = True) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="🤔 Рефлексия", callback_data="flow:reflect"),
-         InlineKeyboardButton(text="🪜 Микрошаг", callback_data="flow:microstep")],
-        [InlineKeyboardButton(text="⏸️ Пауза", callback_data="flow:pause")],
+        [InlineKeyboardButton(text="🪞 Рефлексия", callback_data="flow:reflect"),
+         InlineKeyboardButton(text="🧩 Микрошаг", callback_data="flow:microstep")],
     ]
-    if show_change_focus:
-        rows.append([InlineKeyboardButton(text="🔁 Сменить фокус", callback_data="focus:menu")])
+    # Кнопку "Сменить фокус" и "Пауза" убрали по продуктовой договоренности
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
 def _focus_menu_kb(selected: Optional[str] = None) -> InlineKeyboardMarkup:
     # Делаем компактную сетку тем
     order = ["work","rel","self","sleep","prod","health","money","study","family","friends","mood","other"]
@@ -358,6 +349,8 @@ async def triage_pick(cb: CallbackQuery):
 # ---------- Выбор «Рефлексия/Микрошаг/Пауза» (кнопки) ----------
 @router.callback_query(F.data.startswith("flow:"))
 async def flow_pick(cb: CallbackQuery):
+    user_id = str(cb.from_user.id)
+    chat_id = cb.message.chat.id
     mode = cb.data.split(":")[1]  # reflect | microstep | pause
     chat_id = cb.message.chat.id
     FLOW_MODE[chat_id] = mode
@@ -442,7 +435,7 @@ async def diary_or_general(message: Message):
         # 3) Контекст из RAG: учитываем и текст, и тему
         topic = CURRENT_TOPIC.get(chat_id)
         rag_query = " ".join(filter(None, [text, _topic_title(topic)]))
-        chunks = await safe_rag_search(text, chat_id)
+        chunks = await _safe_rag(rag_query, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
         ctx = "\n\n".join([c.get("text","") for c in (chunks or [])])[:1400]
 
         # 4) Выбор потока (по кнопке/по тексту)
@@ -520,7 +513,7 @@ async def diary_or_general(message: Message):
     # ----- Если не в режиме дневника: ассистентный ответ по RAG -----
     topic = CURRENT_TOPIC.get(chat_id)
     rag_query = " ".join(filter(None, [text, _topic_title(topic)]))
-    chunks = await safe_rag_search(rag_query, chat_id)
+    chunks = await _safe_rag(rag_query, last_suggested_tag=LAST_SUGGESTED.get(chat_id))
     ctx = "\n\n".join([c.get("text","") for c in (chunks or [])])[:1400]
     system = ASSISTANT_PROMPT.format(tone_desc="тёплый", method_desc="КПТ")
     reply = await _call_llm(system=system, user=f"Текущая подтема: {_topic_title(topic)}\n" + text + "\n\n" + ctx)
