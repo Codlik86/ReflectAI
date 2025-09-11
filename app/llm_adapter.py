@@ -1,15 +1,21 @@
+# app/llm_adapter.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import os
+from typing import Optional, Dict, Any, List
+
 import httpx
-from typing import Optional, Dict, Any
+
 
 class LLMAdapter:
     """
-    Адаптер для chat.completions через прокси OpenAI.
+    Адаптер к /chat/completions (OpenAI-совместимые API, в т.ч. прокси).
 
     Env:
       - OPENAI_API_KEY
-      - OPENAI_BASE_URL (например, https://api.proxyapi.ru/openai/v1)
-      - OPENAI_MODEL (например, gpt-4o-mini)
+      - OPENAI_BASE_URL  (например, https://api.proxyapi.ru/openai/v1)
+      - OPENAI_MODEL     (например, gpt-4o-mini)
     """
 
     def __init__(self) -> None:
@@ -17,6 +23,9 @@ class LLMAdapter:
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self._client: Optional[httpx.AsyncClient] = None
+
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY не задан")
 
     async def _client_async(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -30,26 +39,64 @@ class LLMAdapter:
             )
         return self._client
 
-    async def complete_chat(
-        self,
-        system: str,
-        user: str,
-        temperature: float = 0.7,
-        max_tokens: int = 700,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Асинхронный вызов /chat/completions. Возвращает текст первого выбора."""
+    # ----------------- ЕДИНЫЙ ПУБЛИЧНЫЙ ВХОД -----------------
+
+    async def chat(self, messages: List[Dict[str, str]], temperature: float = 0.6, **opts) -> str:
+        """
+        Новый рекомендованный метод:
+          await adapter.chat(messages=[{role, content}, ...], temperature=0.6)
+        """
+        return await self.complete_chat(messages=messages, temperature=temperature, **opts)
+
+    # ----------------- БЭК-КОМПАТ ОТ ОБОИХ СТИЛЕЙ -----------------
+
+    async def complete_chat(self, *args, **kwargs) -> str:
+        """
+        Бэк-совместимая обёртка. Поддерживает:
+          - complete_chat(system, user, ...)
+          - complete_chat(messages=[...], ...)
+          - complete_chat(user=None, messages=[...], ...)
+        """
+        # Попробуем вытащить параметры из kwargs
+        messages = kwargs.pop("messages", None)
+        system = kwargs.pop("system", None)
+        user_text = kwargs.pop("user", None)
+        temperature = float(kwargs.pop("temperature", 0.6))
+        max_tokens = int(kwargs.pop("max_tokens", 700))
+        extra: Optional[Dict[str, Any]] = kwargs.pop("extra", None)
+
+        # Старый стиль позиционных аргументов: (system, user)
+        if messages is None and len(args) >= 2 and isinstance(args[0], str) and isinstance(args[1], str):
+            system, user_text = args[0], args[1]
+
+        # Ещё вариант: complete_chat(messages, ...)
+        if messages is None and len(args) == 1 and isinstance(args[0], list):
+            messages = args[0]
+
+        # Если передали system/user — соберём messages из них
+        if messages is None and (system is not None or user_text is not None):
+            messages = [
+                {"role": "system", "content": system or ""},
+                {"role": "user", "content": user_text or ""},
+            ]
+
+        if messages is None:
+            raise TypeError("complete_chat: нужен 'messages' (list[{role, content}]) или пара (system, user)")
+
+        # Собираем основной payload
         payload: Dict[str, Any] = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system or ""},
-                {"role": "user", "content": user or ""},
-            ],
+            "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+        # Разрешаем прокинуть любые дополнительные опции (top_p, presence_penalty и т.п.)
         if extra:
             payload.update(extra)
+        if kwargs:
+            # на случай, если кто-то передал неожиданные ключи — тоже прокинем
+            payload.update(kwargs)
 
         try:
             client = await self._client_async()
@@ -61,15 +108,13 @@ class LLMAdapter:
                     .get("message", {})
                     .get("content", "")
             )
-            return (content or "").strip() or "Извини, сейчас не получилось сформулировать ответ."
+            text = (content or "").strip()
+            return text or "Извини, у меня сейчас не выходит сформулировать ответ."
         except Exception:
             # fail-soft
-            return "Извини, у меня сейчас небольшая заминка с ответом. Давай попробуем ещё раз?"
+            return "Извини, у меня небольшая заминка с ответом. Давай попробуем ещё раз?"
 
-    # Алиасы на будущее — если где-то вызовут другой нейминг
-    async def chat(self, *a, **kw) -> str:
-        return await self.complete_chat(*a, **kw)
-
+    # Синонимы на всякий случай
     async def complete(self, *a, **kw) -> str:
         return await self.complete_chat(*a, **kw)
 
