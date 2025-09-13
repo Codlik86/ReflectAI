@@ -7,7 +7,7 @@ from typing import Dict, Deque, List
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import text as sql_text
 
 from app.llm_adapter import LLMAdapter
@@ -90,17 +90,6 @@ def _load_recent_turns(tg_id: str, days: int = 7, limit: int = 24) -> List[Dict[
 # простой сценарий «Рефлексия»
 _reframe_state: Dict[str, Dict] = {}  # user_id -> {"step_idx": int, "answers": dict}
 
-
-# Постоянная нижняя клавиатура (основное меню)
-def kb_main() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="💬 Поговорить"), KeyboardButton(text="🧩 Разобраться")],
-            [KeyboardButton(text="🎧 Медитации"), KeyboardButton(text="⚙️ Настройки")],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Сообщение"
-    )
 # -------------------- КЛАВИАТУРЫ --------------------
 def tools_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -189,8 +178,6 @@ async def start(m: Message):
         await m.answer_photo(ONB_IMAGES["cover"], caption=caption, reply_markup=onb_start_kb())
     except Exception:
         await m.answer(caption, reply_markup=onb_start_kb())
-    # Установим постоянную клавиатуру снизу
-    await m.answer("Меню включено. Можешь писать или выбрать кнопки снизу.", reply_markup=kb_main())
 
 @router.callback_query(F.data == "onb_hi")
 async def onb_hi(cb: CallbackQuery):
@@ -224,7 +211,7 @@ async def onb_goal_done(cb: CallbackQuery):
         "3) Хочешь структуру — попробуем «Рефлексию» или подберём «Микрошаг».\n\n"
         "Пиши как удобно — я здесь ❤️"
     )
-    await cb.message.answer(msg, reply_markup=kb_main())
+    await cb.message.answer(msg, reply_markup=None)
     await cb.answer()
 
 @router.message(Command("help"))
@@ -236,7 +223,7 @@ async def help_cmd(m: Message):
         "• /insights — показать сохранённые инсайты\n"
         "• /export — выгрузить инсайты\n"
         "• /delete_me — удалить все данные",
-        reply_markup=kb_main()
+        reply_markup=None
     )
 
 @router.message(Command("privacy"))
@@ -259,45 +246,6 @@ async def set_privacy(m: Message):
     _set_consent(str(m.from_user.id), level == "all")
     await m.answer(f"Ок. Уровень приватности: {level}")
 
-
-@router.message(Command("tone"))
-async def cmd_tone(m: Message):
-    await m.answer("Стиль общения пока фиксированный (тёплый, короткие реплики). В будущем добавим выбор тона.", reply_markup=kb_main())
-
-
-@router.message(Command("method"))
-async def cmd_method(m: Message):
-    await m.answer("Подходы: КПТ/ACT/гештальт — сейчас я смешиваю мягко. В будущем сделаем явный выбор.", reply_markup=kb_main())
-
-
-@router.message(Command("focus"))
-async def cmd_focus(m: Message):
-    await m.answer("Смена темы: жми «🧩 Разобраться» для упражнений или просто напиши в чат.", reply_markup=kb_main())
-
-
-@router.message(Command("about"))
-async def cmd_about(m: Message):
-    await m.answer("Pomni — дневник-друг с упражнениями. Добавим ссылки и детали тут.", reply_markup=kb_main())
-
-
-@router.message(Command("terms"))
-async def cmd_terms(m: Message):
-    await m.answer("Политика и условия — добавим тут ссылки на сайт/док.", reply_markup=kb_main())
-
-
-@router.message(Command("pay"))
-async def cmd_pay(m: Message):
-    await m.answer("Оплата пока недоступна. Скоро появится.", reply_markup=kb_main())
-
-
-@router.message(Command("balance"))
-async def cmd_balance(m: Message):
-    await m.answer("Баланс/статус: пока пусто, добавим позже.", reply_markup=kb_main())
-
-
-@router.message(Command("support"))
-async def cmd_support(m: Message):
-    await m.answer("Поддержка: напиши сюда проблему. В будущем — контакт/ссылка.", reply_markup=kb_main())
 # -------------------- СВОБОДНЫЙ ЧАТ --------------------
 @router.message(F.text)
 async def on_text(m: Message):
@@ -367,11 +315,10 @@ async def on_text(m: Message):
     _save_turn(tg_id, "user", user_text)
     _save_turn(tg_id, "assistant", answer)
 
-    await m.answer(answer, reply_markup=kb_main())
+    await m.answer(answer, reply_markup=None)
 
 
 # -------------------- ФЛОУ «РАЗОБРАТЬСЯ (УПРАЖНЕНИЯ)» --------------------
-# Мини-набор тем и упражнений прямо в этом файле (MVP).
 from typing import TypedDict, Literal
 
 class Exercise(TypedDict):
@@ -388,165 +335,95 @@ class Topic(TypedDict):
 
 TOPICS: dict[str, Topic] = {
     "panic": {
-        "id": "panic",
-        "title": "Паническая атака",
+        "id": "panic", "title": "Паническая атака",
         "intro": "Помогу переждать волну и вернуть контроль шаг за шагом.",
         "exercises": [
             {"id": "panic_protocol", "type": "stepper", "title": "План при панической атаке (коротко)",
-             "steps": [
-                 "1) Оцени интенсивность сейчас по шкале 0–10.",
-                 "2) Дыхание 4–2–6: вдох 4с — пауза 2с — выдох 6с (1 минута). Нажми ▶️ Далее, когда готов.",
-                 "3) 5–4–3–2–1: назови 5, что видишь; 4 — можешь потрогать; 3 — слышишь; 2 — чувствуешь телом; 1 — запах/вкус.",
-                 "4) Это волна — она пройдёт. Ты в безопасности. Маленький шаг: вода/окно/медленный шаг — что выберешь?",
-             ]},
-            {"id": "pmr_short","type": "stepper","title": "Прогрессивная релаксация (3 минуты)",
-             "steps": [
-                 "1) Кисти: сожми на 5с и отпусти.",
-                 "2) Плечи: подними к ушам на 5с и отпусти.",
-                 "3) Лицо: зажмурься на 5с и расслабь.",
-                 "4) Живот: вдохни мягко, на выдохе отпусти напряжение.",
-             ]},
+             "steps": ["1) Оцени интенсивность 0–10.",
+                       "2) Дыхание 4–2–6 (1 мин). Нажми ▶️ Далее.",
+                       "3) 5–4–3–2–1: 5 вижу, 4 трогаю, 3 слышу, 2 ощущаю, 1 запах/вкус.",
+                       "4) Это волна — она пройдёт. Маленький шаг: вода/окно/медленный шаг?"]},
+            {"id": "pmr_short", "type": "stepper", "title": "Прогрессивная релаксация (3 минуты)",
+             "steps": ["Кисти 5с — отпусти", "Плечи 5с — отпусти", "Лицо 5с — отпусти", "Живот — отпусти на выдохе"]},
         ],
     },
     "anxiety": {
-        "id": "anxiety",
-        "title": "Тревога",
-        "intro": "Выберем способ снизить тревогу и вернуть ясность.",
+        "id": "anxiety", "title": "Тревога", "intro": "Выберем способ снизить тревогу и вернуть ясность.",
         "exercises": [
             {"id":"grounding","type":"stepper","title":"Заземление 5-4-3-2-1",
-             "steps":[
-                "Сделай медленный выдох. Перечисли 5 вещей, которые видишь.",
-                "Назови 4 объекта, которых можешь коснуться.",
-                "Назови 3 звука вокруг.",
-                "Назови 2 ощущения в теле.",
-                "Назови 1 запах или вкус. Оцени тревогу 0–10.",
-            ]},
+             "steps":["Выдох и 5 вижу","4 трогаю","3 слышу","2 ощущаю телом","1 запах/вкус. Оцени тревогу 0–10."]},
             {"id":"catastrophizing","type":"stepper","title":"Анти-катастрофизация (КПТ-мини)",
-             "steps":[
-                "Опиши мысль, которая тревожит, одним предложением.",
-                "Доказательства «за» и «против»? По 2–3 пункта.",
-                "Наихудший/наилучший/реалистичный исход — по одному.",
-                "Какой маленький шаг на 10–20 минут поддержит тебя?",
-            ]},
+             "steps":["Опиши мысль одним предложением","Доводы за/против","Худший/лучший/реалистичный исход","Маленький шаг на 10–20 минут"]},
         ],
     },
     "sadness": {
-        "id":"sadness","title":"Грусть/упадок",
-        "intro":"Чуть больше заботы и маленькое действие.",
+        "id":"sadness","title":"Грусть/упадок","intro":"Чуть больше заботы и маленькое действие.",
         "exercises":[
             {"id":"self_compassion","type":"stepper","title":"Самосострадание (3 шага)",
-             "steps":[
-                "Замечаю: что сейчас непросто (1–2 предложения).",
-                "Общность: «с каждым так бывает». Что бы ты сказал другу?",
-                "Доброта к себе: тёплая фраза себе на сегодня.",
-            ]},
+             "steps":["Замечаю (1–2 предложения)","Общность: с каждым бывает","Доброта к себе: тёплая фраза"]},
             {"id":"behavioral_activation","type":"stepper","title":"Маленький шаг активности",
-             "steps":[
-                "Выбери действие на 10–15 минут (душ, лёгкая уборка, прогулка).",
-                "Поставь таймер и начни. Потом оцени состояние 0–10.",
-            ]},
+             "steps":["Выбери действие на 10–15 минут","Поставь таймер и начни, потом оцени состояние 0–10"]},
         ],
     },
     "anger": {
-        "id":"anger","title":"Злость",
-        "intro":"Сбросим импульс и проясним границы.",
+        "id":"anger","title":"Злость","intro":"Сбросим импульс и проясним границы.",
         "exercises":[
             {"id":"stop_skill","type":"stepper","title":"Навык STOP",
-             "steps":[
-                "S — Stop: остановись.",
-                "T — Take a breath: один глубокий вдох-выдох.",
-                "O — Observe: мысли/чувства/тело.",
-                "P — Proceed: шаг в сторону ценностей.",
-            ]},
+             "steps":["Stop","Take a breath","Observe","Proceed по ценностям"]},
             {"id":"urge_surfing","type":"stepper","title":"Сёрфинг на импульсе",
-             "steps":[
-                "Оцени силу импульса 0–10.",
-                "Наблюдай импульс как волну в теле 1–2 минуты.",
-                "Оцени снова 0–10. Какой бережный шаг сейчас?",
-            ]},
+             "steps":["Оцени импульс 0–10","Наблюдай волну 1–2 минуты","Оцени снова и выбери бережный шаг"]},
         ],
     },
     "sleep": {
-        "id":"sleep","title":"Сон",
-        "intro":"Помогу плавно успокоить систему перед сном.",
+        "id":"sleep","title":"Сон","intro":"Помогу успокоиться перед сном.",
         "exercises":[
             {"id":"wind_down","type":"stepper","title":"Спокойное завершение дня (10 минут)",
-             "steps":[
-                "Выгрузи 3 мысли на завтра.",
-                "Тёплый свет, 2 минуты дыхания 4–6.",
-                "Короткий скан тела от головы к стопам.",
-            ]},
+             "steps":["Выгрузи 3 мысли на завтра","Тёплый свет, дыхание 4–6 (2 мин)","Короткий скан тела"]},
             {"id":"body_scan","type":"text","title":"Короткий скан тела",
-             "steps":["Сядь/ляг удобно. Вдох 4 — пауза 2 — выдох 6. Пройди вниманием от макушки к стопам 1–2 минуты."]},
+             "steps":["Сядь/ляг удобно. Вдох 4 — пауза 2 — выдох 6. Пройди вниманием 1–2 минуты."]},
         ],
     },
     "meditations": {
-        "id":"meditations","title":"Медитации",
-        "intro":"Набор спокойных практик на 3–10 минут.",
+        "id":"meditations","title":"Медитации","intro":"Короткие практики на 3–10 минут.",
         "exercises":[
             {"id":"breath_446","type":"breath","title":"Дыхание 4–4–6 (3 минуты)",
              "steps":["Вдох 4с — пауза 4с — выдох 6с. Дыши 2–3 минуты."]},
             {"id":"open_monitoring","type":"stepper","title":"Открытое внимание (3 минуты)",
-             "steps":[
-                "Сядь удобно. Заметь дыхание 3–4 цикла.",
-                "Перенеси внимание на звуки/ощущения/мысли.",
-                "Если унесло — мягко вернись к дыханию и поблагодари себя.",
-            ]},
+             "steps":["Заметь дыхание 3–4 цикла","Сфокусируйся на звуках/ощущениях/мысли как облака","Мягко возвращай внимание"]},
         ],
     },
 }
 
-# State в памяти для флоу
-_work_state: dict[str, dict] = {}  # user_id -> {"topic": str|None, "ex": tuple(topic_id, ex_id)|None, "step": int}
-
-def _ws_get(uid: str) -> dict:
-    return _work_state.get(uid, {"topic": None, "ex": None, "step": 0})
-
-def _ws_set(uid: str, **kw) -> dict:
-    st = _ws_get(uid); st.update(kw); _work_state[uid] = st; return st
+_work_state: dict[str, dict] = {}
+def _ws_get(uid: str) -> dict: return _work_state.get(uid, {"topic": None, "ex": None, "step": 0})
+def _ws_set(uid: str, **kw) -> dict: st = _ws_get(uid); st.update(kw); _work_state[uid] = st; return st
 
 def kb_topics() -> InlineKeyboardMarkup:
-    rows = []
-    for key in ["panic","anxiety","sadness","anger","sleep","meditations"]:
-        rows.append([InlineKeyboardButton(text=TOPICS[key]["title"], callback_data=f"work:topic:{key}")])
+    rows = [[InlineKeyboardButton(text=TOPICS[k]["title"], callback_data=f"work:topic:{k}")] for k in ["panic","anxiety","sadness","anger","sleep","meditations"]]
     rows.append([InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_exercises(topic_id: str) -> InlineKeyboardMarkup:
-    topic = TOPICS[topic_id]
-    rows = [[InlineKeyboardButton(text=ex["title"], callback_data=f"work:ex:{topic_id}:{ex['id']}")] for ex in topic["exercises"]]
+    t = TOPICS[topic_id]
+    rows = [[InlineKeyboardButton(text=ex["title"], callback_data=f"work:ex:{topic_id}:{ex['id']}")] for ex in t["exercises"]]
     rows.append([InlineKeyboardButton(text="⬅️ Назад к темам", callback_data="work:back_topics")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_stepper() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Далее", callback_data="work:next")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="work:back_ex"), InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")],
-    ])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="▶️ Далее", callback_data="work:next")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="work:back_ex"), InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")]])
 
 @router.message(Command("work"))
-@router.message(F.text.in_({"🧩 Разобраться","Разобраться"}))
 async def cmd_work(m: Message):
-    uid = str(m.from_user.id)
-    _ws_set(uid, topic=None, ex=None, step=0)
+    _ws_set(str(m.from_user.id), topic=None, ex=None, step=0)
     await m.answer("Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
 
-@router.message(F.text.in_({"🎧 Медитации","Медитации"}))
-async def cmd_medit(m: Message):
+@router.message(Command("meditations"))
+async def cmd_meditations(m: Message):
     uid = str(m.from_user.id)
     _ws_set(uid, topic="meditations", ex=None, step=0)
     t = TOPICS["meditations"]
     await m.answer(f"Тема: {t['title']}\n{t['intro']}", reply_markup=kb_exercises("meditations"))
-
-@router.message(F.text.in_({"💬 Поговорить","Поговорить"}))
-async def cmd_talk(m: Message):
-    uid = str(m.from_user.id)
-    _ws_set(uid, topic=None, ex=None, step=0)
-    await m.answer("Я рядом. Можешь просто написать, что на душе.", reply_markup=kb_main())
-
-@router.message(F.text.in_({"⚙️ Настройки","Настройки"}))
-async def cmd_settings(m: Message):
-    await m.answer("Тут будут настройки (тон, подход, приватность). Пока — в разработке.", reply_markup=kb_main())
 
 @router.callback_query(F.data.startswith("work:topic:"))
 async def cb_pick_topic(cb: CallbackQuery):
@@ -583,7 +460,7 @@ async def cb_next(cb: CallbackQuery):
 @router.callback_query(F.data == "work:back_ex")
 async def cb_back_ex(cb: CallbackQuery):
     uid = str(cb.from_user.id); st = _ws_get(uid)
-    topic_id = st.get("topic"); 
+    topic_id = st.get("topic")
     if not topic_id: return await cb.answer()
     _ws_set(uid, ex=None, step=0)
     t = TOPICS[topic_id]
@@ -607,7 +484,7 @@ async def on_open_tools(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
     if not debounce_ok(user_id):
         await cb.answer(); return
-    await cb.message.answer("Чем займёмся?", reply_markup=kb_main())
+    await cb.message.answer("Чем займёмся?", reply_markup=None)
     await cb.answer()
 
 @router.callback_query(F.data == "tool_reframe")
@@ -652,7 +529,7 @@ async def on_tool_micro(cb: CallbackQuery):
     _push(chat_id, "assistant", answer)
     _save_turn(tg_id, "assistant", answer)
 
-    await cb.message.answer(answer, reply_markup=kb_main())
+    await cb.message.answer(answer, reply_markup=None)
     await cb.answer()
 
 @router.callback_query(F.data == "tool_stop")
@@ -660,7 +537,7 @@ async def on_tool_stop(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
     stop_user_task(user_id)
     _reframe_state.pop(user_id, None)
-    await cb.message.answer("Остановил. Чем могу помочь дальше?", reply_markup=kb_main())
+    await cb.message.answer("Остановил. Чем могу помочь дальше?", reply_markup=None)
     await cb.answer()
 
 # -------------------- ИНСАЙТЫ --------------------
