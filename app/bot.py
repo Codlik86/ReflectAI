@@ -247,79 +247,6 @@ async def set_privacy(m: Message):
     _set_consent(str(m.from_user.id), level == "all")
     await m.answer(f"Ок. Уровень приватности: {level}")
 
-# -------------------- СВОБОДНЫЙ ЧАТ --------------------
-@router.message(F.text)
-async def on_text(m: Message):
-    if (m.text or '').startswith('/'):
-        return
-    global adapter
-    if adapter is None:
-        adapter = LLMAdapter()
-
-    chat_id = m.chat.id
-    tg_id = str(m.from_user.id)
-    user_text = (m.text or "").strip()
-
-    # если идёт сценарий «Рефлексия» — ведём по шагам
-    if tg_id in _reframe_state:
-        st = _reframe_state[tg_id]
-        step_idx = st["step_idx"]
-        key, _prompt = REFRAMING_STEPS[step_idx]
-        st["answers"][key] = user_text
-
-        if step_idx + 1 < len(REFRAMING_STEPS):
-            st["step_idx"] += 1
-            _, next_prompt = REFRAMING_STEPS[st["step_idx"]]
-            await m.answer(next_prompt, reply_markup=stop_keyboard())
-            return
-        else:
-            a = st["answers"]
-            summary = (
-                "🧩 Итог рефлексии\n\n"
-                f"• Мысль: {a.get('thought','—')}\n"
-                f"• Эмоция (1–10): {a.get('emotion','—')}\n"
-                f"• Действие: {a.get('behavior','—')}\n"
-                f"• Альтернативная мысль: {a.get('alternative','—')}\n\n"
-                "Как это меняет твой взгляд? Что маленькое и конкретное сделаем дальше?"
-            )
-            _reframe_state.pop(tg_id, None)
-            await m.answer(summary, reply_markup=save_insight_keyboard())
-            return
-
-    # safety
-    if is_crisis(user_text):
-        await m.answer(CRISIS_REPLY)
-        return
-
-    # мягкий RAG
-    try:
-        rag_ctx = await rag_search(user_text, k=3, max_chars=1200)
-    except Exception:
-        rag_ctx = ""
-
-    # длинная память (последние дни)
-    long_tail = _load_recent_turns(tg_id, days=7, limit=24)
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if rag_ctx:
-        messages.append({"role": "system", "content": "Короткий контекст:\n" + rag_ctx})
-    messages.extend(long_tail[-10:])          # из БД
-    messages.extend(DIALOG_HISTORY[chat_id])  # из RAM
-    messages.append({"role": "user", "content": user_text})
-
-    try:
-        # ВАЖНО: передаём user (раньше из-за этого падало)
-        answer = await adapter.complete_chat(user=tg_id, messages=messages, temperature=0.6)
-    except Exception as e:
-        answer = f"Не получилось обратиться к модели: {e}"
-
-    _push(chat_id, "user", user_text)
-    _push(chat_id, "assistant", answer)
-    _save_turn(tg_id, "user", user_text)
-    _save_turn(tg_id, "assistant", answer)
-
-    await m.answer(answer, reply_markup=None)
-
 
 
 # -------------------- ФЛОУ «РАЗОБРАТЬСЯ (УПРАЖНЕНИЯ)» --------------------
@@ -360,7 +287,7 @@ async def cmd_meditations(m: Message):
     t = TOPICS["meditations"]
     await m.answer(f"Тема: {t['title']}\n{t['intro']}", reply_markup=kb_exercises("meditations"))
 
-# Текстовые триггеры (не зависят от cmd_work, всё делаем прямо здесь)
+# Текстовые триггеры (кнопки/сообщения)
 @router.message(F.text.in_({"🧩 Разобраться","Разобраться"}))
 async def open_work_text(m: Message):
     _ws_set(str(m.from_user.id), topic=None, ex=None, step=0)
@@ -441,6 +368,79 @@ async def cb_stop(cb: CallbackQuery):
     await cb.message.edit_text("Остановил упражнение. Можем просто поговорить или выбрать другую тему.")
     await cb.message.edit_reply_markup(reply_markup=None)
     await cb.answer()
+# -------------------- СВОБОДНЫЙ ЧАТ --------------------
+@router.message(F.text)
+async def on_text(m: Message):
+    if (m.text or '').startswith('/'):
+        return
+    global adapter
+    if adapter is None:
+        adapter = LLMAdapter()
+
+    chat_id = m.chat.id
+    tg_id = str(m.from_user.id)
+    user_text = (m.text or "").strip()
+
+    # если идёт сценарий «Рефлексия» — ведём по шагам
+    if tg_id in _reframe_state:
+        st = _reframe_state[tg_id]
+        step_idx = st["step_idx"]
+        key, _prompt = REFRAMING_STEPS[step_idx]
+        st["answers"][key] = user_text
+
+        if step_idx + 1 < len(REFRAMING_STEPS):
+            st["step_idx"] += 1
+            _, next_prompt = REFRAMING_STEPS[st["step_idx"]]
+            await m.answer(next_prompt, reply_markup=stop_keyboard())
+            return
+        else:
+            a = st["answers"]
+            summary = (
+                "🧩 Итог рефлексии\n\n"
+                f"• Мысль: {a.get('thought','—')}\n"
+                f"• Эмоция (1–10): {a.get('emotion','—')}\n"
+                f"• Действие: {a.get('behavior','—')}\n"
+                f"• Альтернативная мысль: {a.get('alternative','—')}\n\n"
+                "Как это меняет твой взгляд? Что маленькое и конкретное сделаем дальше?"
+            )
+            _reframe_state.pop(tg_id, None)
+            await m.answer(summary, reply_markup=save_insight_keyboard())
+            return
+
+    # safety
+    if is_crisis(user_text):
+        await m.answer(CRISIS_REPLY)
+        return
+
+    # мягкий RAG
+    try:
+        rag_ctx = await rag_search(user_text, k=3, max_chars=1200)
+    except Exception:
+        rag_ctx = ""
+
+    # длинная память (последние дни)
+    long_tail = _load_recent_turns(tg_id, days=7, limit=24)
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if rag_ctx:
+        messages.append({"role": "system", "content": "Короткий контекст:\n" + rag_ctx})
+    messages.extend(long_tail[-10:])          # из БД
+    messages.extend(DIALOG_HISTORY[chat_id])  # из RAM
+    messages.append({"role": "user", "content": user_text})
+
+    try:
+        # ВАЖНО: передаём user (раньше из-за этого падало)
+        answer = await adapter.complete_chat(user=tg_id, messages=messages, temperature=0.6)
+    except Exception as e:
+        answer = f"Не получилось обратиться к модели: {e}"
+
+    _push(chat_id, "user", user_text)
+    _push(chat_id, "assistant", answer)
+    _save_turn(tg_id, "user", user_text)
+    _save_turn(tg_id, "assistant", answer)
+
+    await m.answer(answer, reply_markup=None)
+
 # -------------------- ПРАКТИКИ --------------------
 @router.callback_query(F.data == "open_tools")
 async def on_open_tools(cb: CallbackQuery):

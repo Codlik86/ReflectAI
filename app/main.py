@@ -2,63 +2,41 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
-from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from .bot import router
-from .diag import router as diag_router  # ⬅️ добавили
+from app.bot import router
+from app.diag import router as diag_router
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 BASE_URL = os.getenv("WEBHOOK_BASE_URL")
-ALLOWED_UPDATES = [x.strip() for x in os.getenv("ALLOWED_UPDATES", "message,callback_query").split(",") if x.strip()]
 
-if not all([BOT_TOKEN, WEBHOOK_SECRET, BASE_URL]):
-    raise RuntimeError("Missing env: TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET, WEBHOOK_BASE_URL")
+# обязательно: и message, и callback_query
+ALLOWED_UPDATES = ("message", "callback_query")
 
-POMNI_VERSION = os.getenv("POMNI_VERSION", "pomni-v1.0")
-
-app = FastAPI()
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 dp.include_router(router)
+dp.include_router(diag_router)
 
-# Диагностические эндпоинты
-app.include_router(diag_router, prefix="/diag")  # ⬅️ добавили
+app = FastAPI()
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    # защитный заголовок
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        return Response(status_code=403)
+    update = Update.model_validate(await request.json(), context={"bot": bot})
+    await dp.feed_update(bot, update)
+    return Response(status_code=200)
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-@app.head("/health")
-async def health_head():
-    return Response(status_code=200)
-
-@app.get("/")
-async def root():
-    return {"ok": True}
-
-@app.get("/ready")
-async def ready():
-    return {"bot": True, "webhook": True}
-
-@app.get("/version")
-async def version():
-    return {"version": POMNI_VERSION}
-
-@app.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
-    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    if secret != WEBHOOK_SECRET:
-        raise HTTPException(status_code=401, detail="invalid secret")
-
-    data = await request.json()
-    update = Update.model_validate(data)
-    await dp.feed_update(bot, update)
-    return {"ok": True}
 
 @app.on_event("startup")
 async def on_startup():
