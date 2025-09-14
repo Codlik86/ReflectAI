@@ -24,7 +24,7 @@ async def safe_edit(message, *, text: str | None = None, reply_markup=None):
 from collections import defaultdict, deque
 from typing import Dict, Deque, List
 
-from aiogram import Router, F, F
+from aiogram import Router, F, F, F
 
 router = Router()
 
@@ -32,6 +32,20 @@ router = Router()
 
 
 
+
+
+# --- onboarding goals: instant ack to stop spinner ---
+@router.callback_query(F.data.startswith(("goal:", "goals:", "onb:goal", "onboard:goal")))
+async def cb_onb_goal_ack(cb: CallbackQuery):
+    # тут можно добавить реальную запись выбора в БД/стейт, пока просто подтверждаем
+    try:
+        await cb.answer("Отмечено")
+    except Exception:
+        # минимум — снять спиннер
+        try:
+            await cb.answer()
+        except Exception:
+            pass
 
 # --- helper: back to topic/exercises ---
 def back_markup_for_topic(topic_id: str) -> InlineKeyboardMarkup:
@@ -712,3 +726,11 @@ async def msg_onboarding_done(m: Message):
     except Exception:
         # на всякий
         await m.answer("Готово! Чем займёмся дальше?")
+
+# --- last-resort ack: never leave spinner hanging ---
+@router.callback_query()
+async def cb_ack_any_callback(cb: CallbackQuery):
+    try:
+        await cb.answer()
+    except Exception:
+        pass
