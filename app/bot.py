@@ -24,7 +24,7 @@ async def safe_edit(message, *, text: str | None = None, reply_markup=None):
 from collections import defaultdict, deque
 from typing import Dict, Deque, List
 
-from aiogram import Router, F, F, F
+from aiogram import Router, F, F, F, F
 
 router = Router()
 
@@ -38,6 +38,42 @@ router = Router()
 
 
 
+
+
+
+
+
+# --- universal DONE/FINISH gate: sends user to home screen ---
+@router.callback_query(F.data.func(lambda d: isinstance(d, str) and any(k in d.lower() for k in (
+    "onb:done","onboard:done","onboarding:done","goals:done","goal_done",
+    "start:done","start:finish","done","finish","complete","completed","готов"
+))))
+async def cb_done_gate(cb: CallbackQuery):
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+    text = get_home_text()
+    # Попробуем показать главное меню, если есть функция kb_main()
+    kb = None
+    try:
+        kb = kb_main()  # type: ignore[name-defined]
+    except Exception:
+        kb = None
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb)
+
+
+def get_home_text() -> str:
+    return (
+        "Что дальше? Несколько вариантов:\n\n"
+        "1) Хочешь просто поговорить — нажми «Поговорить». Без рамок и практик: поделись тем, что происходит, я поддержу и помогу разложить.\n"
+        "2) Нужно быстро разобраться — открой «Разобраться». Там короткие упражнения на 5–10 минут: от дыхания и анти-катастрофизации до плана при панике и S-T-O-P.\n"
+        "3) Хочешь разгрузить голову — в «Медитациях» будут короткие аудио для тревоги, сна и концентрации — добавим совсем скоро.\n\n"
+        "Пиши, как тебе удобно. Я рядом ❤️"
+    )
 
 
 def get_home_text() -> str:
