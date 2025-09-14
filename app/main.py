@@ -3,31 +3,35 @@ load_dotenv()
 
 import os
 from fastapi import FastAPI, Request, Response
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Update
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from app.bot import router
-from app.diag import router as diag_router
+from app.bot import router as app_router
+
+# diag router is optional and must be an aiogram Router()
+try:
+    from app.diag import router as diag_router  # may not be aiogram Router or may not exist
+except Exception:
+    diag_router = None
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 
-# обязательно: и message, и callback_query
 ALLOWED_UPDATES = ("message", "callback_query")
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-dp.include_router(router)
-dp.include_router(diag_router)
+dp.include_router(app_router)
+if isinstance(diag_router, Router):
+    dp.include_router(diag_router)
 
 app = FastAPI()
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
-    # защитный заголовок
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         return Response(status_code=403)
     update = Update.model_validate(await request.json(), context={"bot": bot})

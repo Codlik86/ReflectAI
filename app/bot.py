@@ -6,6 +6,9 @@ from collections import defaultdict, deque
 from typing import Dict, Deque, List
 
 from aiogram import Router, F
+
+router = Router()
+
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import text as sql_text
@@ -212,7 +215,7 @@ async def onb_goal_done(cb: CallbackQuery):
         "3) Хочешь структуру — попробуем «Рефлексию» или подберём «Микрошаг».\n\n"
         "Пиши как удобно — я здесь ❤️"
     )
-    await cb.message.answer(msg, reply_markup=tools_keyboard())
+    await cb.message.answer(msg, reply_markup=None)
     await cb.answer()
 
 @router.message(Command("help"))
@@ -224,7 +227,7 @@ async def help_cmd(m: Message):
         "• /insights — показать сохранённые инсайты\n"
         "• /export — выгрузить инсайты\n"
         "• /delete_me — удалить все данные",
-        reply_markup=tools_keyboard()
+        reply_markup=None
     )
 
 @router.message(Command("privacy"))
@@ -287,7 +290,7 @@ async def cmd_meditations(m: Message):
     t = TOPICS["meditations"]
     await m.answer(f"Тема: {t['title']}\n{t['intro']}", reply_markup=kb_exercises("meditations"))
 
-# Текстовые триггеры (кнопки/сообщения)
+# Текстовые триггеры
 @router.message(F.text.in_({"🧩 Разобраться","Разобраться"}))
 async def open_work_text(m: Message):
     _ws_set(str(m.from_user.id), topic=None, ex=None, step=0)
@@ -447,7 +450,7 @@ async def on_open_tools(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
     if not debounce_ok(user_id):
         await cb.answer(); return
-    await cb.message.answer("Чем займёмся?", reply_markup=tools_keyboard())
+    await cb.message.answer("Чем займёмся?", reply_markup=None)
     await cb.answer()
 
 @router.callback_query(F.data == "tool_reframe")
@@ -492,7 +495,7 @@ async def on_tool_micro(cb: CallbackQuery):
     _push(chat_id, "assistant", answer)
     _save_turn(tg_id, "assistant", answer)
 
-    await cb.message.answer(answer, reply_markup=tools_keyboard())
+    await cb.message.answer(answer, reply_markup=None)
     await cb.answer()
 
 @router.callback_query(F.data == "tool_stop")
@@ -500,7 +503,7 @@ async def on_tool_stop(cb: CallbackQuery):
     user_id = str(cb.from_user.id)
     stop_user_task(user_id)
     _reframe_state.pop(user_id, None)
-    await cb.message.answer("Остановил. Чем могу помочь дальше?", reply_markup=tools_keyboard())
+    await cb.message.answer("Остановил. Чем могу помочь дальше?", reply_markup=None)
     await cb.answer()
 
 # -------------------- ИНСАЙТЫ --------------------
