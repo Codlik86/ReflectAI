@@ -28,6 +28,18 @@ from aiogram import Router, F
 
 router = Router()
 
+
+# --- ephemeral per-user state for exercises ---
+_WS = {}
+def _ws_get(uid: str):
+    return _WS.get(uid)
+def _ws_set(uid: str, **fields):
+    prev = _WS.get(uid) or {}
+    prev.update(fields)
+    _WS[uid] = prev
+def _ws_reset(uid: str):
+    _WS.pop(uid, None)
+
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
@@ -305,31 +317,30 @@ async def cb_pick_topic(cb: CallbackQuery):
     await cb.answer()
 
 @router.callback_query(F.data.startswith("work:ex:"))
-async def cb_pick_ex(cb: CallbackQuery):
-    _,_,topic_id, ex_id = cb.data.split(":")
+async def cb_pick_exercise(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    topic_id, ex_id = parts[2], parts[3]
+    t = TOPICS.get(topic_id, {})
+    ex = None
+    for item in t.get("exercises", []):
+        if item.get("id") == ex_id:
+            ex = item
+            break
+    if ex is None:
+        await cb.answer("Не нашёл упражнение", show_alert=True)
+        return
+    steps = ex.get("steps", [])
+    intro = ex.get("intro")
+    steps_all = ([intro] + steps) if intro else steps
+    if not steps_all:
+        await cb.answer("Пустое упражнение", show_alert=True)
+        return
     uid = str(cb.from_user.id)
-    _ws_set(uid, topic=topic_id, ex=(topic_id, ex_id), step=0)
-    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
-    if ("steps" not in ex or not ex.get("steps")) and ex.get("text"):
-        await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{ex['text']}", reply_markup=kb_back_to_exercises(topic_id))
-        return await cb.answer()
-    step0 = ex.get("steps", ["(пусто)"])[0]
-    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{step0}", reply_markup=kb_stepper())
-    await cb.answer()
-    uid = str(cb.from_user.id)
-    _ws_set(uid, topic=topic_id, ex=(topic_id, ex_id), step=0)
-    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
-    if ("steps" not in ex or not ex.get("steps")) and ex.get("text"):
-        await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{ex['text']}", reply_markup=kb_back_to_exercises(topic_id))
-        return await cb.answer()
-    step0 = ex.get("steps", ["(пусто)"])[0]
-    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{step0}", reply_markup=kb_stepper())
-    await cb.answer()
-    uid = str(cb.from_user.id)
-    _ws_set(uid, topic=topic_id, ex=(topic_id, ex_id), step=0)
-    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
-    await cb.message.edit_text(f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{ex['steps'][0]}")
-    await cb.message.edit_reply_markup(reply_markup=kb_stepper())
+    _ws_set(uid, topic=topic_id, ex=ex_id, step=0)
+    topic_title = t.get("title", "Тема")
+    ex_title = ex.get("title", "Упражнение")
+    text = render_step_text(topic_title, ex_title, steps_all[0])
+    await safe_edit(cb.message, text=text, reply_markup=kb_stepper(topic_id, ex_id, 0, len(steps_all)))
     await cb.answer()
 
 @router.callback_query(F.data == "work:next")
@@ -589,3 +600,43 @@ def kb_stepper():
         [InlineKeyboardButton(text="▶️ Далее", callback_data="work:next")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="work:back_ex"), InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")],
     ])
+
+@router.callback_query(F.data.startswith("work:step:"))
+async def cb_step(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    topic_id, ex_id = parts[2], parts[3]
+    t = TOPICS.get(topic_id, {})
+    ex = None
+    for item in t.get("exercises", []):
+        if item.get("id") == ex_id:
+            ex = item
+            break
+    if ex is None:
+        await cb.answer("Не нашёл упражнение", show_alert=True)
+        return
+    steps = ex.get("steps", [])
+    intro = ex.get("intro")
+    steps_all = ([intro] + steps) if intro else steps
+    total = len(steps_all)
+    if not total:
+        await cb.answer("Пустое упражнение", show_alert=True)
+        return
+    uid = str(cb.from_user.id)
+    st = _ws_get(uid) or {}
+    cur = 0
+    if st.get("topic") == topic_id and st.get("ex") == ex_id:
+        cur = int(st.get("step", 0)) + 1
+    else:
+        cur = 1
+    if cur >= total:
+        await safe_edit(cb.message, text="Готово. Хочешь выбрать другое упражнение?", reply_markup=kb_exercises(topic_id))
+        _ws_set(uid, topic=topic_id, ex=None, step=0)
+        await cb.answer()
+        return
+    _ws_set(uid, topic=topic_id, ex=ex_id, step=cur)
+    topic_title = t.get("title", "Тема")
+    ex_title = ex.get("title", "Упражнение")
+    text = render_step_text(topic_title, ex_title, steps_all[cur])
+    await safe_edit(cb.message, text=text, reply_markup=kb_stepper(topic_id, ex_id, cur, total))
+    await cb.answer()
+
