@@ -29,6 +29,16 @@ from aiogram import Router, F
 router = Router()
 
 
+
+# ------- helpers: exercise render -------
+def render_step_text(topic_title: str, ex_title: str, step_text: str) -> str:
+    header = '🧩 ' + topic_title + ' → ' + ex_title
+    return header + '\n\n' + step_text
+
+def render_text_exercise(topic_title: str, ex_title: str, text: str) -> str:
+    header = '🧩 ' + topic_title + ' → ' + ex_title
+    return header + '\n\n' + text
+
 # --- ephemeral per-user state for exercises ---
 _WS = {}
 def _ws_get(uid: str):
@@ -639,4 +649,12 @@ async def cb_step(cb: CallbackQuery):
     text = render_step_text(topic_title, ex_title, steps_all[cur])
     await safe_edit(cb.message, text=text, reply_markup=kb_stepper(topic_id, ex_id, cur, total))
     await cb.answer()
+
+@router.callback_query(F.data.in_({'onboarding:done','start:done','done'}))
+async def cb_onboarding_done(cb: CallbackQuery):
+    await cb.answer()
+    try:
+        await cb.message.edit_text('Готово! Чем займёмся дальше?', reply_markup=kb_main())
+    except Exception:
+        await cb.message.answer('Готово! Чем займёмся дальше?', reply_markup=kb_main())
 
