@@ -10,6 +10,7 @@ EMO_GEAR = "\\u2699\\ufe0f"  # ⚙️
 
 from aiogram.exceptions import TelegramBadRequest
 from aiogram import F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
 async def safe_edit(message, *, text: str | None = None, reply_markup=None):
     """
@@ -736,6 +737,14 @@ async def on_save_insight(cb: CallbackQuery):
         [InlineKeyboardButton(text="🎧 Медитации",     callback_data="open:meditations")],
     ])
 
+def kb_cta_home() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Поговорить", callback_data="cta:talk")],
+        [InlineKeyboardButton(text="🧩 Разобраться", callback_data="cta:work")],
+        [InlineKeyboardButton(text="🎧 Медитации", callback_data="cta:meditations")],
+    ])
+
+
 def kb_topics():
     rows = []
     for key in ["panic","anxiety","sadness","anger","sleep","meditations"]:
@@ -920,3 +929,20 @@ async def cb_open_shortcuts(cb: CallbackQuery):
             await cb.message.answer("Скоро добавим аудио-медитации и плейлисты. 💿")
         await cb.answer()
         return
+
+
+@router.callback_query(F.data == "onb:done")
+async def cb_onboarding_done(cb: CallbackQuery):
+    # Тёплый текст + CTA-кнопки
+    text = (
+        "Что дальше? Несколько вариантов:\n\n"
+        "1) Если хочется просто поговорить — нажми «Поговорить». "
+        "Поделись, что у тебя на душе, а я поддержу и помогу разложить.\n"
+        "2) Нужно быстро разобраться — зайди в «Разобраться». "
+        "Там короткие упражнения: дыхание, КПТ-мини, заземление и др.\n"
+        "3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)\n\n"
+        "Пиши, как удобно — я рядом ❤️"
+    )
+    await cb.message.answer(text, reply_markup=kb_cta_home())
+    await cb.answer()
+
