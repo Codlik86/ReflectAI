@@ -225,59 +225,18 @@ async def onb_goal_pick(cb: CallbackQuery):
     }
     await cb.answer(f"Добавил: {names.get(code, code)}", show_alert=False)
 
-@router.callback_query(F.data == "goal_done")
-async def onb_goal_done(cb: CallbackQuery):
-    msg = (
-        "Что дальше? Несколько вариантов:\n\n"
-        "1) Расскажи, что у тебя на душе — коротко или подробно. Я помогу разложить и нащупать опору.\n"
-        "2) Нужно быстро выдохнуть — дам дыхательное упражнение на 1 минуту.\n"
-        "3) Хочешь структуру — попробуем «Рефлексию» или подберём «Микрошаг».\n\n"
-        "Пиши как удобно — я здесь ❤️"
-    )
-    await cb.message.answer(msg, reply_markup=None)
+@router.callback_query(F.data.startswith("work:topic:"))
+async def cb_pick_topic(cb: CallbackQuery):
+    topic_id = cb.data.split(":")[2]
+    t = TOPICS.get(topic_id, {"title": "Тема"})
+    title = t.get("title", "Тема")
+    intro = t.get("intro")
+    if intro:
+        text = "Тема: " + title + "\n\n" + intro
+    else:
+        text = "Ок, остаёмся в теме «" + title + "». Выбери упражнение ниже."
+    await safe_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
     await cb.answer()
-
-@router.message(Command("help"))
-async def help_cmd(m: Message):
-    await m.answer(
-        "Я помогаю осмыслять переживания и подбирать мягкие шаги. В кризисе подскажу, что делать.\n\n"
-        "Команды:\n"
-        "• /privacy — уровень приватности (none | insights | all)\n"
-        "• /insights — показать сохранённые инсайты\n"
-        "• /export — выгрузить инсайты\n"
-        "• /delete_me — удалить все данные",
-        reply_markup=None
-    )
-
-@router.message(Command("privacy"))
-async def privacy_cmd(m: Message):
-    await m.answer(
-        "Выбери уровень приватности (введи одним словом):\n"
-        "• none — ничего не хранить\n"
-        "• insights — хранить только сохранённые инсайты (по умолчанию)\n"
-        "• all — хранить весь диалог для персонализации\n"
-    )
-
-@router.message(F.text.in_({"none", "insights", "all"}))
-async def set_privacy(m: Message):
-    level = (m.text or "").strip()
-    with db_session() as s:
-        u = s.query(User).filter(User.tg_id == str(m.from_user.id)).first()
-        if u:
-            u.privacy_level = level
-            s.commit()
-    _set_consent(str(m.from_user.id), level == "all")
-    await m.answer(f"Ок. Уровень приватности: {level}")
-
-
-
-# -------------------- ФЛОУ «РАЗОБРАТЬСЯ (УПРАЖНЕНИЯ)» --------------------
-def kb_topics() -> InlineKeyboardMarkup:
-    rows = []
-    for key in ["panic","anxiety","sadness","anger","sleep","meditations"]:
-        title = TOPICS[key]["title"]
-        rows.append([InlineKeyboardButton(text=title, callback_data=f"work:topic:{key}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_exercises(topic_id: str) -> InlineKeyboardMarkup:
     t = TOPICS[topic_id]
