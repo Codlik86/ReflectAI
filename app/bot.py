@@ -934,3 +934,18 @@ async def _kb_main_any():
     except TypeError:
         # kb_main может быть синхронной функцией
         return kb()
+
+
+def kb_main() -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="\U0001F4AC Поговорить")],
+        [KeyboardButton(text="\U0001F9E9 Разобраться")],
+        [KeyboardButton(text="\U0001F9D8\u200d\u2640\ufe0f Медитации")],
+        [KeyboardButton(text="\u2699\ufe0f Настройки")],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Меню"
+    )
