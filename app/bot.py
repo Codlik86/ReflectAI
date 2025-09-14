@@ -297,9 +297,10 @@ async def cb_pick_topic(cb: CallbackQuery):
     t = TOPICS.get(topic_id, {"title": "Тема"})
     title = t.get("title", "Тема")
     intro = t.get("intro")
-    text = f"Тема: {title}
-
-{intro}" if intro else f"Ок, остаёмся в теме «{title}». Выбери упражнение ниже."
+    if intro:
+        text = "Тема: " + title + "\n\n" + intro
+    else:
+        text = "Ок, остаёмся в теме «" + title + "». Выбери упражнение ниже."
     await safe_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
     await cb.answer()
 
