@@ -13,6 +13,7 @@ from sqlalchemy import text as sql_text
 from app.llm_adapter import LLMAdapter
 from app.prompts import SYSTEM_PROMPT
 from app.safety import is_crisis, CRISIS_REPLY
+from app.exercises import TOPICS
 from app.db import db_session, User, Insight
 from app.tools import (
     REFRAMING_STEPS,
@@ -246,25 +247,6 @@ async def set_privacy(m: Message):
     _set_consent(str(m.from_user.id), level == "all")
     await m.answer(f"Ок. Уровень приватности: {level}")
 
-
-@router.message(F.text.in_({"🧩 Разобраться","Разобраться"}))
-async def open_work_text(m: Message):
-    await cmd_work(m)
-
-
-@router.message(F.text.in_({"🎧 Медитации","Медитации"}))
-async def open_medit_text(m: Message):
-    await cmd_meditations(m)
-
-
-@router.message(F.text.in_({"⚙️ Настройки","Настройки"}))
-async def open_settings_text(m: Message):
-    await m.answer("Тут будут настройки (тон, подход, приватность). Пока — в разработке.")
-
-
-@router.message(F.text.in_({"💬 Поговорить","Поговорить"}))
-async def talk_text(m: Message):
-    await m.answer("Я рядом. Можешь просто написать, что на душе.")
 # -------------------- СВОБОДНЫЙ ЧАТ --------------------
 @router.message(F.text)
 async def on_text(m: Message):
@@ -336,8 +318,129 @@ async def on_text(m: Message):
     _save_turn(tg_id, "user", user_text)
     _save_turn(tg_id, "assistant", answer)
 
-    await m.answer(answer, reply_markup=tools_keyboard())
+    await m.answer(answer, reply_markup=None)
 
+
+
+# -------------------- ФЛОУ «РАЗОБРАТЬСЯ (УПРАЖНЕНИЯ)» --------------------
+def kb_topics() -> InlineKeyboardMarkup:
+    rows = []
+    for key in ["panic","anxiety","sadness","anger","sleep","meditations"]:
+        title = TOPICS[key]["title"]
+        rows.append([InlineKeyboardButton(text=title, callback_data=f"work:topic:{key}")])
+    rows.append([InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_exercises(topic_id: str) -> InlineKeyboardMarkup:
+    t = TOPICS[topic_id]
+    rows = [[InlineKeyboardButton(text=ex["title"], callback_data=f"work:ex:{topic_id}:{ex['id']}")] for ex in t["exercises"]]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к темам", callback_data="work:back_topics")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_stepper() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶️ Далее", callback_data="work:next")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="work:back_ex"),
+         InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")],
+    ])
+
+_work_state: dict[str, dict] = {}  # user_id -> {"topic": str|None, "ex": (topic_id, ex_id)|None, "step": int}
+def _ws_get(uid: str) -> dict: return _work_state.get(uid, {"topic": None, "ex": None, "step": 0})
+def _ws_set(uid: str, **kw) -> dict: st = _ws_get(uid); st.update(kw); _work_state[uid] = st; return st
+
+@router.message(Command("work"))
+async def cmd_work(m: Message):
+    _ws_set(str(m.from_user.id), topic=None, ex=None, step=0)
+    await m.answer("Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
+
+@router.message(Command("meditations"))
+async def cmd_meditations(m: Message):
+    uid = str(m.from_user.id)
+    _ws_set(uid, topic="meditations", ex=None, step=0)
+    t = TOPICS["meditations"]
+    await m.answer(f"Тема: {t['title']}\n{t['intro']}", reply_markup=kb_exercises("meditations"))
+
+# Текстовые триггеры (не зависят от cmd_work, всё делаем прямо здесь)
+@router.message(F.text.in_({"🧩 Разобраться","Разобраться"}))
+async def open_work_text(m: Message):
+    _ws_set(str(m.from_user.id), topic=None, ex=None, step=0)
+    await m.answer("Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
+
+@router.message(F.text.in_({"🎧 Медитации","Медитации"}))
+async def open_medit_text(m: Message):
+    uid = str(m.from_user.id)
+    _ws_set(uid, topic="meditations", ex=None, step=0)
+    t = TOPICS["meditations"]
+    await m.answer(f"Тема: {t['title']}\n{t['intro']}", reply_markup=kb_exercises("meditations"))
+
+@router.message(F.text.in_({"⚙️ Настройки","Настройки"}))
+async def open_settings_text(m: Message):
+    await m.answer("Тут будут настройки (тон, подход, приватность). Пока — в разработке.")
+
+@router.message(F.text.in_({"💬 Поговорить","Поговорить"}))
+async def talk_text(m: Message):
+    await m.answer("Я рядом. Можешь просто написать, что на душе.")
+
+@router.callback_query(F.data.startswith("work:topic:"))
+async def cb_pick_topic(cb: CallbackQuery):
+    topic_id = cb.data.split(":")[2]
+    uid = str(cb.from_user.id)
+    _ws_set(uid, topic=topic_id, ex=None, step=0)
+    t = TOPICS[topic_id]
+    await cb.message.edit_text(f"Тема: {t['title']}\n{t['intro']}")
+    await cb.message.edit_reply_markup(reply_markup=kb_exercises(topic_id))
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("work:ex:"))
+async def cb_pick_ex(cb: CallbackQuery):
+    _,_,topic_id, ex_id = cb.data.split(":")
+    uid = str(cb.from_user.id)
+    _ws_set(uid, topic=topic_id, ex=(topic_id, ex_id), step=0)
+    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
+    await cb.message.edit_text(f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{ex['steps'][0]}")
+    await cb.message.edit_reply_markup(reply_markup=kb_stepper())
+    await cb.answer()
+
+@router.callback_query(F.data == "work:next")
+async def cb_next(cb: CallbackQuery):
+    uid = str(cb.from_user.id); st = _ws_get(uid)
+    if not st.get("ex"): return await cb.answer()
+    topic_id, ex_id = st["ex"]
+    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
+    step = st.get("step",0)+1
+    if step >= len(ex["steps"]):
+        _ws_set(uid, ex=None, step=0)
+        await cb.message.edit_text("✅ Готово. Хочешь выбрать другое упражнение или тему?")
+        await cb.message.edit_reply_markup(reply_markup=kb_exercises(topic_id))
+        return await cb.answer()
+    _ws_set(uid, step=step)
+    await cb.message.edit_text(f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{ex['steps'][step]}")
+    await cb.answer()
+
+@router.callback_query(F.data == "work:back_ex")
+async def cb_back_ex(cb: CallbackQuery):
+    uid = str(cb.from_user.id); st = _ws_get(uid)
+    topic_id = st.get("topic")
+    if not topic_id: return await cb.answer()
+    _ws_set(uid, ex=None, step=0)
+    t = TOPICS[topic_id]
+    await cb.message.edit_text(f"Тема: {t['title']}\n{t['intro']}")
+    await cb.message.edit_reply_markup(reply_markup=kb_exercises(topic_id))
+    await cb.answer()
+
+@router.callback_query(F.data == "work:back_topics")
+async def cb_back_topics(cb: CallbackQuery):
+    uid = str(cb.from_user.id); _ws_set(uid, topic=None, ex=None, step=0)
+    await cb.message.edit_text("Выбери тему, с которой хочешь поработать:")
+    await cb.message.edit_reply_markup(reply_markup=kb_topics())
+    await cb.answer()
+
+@router.callback_query(F.data == "work:stop")
+async def cb_stop(cb: CallbackQuery):
+    uid = str(cb.from_user.id); _ws_set(uid, topic=None, ex=None, step=0)
+    await cb.message.edit_text("Остановил упражнение. Можем просто поговорить или выбрать другую тему.")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer()
 # -------------------- ПРАКТИКИ --------------------
 @router.callback_query(F.data == "open_tools")
 async def on_open_tools(cb: CallbackQuery):
