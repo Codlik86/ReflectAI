@@ -31,6 +31,17 @@ router = Router()
 
 
 
+
+# --- stepper builder with args (adapter) ---
+def kb_stepper2(topic_id: str, ex_id: str, cur: int, total: int) -> InlineKeyboardMarkup:
+    is_last = (cur >= total-1)
+    next_text = "✔️ Завершить" if is_last else "▶️ Далее"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=next_text, callback_data=f"work:step:{topic_id}:{ex_id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"work:topic:{topic_id}"),
+         InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")],
+    ])
+
 # minimal main menu (auto-added)
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -360,7 +371,7 @@ async def cb_pick_exercise(cb: CallbackQuery):
     topic_title = t.get("title", "Тема")
     ex_title = ex.get("title", "Упражнение")
     text = render_step_text(topic_title, ex_title, steps_all[0])
-    await safe_edit(cb.message, text=text, reply_markup=kb_stepper(topic_id, ex_id, 0, len(steps_all)))
+    await safe_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, 0, len(steps_all)))
     await cb.answer()
 
 @router.callback_query(F.data == "work:next")
@@ -377,7 +388,7 @@ async def cb_next(cb: CallbackQuery):
         await safe_edit(cb.message, text="✅ Готово. Хочешь выбрать другое упражнение или тему?", reply_markup=kb_exercises(topic_id))
         return await cb.answer()
     _ws_set(uid, step=step)
-    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{steps[step]}", reply_markup=kb_stepper())
+    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{steps[step]}", reply_markup=kb_stepper2())
     await cb.answer()
     if not st.get("ex"):
         return await cb.answer()
@@ -390,7 +401,7 @@ async def cb_next(cb: CallbackQuery):
         await safe_edit(cb.message, text="✅ Готово. Хочешь выбрать другое упражнение или тему?", reply_markup=kb_exercises(topic_id))
         return await cb.answer()
     _ws_set(uid, step=step)
-    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{steps[step]}", reply_markup=kb_stepper())
+    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{steps[step]}", reply_markup=kb_stepper2())
     await cb.answer()
     if not st.get("ex"): return await cb.answer()
     topic_id, ex_id = st["ex"]
@@ -657,7 +668,7 @@ async def cb_step(cb: CallbackQuery):
     topic_title = t.get("title", "Тема")
     ex_title = ex.get("title", "Упражнение")
     text = render_step_text(topic_title, ex_title, steps_all[cur])
-    await safe_edit(cb.message, text=text, reply_markup=kb_stepper(topic_id, ex_id, cur, total))
+    await safe_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, cur, total))
     await cb.answer()
 
 @router.callback_query(F.data.in_({'onboarding:done','start:done','done'}))
