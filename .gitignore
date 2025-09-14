@@ -21,3 +21,7 @@ patch_*.py
 # local patches & backups
 app/bot.py.bak.*
 patch_*.py
+
+# local patches & backups
+app/bot.py.bak.*
+patch_*.py
