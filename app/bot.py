@@ -1,6 +1,7 @@
 # app/bot.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+from textwrap import dedent
 
 # --- Emoji (safe Unicode escapes) ---
 EMO_TALK = "\\U0001F4AC"       # 💬
@@ -886,23 +887,22 @@ def kb_after_onboard_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 @router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready") | (F.data == "onb:done") | (F.data == "gate:done") | (F.data == "intro:done"))
-@router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready") | (F.data == "onb:done") | (F.data == "gate:done") | (F.data == "intro:done"))
+@router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready"))
 async def cb_onboard_done(cb: CallbackQuery):
-    text = (
-        "Что дальше? Несколько вариантов:\n\n"
-        "1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.\n"
-        "2) Нужно разобраться прямо сейчас — открой «Разобраться»: короткие упражнения на 2–5 минут.\n"
-        "3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».\n\n"
-        "Пиши, как удобно — я рядом ❤️"
-    )
-    # 1) отправляем текст С ИНЛАЙН-КНОПКАМИ
-    await cb.message.answer(text, reply_markup=kb_after_onboard_inline())
-    # 2) отдельно вернём нижнюю клавиатуру, чтобы она не пропала
-    main_kb = await _kb_main_any()
-    if main_kb is not None:
-        await cb.message.answer("Меню снизу доступно всегда.", reply_markup=main_kb)
-    await cb.answer()
+    text = dedent("""        Что дальше? Несколько вариантов:
 
+        1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.
+        2) Нужно разобраться прямо сейчас — открой «Разобраться»: короткие упражнения на 2–5 минут.
+        3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».
+
+        Пиши, как удобно — я рядом ❤️
+    """)
+    # Пытаемся отредактировать сообщение, если нельзя — шлём новым
+    try:
+        await safe_edit(cb.message, text=text, reply_markup=kb_cta_home())
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb_cta_home())
+    await cb.answer()
 @router.callback_query(F.data == "cta:talk")
 async def cb_cta_talk(cb: CallbackQuery):
     await cb.message.answer("Я здесь. Можешь просто написать, что на душе — начнём разговор.", reply_markup=(await kb_main() if callable(globals().get('kb_main')) else kb_main()))
@@ -949,3 +949,8 @@ def kb_main() -> ReplyKeyboardMarkup:
         one_time_keyboard=False,
         input_field_placeholder="Меню"
     )
+
+
+# alias для CTA после онбординга (источник — kb_cta_home)
+def kb_onboard_cta():
+    return kb_cta_home()
