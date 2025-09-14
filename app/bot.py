@@ -2,6 +2,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+# --- Emoji (safe Unicode escapes) ---
+EMO_TALK = "\\U0001F4AC"       # 💬
+EMO_PUZZLE = "\\U0001F9E9"     # 🧩
+EMO_HEADPHONES = "\\U0001F3A7" # 🎧
+EMO_GEAR = "\\u2699\\ufe0f"  # ⚙️
+
 from aiogram.exceptions import TelegramBadRequest
 
 async def safe_edit(message, *, text: str | None = None, reply_markup=None):
@@ -842,3 +848,14 @@ async def onb_goal_done(cb: CallbackQuery):
         await cb.message.edit_text(text)
     except Exception:
         await cb.message.answer(text, reply_markup=None)
+
+
+def kb_main() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=f"{EMO_TALK} Поговорить"), KeyboardButton(text=f"{EMO_PUZZLE} Разобраться")],
+            [KeyboardButton(text=f"{EMO_HEADPHONES} Медитации"), KeyboardButton(text=f"{EMO_GEAR} Настройки")],
+        ],
+        resize_keyboard=True
+    )
+
