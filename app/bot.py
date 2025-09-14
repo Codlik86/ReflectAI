@@ -9,8 +9,6 @@ EMO_HEADPHONES = "\\U0001F3A7" # 🎧
 EMO_GEAR = "\\u2699\\ufe0f"  # ⚙️
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram import F
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
 async def safe_edit(message, *, text: str | None = None, reply_markup=None):
     """
@@ -175,7 +173,7 @@ def _ws_reset(uid: str):
     _WS.pop(uid, None)
 
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import text as sql_text
 
@@ -718,26 +716,18 @@ async def on_tool_stop(cb: CallbackQuery):
     await cb.answer()
 
 # -------------------- ИНСАЙТЫ --------------------
-@router.callback_query(F.data == "goal_done")
-async def onb_goal_done(cb):
-    text = (
-        "Что дальше? Несколько вариантов:\n\n"
-        "1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.\n"
-        "2) Нужно разобраться прямо сейчас — открой «Разобраться»: короткие упражнения на 2–5 минут.\n"
-        "3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».\n\n"
-        "Пиши, как удобно — я рядом ❤️"
-    )
-    kb = kb_main() if 'kb_main' in globals() else None
-    await cb.message.answer(text, reply_markup=kb)
-    await cb.answer()
-def kb_cta_home() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Поговорить", callback_data="cta:talk")],
-        [InlineKeyboardButton(text="🧩 Разобраться", callback_data="cta:work")],
-        [InlineKeyboardButton(text="🎧 Медитации", callback_data="cta:meditations")],
-    ])
-
-
+@router.callback_query(F.data == "save_insight")
+async def on_save_insight(cb: CallbackQuery):
+    msg = cb.message
+    text = (msg.text or msg.caption or "").strip() if msg else ""
+    if not text:
+        await cb.answer("Нечего сохранить", show_alert=True)
+        return
+    preview = text if len(text) <= 1000 else text[:1000]
+    with db_session() as s:
+        s.add(Insight(tg_id=str(cb.from_user.id), text=preview))
+        s.commit()
+    await cb.answer("Сохранено ✅", show_alert=False)
 def kb_topics():
     rows = []
     for key in ["panic","anxiety","sadness","anger","sleep","meditations"]:
@@ -870,10 +860,33 @@ def kb_main() -> ReplyKeyboardMarkup:
     )
 
 
+async def kb_main() -> ReplyKeyboardMarkup:
+    talk = "\U0001F5E3\ufe0f Поговорить"               # 🗣️
+    work = "\U0001F9E9 Разобраться"                     # 🧩
+    meds = "\U0001F9D8\u200d\u2640\ufe0f Медитации"  # 🧘‍♀️
+    sett = "\u2699\ufe0f Настройки"                    # ⚙️
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=talk)],
+            [KeyboardButton(text=work)],
+            [KeyboardButton(text=meds)],
+            [KeyboardButton(text=sett)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        selective=False,
+    )
 
-@router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready"))
-@router.callback_query(F.data == "goal_done")
-async def onb_goal_done(cb):
+def kb_after_onboard_inline() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="\U0001F5E3\ufe0f Поговорить", callback_data="cta:talk")],
+        [InlineKeyboardButton(text="\U0001F9E9 Разобраться", callback_data="cta:work")],
+        [InlineKeyboardButton(text="\U0001F9D8\u200d\u2640\ufe0f Медитации", callback_data="cta:meds")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+@router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready") | (F.data == "onb:done") | (F.data == "gate:done") | (F.data == "intro:done"))
+async def cb_onboard_done(cb: CallbackQuery):
     text = (
         "Что дальше? Несколько вариантов:\n\n"
         "1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.\n"
@@ -881,67 +894,33 @@ async def onb_goal_done(cb):
         "3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».\n\n"
         "Пиши, как удобно — я рядом ❤️"
     )
-    kb = kb_main() if 'kb_main' in globals() else None
-    await cb.message.answer(text, reply_markup=kb)
-    await cb.answer()
-def _has_fn(name: str) -> bool:
-    return name in globals() and callable(globals()[name])
-
-@router.callback_query(F.data.startswith("open:"))
-async def cb_open_shortcuts(cb: CallbackQuery):
-    action = cb.data.split(":", 1)[1]
-    # Переадресуем в существующие команды, если они есть.
-    if action == "talk":
-        # свободный чат: просто пригласим написать
-        await cb.message.answer("Я рядом. Можешь просто написать, что на душе.")
-        await cb.answer()
-        return
-
-    if action == "work":
-        if _has_fn("cmd_work"):
-            await globals()["cmd_work"](cb.message)
-        elif _has_fn("open_work_text"):
-            await globals()["open_work_text"](cb)
-        else:
-            await cb.message.answer("Открываю упражнения…")
-        await cb.answer()
-        return
-
-    if action == "meditations":
-        if _has_fn("cmd_meditations"):
-            await globals()["cmd_meditations"](cb.message)
-        elif _has_fn("open_meditations_text"):
-            await globals()["open_meditations_text"](cb)
-        else:
-            await cb.message.answer("Скоро добавим аудио-медитации и плейлисты. 💿")
-        await cb.answer()
-        return
-
-
-@router.callback_query(F.data == "onb:done")
-async def cb_onboarding_done(cb: CallbackQuery):
-    # Тёплый текст + CTA-кнопки
-    text = (
-        "Что дальше? Несколько вариантов:\n\n"
-        "1) Если хочется просто поговорить — нажми «Поговорить». "
-        "Поделись, что у тебя на душе, а я поддержу и помогу разложить.\n"
-        "2) Нужно быстро разобраться — зайди в «Разобраться». "
-        "Там короткие упражнения: дыхание, КПТ-мини, заземление и др.\n"
-        "3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)\n\n"
-        "Пиши, как удобно — я рядом ❤️"
-    )
-    await cb.message.answer(text, reply_markup=kb_cta_home())
+    await safe_edit(cb.message, text=text, reply_markup=kb_after_onboard_inline())
+    # на всякий случай вернём и нижнюю клавиатуру
+    try:
+        reply_kb = await kb_main() if callable(globals().get('kb_main')) else kb_main()
+    except TypeError:
+        reply_kb = kb_main()  # если kb_main не async
+    await cb.message.answer("Меню снизу доступно всегда.", reply_markup=reply_kb)
     await cb.answer()
 
+@router.callback_query(F.data == "cta:talk")
+async def cb_cta_talk(cb: CallbackQuery):
+    await cb.message.answer("Я здесь. Можешь просто написать, что на душе — начнём разговор.", reply_markup=(await kb_main() if callable(globals().get('kb_main')) else kb_main()))
+    await cb.answer()
 
+def _kb_topics_from_TOPICS() -> InlineKeyboardMarkup:
+    rows = []
+    for key, t in TOPICS.items():
+        title = t.get("title", key)
+        rows.append([InlineKeyboardButton(text=title, callback_data=f"work:topic:{key}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def kb_main():
-    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="\U0001F4AC Поговорить")],
-            [KeyboardButton(text="\U0001F9E9 Разобраться")],
-            [KeyboardButton(text="\U0001F9D8\u200D\u2640\uFE0F Медитации")],
-        ],
-        resize_keyboard=True
-    )
+@router.callback_query(F.data == "cta:work")
+async def cb_cta_work(cb: CallbackQuery):
+    await cb.message.answer("Выбери тему, с которой хочется разобраться:", reply_markup=_kb_topics_from_TOPICS())
+    await cb.answer()
+
+@router.callback_query(F.data == "cta:meds")
+async def cb_cta_meds(cb: CallbackQuery):
+    await cb.message.answer("Раздел «Медитации» в подготовке. В ближайшее время появятся короткие аудио.", reply_markup=(await kb_main() if callable(globals().get('kb_main')) else kb_main()))
+    await cb.answer()
