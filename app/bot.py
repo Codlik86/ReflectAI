@@ -718,25 +718,18 @@ async def on_tool_stop(cb: CallbackQuery):
     await cb.answer()
 
 # -------------------- ИНСАЙТЫ --------------------
-@router.callback_query(F.data == "save_insight")
-async def on_save_insight(cb: CallbackQuery):
-    msg = cb.message
-    text = (msg.text or msg.caption or "").strip() if msg else ""
-    if not text:
-        await cb.answer("Нечего сохранить", show_alert=True)
-        return
-    preview = text if len(text) <= 1000 else text[:1000]
-    with db_session() as s:
-        s.add(Insight(tg_id=str(cb.from_user.id), text=preview))
-        s.commit()
-    await cb.answer("Сохранено ✅", show_alert=False)def kb_next_steps() -> InlineKeyboardMarkup:
-    """Инлайн-кнопки под текстом после онбординга."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Поговорить",    callback_data="open:talk")],
-        [InlineKeyboardButton(text="🧩 Разобраться",   callback_data="open:work")],
-        [InlineKeyboardButton(text="🎧 Медитации",     callback_data="open:meditations")],
-    ])
-
+@router.callback_query(F.data == "goal_done")
+async def onb_goal_done(cb):
+    text = (
+        "Что дальше? Несколько вариантов:\n\n"
+        "1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.\n"
+        "2) Нужно разобраться прямо сейчас — открой «Разобраться»: короткие упражнения на 2–5 минут.\n"
+        "3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».\n\n"
+        "Пиши, как удобно — я рядом ❤️"
+    )
+    kb = kb_main() if 'kb_main' in globals() else None
+    await cb.message.answer(text, reply_markup=kb)
+    await cb.answer()
 def kb_cta_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 Поговорить", callback_data="cta:talk")],
@@ -879,24 +872,18 @@ def kb_main() -> ReplyKeyboardMarkup:
 
 
 @router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready"))
-async def cb_onboard_done(cb: CallbackQuery):
-    # показываем шорт-меню под сообщением
-    await cb.message.answer("Что дальше? Несколько вариантов:
-
-1) Если хочется просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе, а я поддержу и помогу разложить.
-2) Нужно быстро разобраться — зайди в «Разобраться». Там короткие упражнения: дыхание, КПТ-мини, заземление и др.
-3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)
-
-Пиши, как удобно — я рядом ❤️")
-    try:
-        # Добиваемся, чтобы кнопки точно появились (некоторые клиенты не показывают
-        # reply_markup при edit_text). Поэтому отдельным сообщением:
-        await cb.message.answer("⬇️ Выбери, что дальше:", reply_markup=kb_next_steps())
-    except Exception:
-        await cb.message.answer("⬇️ Выбери, что дальше:", reply_markup=kb_next_steps())
+@router.callback_query(F.data == "goal_done")
+async def onb_goal_done(cb):
+    text = (
+        "Что дальше? Несколько вариантов:\n\n"
+        "1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.\n"
+        "2) Нужно разобраться прямо сейчас — открой «Разобраться»: короткие упражнения на 2–5 минут.\n"
+        "3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».\n\n"
+        "Пиши, как удобно — я рядом ❤️"
+    )
+    kb = kb_main() if 'kb_main' in globals() else None
+    await cb.message.answer(text, reply_markup=kb)
     await cb.answer()
-
-
 def _has_fn(name: str) -> bool:
     return name in globals() and callable(globals()[name])
 
@@ -946,3 +933,15 @@ async def cb_onboarding_done(cb: CallbackQuery):
     await cb.message.answer(text, reply_markup=kb_cta_home())
     await cb.answer()
 
+
+
+def kb_main():
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="\U0001F4AC Поговорить")],
+            [KeyboardButton(text="\U0001F9E9 Разобраться")],
+            [KeyboardButton(text="\U0001F9D8\u200D\u2640\uFE0F Медитации")],
+        ],
+        resize_keyboard=True
+    )
