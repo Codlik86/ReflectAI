@@ -293,9 +293,8 @@ def kb_back_to_exercises(topic_id: str) -> InlineKeyboardMarkup:
 def kb_stepper() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Далее", callback_data="work:next")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="work:back_ex"),
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="work:back_ex"), InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")],
     ])
-
 _work_state: dict[str, dict] = {}  # user_id -> {"topic": str|None, "ex": (topic_id, ex_id)|None, "step": int}
 def _ws_get(uid: str) -> dict: return _work_state.get(uid, {"topic": None, "ex": None, "step": 0})
 def _ws_set(uid: str, **kw) -> dict: st = _ws_get(uid); st.update(kw); _work_state[uid] = st; return st
@@ -609,3 +608,22 @@ async def on_save_insight(cb: CallbackQuery):
         s.add(Insight(tg_id=str(cb.from_user.id), text=preview))
         s.commit()
     await cb.answer("Сохранено ✅", show_alert=False)
+def kb_topics():
+    rows = []
+    for key in ["panic","anxiety","sadness","anger","sleep","meditations"]:
+        title = TOPICS[key]["title"]
+        rows.append([InlineKeyboardButton(text=title, callback_data=f"work:topic:{key}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+def kb_exercises(topic_id: str):
+    t = TOPICS[topic_id]
+    rows = [
+        [InlineKeyboardButton(text=ex["title"], callback_data=f"work:ex:{topic_id}:{ex['id']}")]
+        for ex in t["exercises"]
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к темам", callback_data="work:back_topics")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+def kb_stepper():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶️ Далее", callback_data="work:next")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="work:back_ex"), InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")],
+    ])
