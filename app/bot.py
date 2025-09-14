@@ -335,11 +335,13 @@ async def talk_text(m: Message):
 @router.callback_query(F.data.startswith("work:topic:"))
 async def cb_pick_topic(cb: CallbackQuery):
     topic_id = cb.data.split(":")[2]
-    uid = str(cb.from_user.id)
-    _ws_set(uid, topic=topic_id, ex=None, step=0)
-    t = TOPICS[topic_id]
-    await cb.message.edit_text(f"Тема: {t['title']}\n{t['intro']}")
-    await cb.message.edit_reply_markup(reply_markup=kb_exercises(topic_id))
+    t = TOPICS.get(topic_id, {"title": "Тема"})
+    title = t.get("title", "Тема")
+    intro = t.get("intro")
+    text = f"Тема: {title}
+
+{intro}" if intro else f"Ок, остаёмся в теме «{title}». Выбери упражнение ниже."
+    await safe_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
     await cb.answer()
 
 @router.callback_query(F.data.startswith("work:ex:"))
