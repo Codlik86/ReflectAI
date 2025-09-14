@@ -798,6 +798,29 @@ async def msg_onboarding_done(m: Message):
         await m.answer("Готово! Чем займёмся дальше?")
 
 # --- last-resort ack: never leave spinner hanging ---
+
+
+@router.callback_query(F.data == "goal_done")
+async def cb_goal_done(cb: CallbackQuery):
+    """Финиш онбординга: показываем, что дальше, и основную клавиатуру."""
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+
+    text = (
+        "Что дальше? Несколько вариантов:\n\n"
+        "1) Если хочется просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе, а я поддержу и помогу разложить.\n"
+        "2) Нужно быстро разобраться — зайди в «Разобраться». Там короткие упражнения: дыхание, КПТ-мини, заземление и др.\n"
+        "3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)\n\n"
+        "Пиши, как удобно — я рядом ❤️"
+    )
+    try:
+        await cb.message.answer(text, reply_markup=kb_main())
+    except Exception:
+        await cb.message.answer(text)
+
+
 @router.callback_query()
 async def cb_ack_any_callback(cb: CallbackQuery):
     try:
