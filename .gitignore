@@ -7,3 +7,9 @@ __pycache__/
 .DS_Store
 # local backups
 app/*.bak.*
+
+# local patches & backups
+app/bot.py.bak.*
+patch_*.py
+patch-pomni*.py
+patch_pomni*.py
