@@ -145,6 +145,16 @@ def kb_stepper2(topic_id: str, ex_id: str, cur: int, total: int) -> InlineKeyboa
     ])
 
 # minimal main menu (auto-added)
+
+# Инлайн-CTA после онбординга
+def kb_cta_home() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="💬 Поговорить", callback_data="cta:talk")],
+        [InlineKeyboardButton(text="🧩 Разобраться", callback_data="cta:work")],
+        [InlineKeyboardButton(text="🎧 Медитации", callback_data="cta:meditations")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="�� Поговорить", callback_data="talk:hint")],
@@ -897,7 +907,7 @@ async def cb_onboard_done(cb: CallbackQuery):
 
         Пиши, как удобно — я рядом ❤️
     """)
-    # Пытаемся отредактировать сообщение, если нельзя — шлём новым
+    # показываем ТОЛЬКО инлайн-CTA, нижнюю панель не трогаем
     try:
         await safe_edit(cb.message, text=text, reply_markup=kb_cta_home())
     except Exception:
@@ -954,3 +964,9 @@ def kb_main() -> ReplyKeyboardMarkup:
 # alias для CTA после онбординга (источник — kb_cta_home)
 def kb_onboard_cta():
     return kb_cta_home()
+
+
+@router.callback_query(F.data == "cta:meditations")
+async def cta_meditations(cb: CallbackQuery):
+    await safe_edit(cb.message, text="Раздел «Медитации» в разработке. Скоро добавим подборку коротких аудио 🎧")
+    await cb.answer()
