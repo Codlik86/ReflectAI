@@ -125,7 +125,6 @@ def tools_keyboard() -> InlineKeyboardMarkup:
 
 def stop_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏹️ Стоп", callback_data="tool_stop")]
     ])
 
 def save_insight_keyboard() -> InlineKeyboardMarkup:
@@ -278,7 +277,6 @@ def kb_topics() -> InlineKeyboardMarkup:
     for key in ["panic","anxiety","sadness","anger","sleep","meditations"]:
         title = TOPICS[key]["title"]
         rows.append([InlineKeyboardButton(text=title, callback_data=f"work:topic:{key}")])
-    rows.append([InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_exercises(topic_id: str) -> InlineKeyboardMarkup:
@@ -296,7 +294,6 @@ def kb_stepper() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Далее", callback_data="work:next")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="work:back_ex"),
-         InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop")],
     ])
 
 _work_state: dict[str, dict] = {}  # user_id -> {"topic": str|None, "ex": (topic_id, ex_id)|None, "step": int}
@@ -352,6 +349,24 @@ async def cb_pick_ex(cb: CallbackQuery):
     uid = str(cb.from_user.id)
     _ws_set(uid, topic=topic_id, ex=(topic_id, ex_id), step=0)
     ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
+    if ("steps" not in ex or not ex.get("steps")) and ex.get("text"):
+        await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{ex['text']}", reply_markup=kb_back_to_exercises(topic_id))
+        return await cb.answer()
+    step0 = ex.get("steps", ["(пусто)"])[0]
+    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{step0}", reply_markup=kb_stepper())
+    await cb.answer()
+    uid = str(cb.from_user.id)
+    _ws_set(uid, topic=topic_id, ex=(topic_id, ex_id), step=0)
+    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
+    if ("steps" not in ex or not ex.get("steps")) and ex.get("text"):
+        await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{ex['text']}", reply_markup=kb_back_to_exercises(topic_id))
+        return await cb.answer()
+    step0 = ex.get("steps", ["(пусто)"])[0]
+    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{step0}", reply_markup=kb_stepper())
+    await cb.answer()
+    uid = str(cb.from_user.id)
+    _ws_set(uid, topic=topic_id, ex=(topic_id, ex_id), step=0)
+    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
     await cb.message.edit_text(f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{ex['steps'][0]}")
     await cb.message.edit_reply_markup(reply_markup=kb_stepper())
     await cb.answer()
@@ -359,6 +374,32 @@ async def cb_pick_ex(cb: CallbackQuery):
 @router.callback_query(F.data == "work:next")
 async def cb_next(cb: CallbackQuery):
     uid = str(cb.from_user.id); st = _ws_get(uid)
+    if not st.get("ex"):
+        return await cb.answer()
+    topic_id, ex_id = st["ex"]
+    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
+    step = st.get("step", 0) + 1
+    steps = ex.get("steps") or []
+    if step >= len(steps):
+        _ws_set(uid, ex=None, step=0)
+        await safe_edit(cb.message, text="✅ Готово. Хочешь выбрать другое упражнение или тему?", reply_markup=kb_exercises(topic_id))
+        return await cb.answer()
+    _ws_set(uid, step=step)
+    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{steps[step]}", reply_markup=kb_stepper())
+    await cb.answer()
+    if not st.get("ex"):
+        return await cb.answer()
+    topic_id, ex_id = st["ex"]
+    ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
+    step = st.get("step", 0) + 1
+    steps = ex.get("steps") or []
+    if step >= len(steps):
+        _ws_set(uid, ex=None, step=0)
+        await safe_edit(cb.message, text="✅ Готово. Хочешь выбрать другое упражнение или тему?", reply_markup=kb_exercises(topic_id))
+        return await cb.answer()
+    _ws_set(uid, step=step)
+    await safe_edit(cb.message, text=f"🧩 {TOPICS[topic_id]['title']} → {ex['title']}\n\n{steps[step]}", reply_markup=kb_stepper())
+    await cb.answer()
     if not st.get("ex"): return await cb.answer()
     topic_id, ex_id = st["ex"]
     ex = next(e for e in TOPICS[topic_id]["exercises"] if e["id"] == ex_id)
