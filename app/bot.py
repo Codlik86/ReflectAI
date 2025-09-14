@@ -896,23 +896,18 @@ def kb_after_onboard_inline() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-@router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready") | (F.data == "onb:done") | (F.data == "gate:done") | (F.data == "intro:done"))
 @router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready"))
 async def cb_onboard_done(cb: CallbackQuery):
-    text = dedent("""        Что дальше? Несколько вариантов:
-
-        1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.
-        2) Нужно разобраться прямо сейчас — открой «Разобраться»: короткие упражнения на 2–5 минут.
-        3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».
-
-        Пиши, как удобно — я рядом ❤️
-    """)
-    # показываем ТОЛЬКО инлайн-CTA, нижнюю панель не трогаем
-    try:
-        await safe_edit(cb.message, text=text, reply_markup=kb_cta_home())
-    except Exception:
-        await cb.message.answer(text, reply_markup=kb_cta_home())
+    text = (
+        "Что дальше? Несколько вариантов:\n\n"
+        "1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.\n"
+        "2) Нужно разобраться прямо сейчас — открой «Разобраться»: короткие упражнения на 2–5 минут.\n"
+        "3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».\n\n"
+        "Пиши, как удобно — я рядом ❤️"
+    )
+    await cb.message.answer(text, reply_markup=kb_cta_home())
     await cb.answer()
+
 @router.callback_query(F.data == "cta:talk")
 async def cb_cta_talk(cb: CallbackQuery):
     await cb.message.answer("Я здесь. Можешь просто написать, что на душе — начнём разговор.", reply_markup=(await kb_main() if callable(globals().get('kb_main')) else kb_main()))
