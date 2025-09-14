@@ -38,6 +38,18 @@ router = Router()
 
 
 
+
+
+def get_home_text() -> str:
+    return (
+        "Что дальше? Несколько вариантов:\n\n"
+        "1) Хочешь просто поговорить — нажми «Поговорить». Без рамок и практик: поделись тем, что происходит, я поддержу и помогу разложить.\n"
+        "2) Нужно быстро разобраться — открой «Разобраться». Там короткие упражнения на 5–10 минут: от дыхания и анти-катастрофизации до плана при панике и S-T-O-P.\n"
+        "3) Хочешь разгрузить голову — в «Медитациях» будут короткие аудио для тревоги, сна и концентрации — добавим совсем скоро.\n\n"
+        "Пиши, как тебе удобно. Я рядом ❤️"
+    )
+
+
 def get_home_text() -> str:
     return (
         "Что дальше? Несколько вариантов:\n\n"
@@ -756,3 +768,18 @@ async def cb_ack_any_callback(cb: CallbackQuery):
         await cb.answer()
     except Exception:
         pass
+
+
+@router.callback_query(F.data.in_({"goal_done", "onb:done", "onboarding:done", "done"}))
+async def onb_goal_done(cb: CallbackQuery):
+    # Снимаем спиннер сразу (чтобы не висела анимация)
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+    # Показываем домашний экран
+    text = get_home_text()
+    try:
+        await cb.message.edit_text(text)
+    except Exception:
+        await cb.message.answer(text, reply_markup=None)
