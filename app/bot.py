@@ -886,6 +886,7 @@ def kb_after_onboard_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 @router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready") | (F.data == "onb:done") | (F.data == "gate:done") | (F.data == "intro:done"))
+@router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready") | (F.data == "onb:done") | (F.data == "gate:done") | (F.data == "intro:done"))
 async def cb_onboard_done(cb: CallbackQuery):
     text = (
         "Что дальше? Несколько вариантов:\n\n"
@@ -894,13 +895,12 @@ async def cb_onboard_done(cb: CallbackQuery):
         "3) А ещё будут аудио-медитации — скоро добавим раздел «Медитации».\n\n"
         "Пиши, как удобно — я рядом ❤️"
     )
-    await safe_edit(cb.message, text=text, reply_markup=kb_after_onboard_inline())
-    # на всякий случай вернём и нижнюю клавиатуру
-    try:
-        reply_kb = await kb_main() if callable(globals().get('kb_main')) else kb_main()
-    except TypeError:
-        reply_kb = kb_main()  # если kb_main не async
-    await cb.message.answer("Меню снизу доступно всегда.", reply_markup=reply_kb)
+    # 1) отправляем текст С ИНЛАЙН-КНОПКАМИ
+    await cb.message.answer(text, reply_markup=kb_after_onboard_inline())
+    # 2) отдельно вернём нижнюю клавиатуру, чтобы она не пропала
+    main_kb = await _kb_main_any()
+    if main_kb is not None:
+        await cb.message.answer("Меню снизу доступно всегда.", reply_markup=main_kb)
     await cb.answer()
 
 @router.callback_query(F.data == "cta:talk")
@@ -924,3 +924,13 @@ async def cb_cta_work(cb: CallbackQuery):
 async def cb_cta_meds(cb: CallbackQuery):
     await cb.message.answer("Раздел «Медитации» в подготовке. В ближайшее время появятся короткие аудио.", reply_markup=(await kb_main() if callable(globals().get('kb_main')) else kb_main()))
     await cb.answer()
+
+async def _kb_main_any():
+    kb = globals().get("kb_main")
+    if kb is None:
+        return None
+    try:
+        return await kb()
+    except TypeError:
+        # kb_main может быть синхронной функцией
+        return kb()
