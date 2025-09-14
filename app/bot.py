@@ -32,6 +32,17 @@ router = Router()
 
 
 
+
+# --- helper: back to topic/exercises ---
+def back_markup_for_topic(topic_id: str) -> InlineKeyboardMarkup:
+    try:
+        # если есть полноценная клавиатура со списком упражнений — используем её
+        return kb_exercises(topic_id)  # type: ignore[name-defined]
+    except Exception:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад к темам", callback_data=f"work:topic:{topic_id}")]
+        ])
+
 # --- stepper builder with args (adapter) ---
 def kb_stepper2(topic_id: str, ex_id: str, cur: int, total: int) -> InlineKeyboardMarkup:
     is_last = (cur >= total-1)
@@ -71,7 +82,7 @@ def _ws_set(uid: str, **fields):
 def _ws_reset(uid: str):
     _WS.pop(uid, None)
 
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, Text
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import text as sql_text
@@ -347,6 +358,7 @@ async def cb_pick_topic(cb: CallbackQuery):
     await safe_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
     await cb.answer()
 
+
 @router.callback_query(F.data.startswith("work:ex:"))
 async def cb_pick_exercise(cb: CallbackQuery):
     parts = cb.data.split(":")
@@ -360,20 +372,34 @@ async def cb_pick_exercise(cb: CallbackQuery):
     if ex is None:
         await cb.answer("Не нашёл упражнение", show_alert=True)
         return
+
+    topic_title = t.get("title", "Тема")
+    ex_title = ex.get("title", "Упражнение")
+
+    # 2.1) если это текстовое упражнение — рендерим текст и даём "Назад"
+    text_only = ex.get("text") or ex.get("body") or ex.get("content")
+    if text_only and not ex.get("steps"):
+        text = render_text_exercise(topic_title, ex_title, str(text_only))
+        await safe_edit(cb.message, text=text, reply_markup=back_markup_for_topic(topic_id))
+        await cb.answer()
+        return
+
+    # 2.2) обычные шаги (+ интро как шаг 0, если есть)
     steps = ex.get("steps", [])
     intro = ex.get("intro")
     steps_all = ([intro] + steps) if intro else steps
+
     if not steps_all:
         await cb.answer("Пустое упражнение", show_alert=True)
         return
+
     uid = str(cb.from_user.id)
     _ws_set(uid, topic=topic_id, ex=ex_id, step=0)
-    topic_title = t.get("title", "Тема")
-    ex_title = ex.get("title", "Упражнение")
+
     text = render_step_text(topic_title, ex_title, steps_all[0])
+    # используем адаптерную клавиатуру с аргументами
     await safe_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, 0, len(steps_all)))
     await cb.answer()
-
 @router.callback_query(F.data == "work:next")
 async def cb_next(cb: CallbackQuery):
     uid = str(cb.from_user.id); st = _ws_get(uid)
@@ -679,3 +705,10 @@ async def cb_onboarding_done(cb: CallbackQuery):
     except Exception:
         await cb.message.answer('Готово! Чем займёмся дальше?', reply_markup=kb_main())
 
+@router.message(Text(equals=["Готово","Готово!","✅ Готово"], ignore_case=True))
+async def msg_onboarding_done(m: Message):
+    try:
+        await m.answer("Готово! Чем займёмся дальше?", reply_markup=kb_main())
+    except Exception:
+        # на всякий
+        await m.answer("Готово! Чем займёмся дальше?")
