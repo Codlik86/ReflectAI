@@ -9,6 +9,7 @@ EMO_HEADPHONES = "\\U0001F3A7" # 🎧
 EMO_GEAR = "\\u2699\\ufe0f"  # ⚙️
 
 from aiogram.exceptions import TelegramBadRequest
+from aiogram import F
 
 async def safe_edit(message, *, text: str | None = None, reply_markup=None):
     """
@@ -727,7 +728,14 @@ async def on_save_insight(cb: CallbackQuery):
     with db_session() as s:
         s.add(Insight(tg_id=str(cb.from_user.id), text=preview))
         s.commit()
-    await cb.answer("Сохранено ✅", show_alert=False)
+    await cb.answer("Сохранено ✅", show_alert=False)def kb_next_steps() -> InlineKeyboardMarkup:
+    """Инлайн-кнопки под текстом после онбординга."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Поговорить",    callback_data="open:talk")],
+        [InlineKeyboardButton(text="🧩 Разобраться",   callback_data="open:work")],
+        [InlineKeyboardButton(text="🎧 Медитации",     callback_data="open:meditations")],
+    ])
+
 def kb_topics():
     rows = []
     for key in ["panic","anxiety","sadness","anger","sleep","meditations"]:
@@ -859,3 +867,56 @@ def kb_main() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+
+
+@router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready"))
+async def cb_onboard_done(cb: CallbackQuery):
+    # показываем шорт-меню под сообщением
+    await cb.message.answer("Что дальше? Несколько вариантов:
+
+1) Если хочется просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе, а я поддержу и помогу разложить.
+2) Нужно быстро разобраться — зайди в «Разобраться». Там короткие упражнения: дыхание, КПТ-мини, заземление и др.
+3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)
+
+Пиши, как удобно — я рядом ❤️")
+    try:
+        # Добиваемся, чтобы кнопки точно появились (некоторые клиенты не показывают
+        # reply_markup при edit_text). Поэтому отдельным сообщением:
+        await cb.message.answer("⬇️ Выбери, что дальше:", reply_markup=kb_next_steps())
+    except Exception:
+        await cb.message.answer("⬇️ Выбери, что дальше:", reply_markup=kb_next_steps())
+    await cb.answer()
+
+
+def _has_fn(name: str) -> bool:
+    return name in globals() and callable(globals()[name])
+
+@router.callback_query(F.data.startswith("open:"))
+async def cb_open_shortcuts(cb: CallbackQuery):
+    action = cb.data.split(":", 1)[1]
+    # Переадресуем в существующие команды, если они есть.
+    if action == "talk":
+        # свободный чат: просто пригласим написать
+        await cb.message.answer("Я рядом. Можешь просто написать, что на душе.")
+        await cb.answer()
+        return
+
+    if action == "work":
+        if _has_fn("cmd_work"):
+            await globals()["cmd_work"](cb.message)
+        elif _has_fn("open_work_text"):
+            await globals()["open_work_text"](cb)
+        else:
+            await cb.message.answer("Открываю упражнения…")
+        await cb.answer()
+        return
+
+    if action == "meditations":
+        if _has_fn("cmd_meditations"):
+            await globals()["cmd_meditations"](cb.message)
+        elif _has_fn("open_meditations_text"):
+            await globals()["open_meditations_text"](cb)
+        else:
+            await cb.message.answer("Скоро добавим аудио-медитации и плейлисты. 💿")
+        await cb.answer()
+        return
