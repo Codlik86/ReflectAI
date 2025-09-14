@@ -287,6 +287,11 @@ def kb_exercises(topic_id: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="⬅️ Назад к темам", callback_data="work:back_topics")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+def kb_back_to_exercises(topic_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад к упражнениям", callback_data=f"work:back_ex")]
+    ])
 def kb_stepper() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Далее", callback_data="work:next")],
