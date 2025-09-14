@@ -13,3 +13,7 @@ app/bot.py.bak.*
 patch_*.py
 patch-pomni*.py
 patch_pomni*.py
+
+# local patches & backups
+app/bot.py.bak.*
+patch_*.py
