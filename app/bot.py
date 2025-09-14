@@ -24,7 +24,7 @@ async def safe_edit(message, *, text: str | None = None, reply_markup=None):
 from collections import defaultdict, deque
 from typing import Dict, Deque, List
 
-from aiogram import Router, F
+from aiogram import Router, F, F
 
 router = Router()
 
@@ -82,7 +82,7 @@ def _ws_set(uid: str, **fields):
 def _ws_reset(uid: str):
     _WS.pop(uid, None)
 
-from aiogram.filters import CommandStart, Command, Text
+from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import text as sql_text
@@ -705,7 +705,7 @@ async def cb_onboarding_done(cb: CallbackQuery):
     except Exception:
         await cb.message.answer('Готово! Чем займёмся дальше?', reply_markup=kb_main())
 
-@router.message(Text(equals=["Готово","Готово!","✅ Готово"], ignore_case=True))
+@router.message(F.text.func(lambda t: (t or '').replace('✅','').strip().lower() in {'готово','готово!' }))
 async def msg_onboarding_done(m: Message):
     try:
         await m.answer("Готово! Чем займёмся дальше?", reply_markup=kb_main())
