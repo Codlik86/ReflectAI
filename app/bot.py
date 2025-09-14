@@ -2,6 +2,25 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from aiogram.exceptions import TelegramBadRequest
+
+async def safe_edit(message, *, text: str | None = None, reply_markup=None):
+    """
+    Редактирует текст/markup и молча игнорит 'message is not modified'.
+    """
+    try:
+        if text is not None and reply_markup is not None:
+            await message.edit_text(text, reply_markup=reply_markup)
+            return
+        if text is not None:
+            await message.edit_text(text)
+        if reply_markup is not None:
+            await message.edit_reply_markup(reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        raise
+
 from collections import defaultdict, deque
 from typing import Dict, Deque, List
 
@@ -11,6 +30,7 @@ router = Router()
 
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import text as sql_text
 
 from app.llm_adapter import LLMAdapter
@@ -367,11 +387,35 @@ async def cb_back_topics(cb: CallbackQuery):
 
 @router.callback_query(F.data == "work:stop")
 async def cb_stop(cb: CallbackQuery):
-    uid = str(cb.from_user.id); _ws_set(uid, topic=None, ex=None, step=0)
-    await cb.message.edit_text("Остановил упражнение. Можем просто поговорить или выбрать другую тему.")
-    await cb.message.edit_reply_markup(reply_markup=None)
+    # сбросить состояние, если есть хелпер
+    try:
+        _ = _ws_set  # проверим наличие
+        _ws_set(str(cb.from_user.id), topic=None, ex=None, step=0)
+    except NameError:
+        pass
+    await safe_edit(
+        cb.message,
+        text="Остановил упражнение. Можем просто поговорить или выбрать другую тему.",
+        reply_markup=None,
+    )
     await cb.answer()
-# -------------------- СВОБОДНЫЙ ЧАТ --------------------
+
+@router.callback_query
+async def __ignore_other_cb(cb: CallbackQuery):
+    # фолбэк заглушка, чтобы случайные колбэки не роняли обработку
+    return
+@router.message(Command("tone"))
+async def cmd_tone(m: Message):
+    await m.answer("Тон общения (заглушка):\n• Нейтральный — по умолчанию\n• Тёплый и поддерживающий\n• Более структурный/короткий\n\nПозже здесь будет выбор с кнопками.")
+
+@router.message(Command("method"))
+async def cmd_method(m: Message):
+    await m.answer("Подходы (заглушка):\n• КПТ\n• АСТ\n• Гештальт\n\nСкоро можно будет выбрать предпочтение.")
+
+@router.message(Command("about"))
+async def cmd_about(m: Message):
+    await m.answer("Pomni — тёплый AI-друг/дневник: слушает, помогает осмыслить переживания, предлагает упражнения и микрошаги.")
+
 @router.message(F.text)
 async def on_text(m: Message):
     if (m.text or '').startswith('/'):
