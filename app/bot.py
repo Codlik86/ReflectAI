@@ -30,6 +30,16 @@ router = Router()
 
 
 
+
+# minimal main menu (auto-added)
+def kb_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="�� Поговорить", callback_data="talk:hint")],
+        [InlineKeyboardButton(text="🧩 Разобраться", callback_data="work:open"),
+         InlineKeyboardButton(text="🎧 Медитации", callback_data="work:topic:meditations")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings:open")],
+    ])
+
 # ------- helpers: exercise render -------
 def render_step_text(topic_title: str, ex_title: str, step_text: str) -> str:
     header = '🧩 ' + topic_title + ' → ' + ex_title
