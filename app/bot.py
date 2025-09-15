@@ -26,6 +26,16 @@ from sqlalchemy import text as sql_text
 # Важно: оставляю импорт как был у тебя в проекте
 from app.llm_adapter import LLMAdapter
 from app.prompts import SYSTEM_PROMPT
+
+# Доп. тон для режима рефлексии (мягче, меньше буквального зеркаления)
+REFLECTIVE_SUFFIX = (
+    "\n\n[режим рефлексии]\n"
+    "— отвечай тёпло и бережно;\n"
+    "— не повторяй дословно каждое сообщение пользователя, только уместное перефразирование;\n"
+    "— добавляй чуть инициативы и контекста, без моралей;\n"
+    "— допускаются небольшие «человеческие» реакции: да, понимаю… иногда троеточия, эмодзи в меру.\n"
+)
+
 from app.safety import is_crisis, CRISIS_REPLY
 from app.exercises import TOPICS
 from app.db import db_session, User, Insight  # Insight может использоваться в будущем
@@ -171,6 +181,8 @@ def _ws_reset(uid: str) -> None:
 
 # ==== Короткая память диалога (RAM) ========================================
 DIALOG_HISTORY: Dict[int, Deque[Dict[str, str]]] = defaultdict(lambda: deque(maxlen=8))
+# Режим чата (обычный / reflection)
+CHAT_MODE: Dict[int, str] = {}
 
 def _push(chat_id: int, role: str, content: str) -> None:
     if content:
@@ -401,6 +413,10 @@ async def cb_back_topics(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("work:topic:"))
 async def cb_pick_topic(cb: CallbackQuery):
+    try:
+        await cb.answer()
+    except Exception:
+        pass
     await silent_ack(cb)
     topic_id = cb.data.split(":")[2]
     t = TOPICS.get(topic_id, {"title": "Тема"})
@@ -416,6 +432,10 @@ async def cb_pick_topic(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("work:ex:"))
 async def cb_pick_exercise(cb: CallbackQuery):
+    try:
+        await cb.answer()
+    except Exception:
+        pass
     await silent_ack(cb)
     parts = cb.data.split(":")
     topic_id, ex_id = parts[2], parts[3]
@@ -435,6 +455,20 @@ async def cb_pick_exercise(cb: CallbackQuery):
     topic_title = t.get("title", "Тема")
     ex_title = ex.get("title", "Упражнение")
 
+    # Режим свободной рефлексии
+    if ex.get("type") == "chat":
+        CHAT_MODE[cb.message.chat.id] = "reflection"
+        intro = ex.get("intro") or "Запускаем мягкую рефлексию. Пиши как есть — я рядом."
+        body = intro + "\n\nНапиши, с чего начнём…"
+        text = render_text_exercise(topic_title, ex_title, body)
+        try:
+            await safe_edit(cb.message, text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⏹ Стоп", callback_data="reflect:stop")],
+                [InlineKeyboardButton(text="◀️ Назад к теме", callback_data=f"work:topic:{topic_id}")]
+            ]))
+        except Exception:
+            await cb.message.answer(text)
+        return
     # Текстовое упражнение без шагов
     text_only = ex.get("text") or ex.get("body") or ex.get("content")
     if text_only and not ex.get("steps"):
@@ -572,7 +606,10 @@ async def on_tool_micro(cb: CallbackQuery):
         adapter = LLMAdapter()  # type: ignore
 
     last_user = next((m["content"] for m in reversed(DIALOG_HISTORY[chat_id]) if m["role"] == "user"), "")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    sys_prompt = SYSTEM_PROMPT
+    if CHAT_MODE.get(chat_id) == "reflection":
+        sys_prompt = SYSTEM_PROMPT + REFLECTIVE_SUFFIX
+    messages = [{"role": "system", "content": sys_prompt}]
     if last_user:
         messages.append({"role": "user", "content": last_user})
     messages.append({"role": "user", "content": "Подскажи 1–2 очень маленьких шага на ближайшие 10–30 минут по этой теме."})
@@ -674,3 +711,13 @@ async def on_text(m: Message):
     _save_turn(tg_id, "assistant", answer)
 
     await m.answer(answer, reply_markup=None)
+
+
+@router.callback_query(F.data == "reflect:stop")
+async def reflect_stop(cb: CallbackQuery):
+    CHAT_MODE.pop(cb.message.chat.id, None)
+    await cb.message.answer("Остановил рефлексию. Можем вернуться к упражнениям или просто поговорить.")
+    try:
+        await cb.answer()
+    except Exception:
+        pass
