@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import random
 # app/llm_adapter.py
 # -*- coding: utf-8 -*-
@@ -94,7 +93,9 @@ class LLMAdapter:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-        }
+    "top_p": 0.9,
+    "presence_penalty": 0.6,
+    "frequency_penalty": 0.3}
 
         # Разрешаем прокинуть любые дополнительные опции (top_p, presence_penalty и т.п.)
         if extra:
@@ -127,3 +128,19 @@ class LLMAdapter:
         if self._client:
             await self._client.aclose()
             self._client = None
+
+
+def apply_generation_defaults(payload: dict) -> dict:
+    """
+    Добавляет дефолтные параметры генерации, не перетирая уже заданные.
+    """
+    if payload is None:
+        payload = {}
+    payload = dict(payload)
+    payload.setdefault("temperature", 0.85)
+    payload.setdefault("top_p", 0.9)
+    payload.setdefault("presence_penalty", 0.6)
+    payload.setdefault("frequency_penalty", 0.3)
+    payload.setdefault("max_tokens", random.choice([220, 260, 300, 340, 380, 420]))
+    return payload
+
