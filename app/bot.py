@@ -52,6 +52,60 @@ router = Router()
 
 
 
+# app/bot.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+from textwrap import dedent
+from aiogram import F
+import re as _re_for_cmd
+from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+# --- Emoji (safe Unicode escapes) ---
+EMO_TALK = "\\U0001F4AC"       # 💬
+EMO_PUZZLE = "\\U0001F9E9"     # 🧩
+EMO_HEADPHONES = "\\U0001F3A7" # 🎧
+EMO_GEAR = "\\u2699\\ufe0f"  # ⚙️
+
+from aiogram.exceptions import TelegramBadRequest
+
+async def safe_edit(message, *, text: str | None = None, reply_markup=None):
+    """
+    Редактирует текст/markup и молча игнорит 'message is not modified'.
+    """
+    try:
+        if text is not None and reply_markup is not None:
+            await message.edit_text(text, reply_markup=reply_markup)
+            return
+        if text is not None:
+            await message.edit_text(text)
+        if reply_markup is not None:
+            await message.edit_reply_markup(reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        raise
+
+from collections import defaultdict, deque
+from typing import Dict, Deque, List
+
+from aiogram import Router, F
+
+router = Router()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # --- universal DONE/FINISH gate: sends user to home screen ---
 
@@ -134,8 +188,8 @@ def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{EMO_TALK} Поговорить", callback_data="talk:hint")],
         [InlineKeyboardButton(text=f"{EMO_PUZZLE} Разобраться", callback_data="work:open"),
-         InlineKeyboardButton(text="🎧 Медитации", callback_data="work:topic:meditations")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings:open")],
+         InlineKeyboardButton(text=f"{EMO_HEADPHONES} Медитации", callback_data="meditations:open")],
+        [InlineKeyboardButton(text=f"{EMO_GEAR} Настройки", callback_data="settings:open")],
     ])
 
 # ------- helpers: exercise render -------
@@ -176,7 +230,6 @@ from app.tools import (
 from app.rag_qdrant import search as rag_search
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-router = Router()
 adapter: LLMAdapter | None = None
 
 # -------------------- КОРОТКАЯ ПАМЯТЬ (RAM) --------------------
