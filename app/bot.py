@@ -338,6 +338,7 @@ def _append_goal(tg_id: str, goal_code: str) -> None:
 # -------------------- КОМАНДЫ --------------------
 @router.message(CommandStart())
 async def start(m: Message):
+    await set_bot_commands(m.bot)
     try:
         await cb.message.bot.set_my_commands([
             BotCommand(command='talk', description='Поговорить'),
@@ -992,3 +993,145 @@ def kb_onboard_cta():
 async def cta_meditations(cb: CallbackQuery):
     await safe_edit(cb.message, text="Раздел «Медитации» в разработке. Скоро добавим подборку коротких аудио 🎧")
     await cb.answer()
+
+# === AUTOCMDS START ===
+# ВНИМАНИЕ: автодобавленные команды. Не редактируй внутри этого блока — патчи будут перезаписывать.
+from aiogram.types import BotCommand
+
+async def set_bot_commands(bot: Bot) -> None:
+    """Регистрируем команды в левом (slash) меню Telegram."""
+    commands = [
+        BotCommand(command="start",       description="Начать / онбординг"),
+        BotCommand(command="talk",        description="Поговорить — свободный чат"),
+        BotCommand(command="work",        description="Разобраться — упражнения"),
+        BotCommand(command="meditations", description="Медитации (аудио, скоро)"),
+        BotCommand(command="settings",    description="Настройки"),
+        BotCommand(command="about",       description="О боте"),
+        BotCommand(command="help",        description="Помощь"),
+        BotCommand(command="pay",         description="Оплата / поддержка проекта"),
+        BotCommand(command="policy",      description="Правила и политика"),
+    ]
+    try:
+        await bot.set_my_commands(commands)
+    except Exception as e:
+        print("[warn] set_my_commands failed:", e)
+
+# --- Slash handlers -------------------------------------------------------
+
+@router.message(Command("talk"))
+async def cmd_talk(m: Message):
+    # мягкий вход в свободный разговор
+    try:
+        kb = kb_main()
+    except Exception:
+        kb = None
+    await m.answer(
+        (
+            "Я рядом. Можешь просто написать, что на душе — без рамок и формата. "
+            "Постараюсь поддержать и помочь разложить мысли."
+        ),
+        reply_markup=kb,
+    )
+
+@router.message(Command("work"))
+async def cmd_work(m: Message):
+    # пробуем открыть список тем напрямую, иначе мягкий фолбэк
+    try:
+        kb = kb_topics()  # если функция есть — покажем темы
+        await m.answer("Выбери тему, с которой хочешь поработать 👇", reply_markup=kb)
+    except Exception:
+        try:
+            kb = kb_main()
+        except Exception:
+            kb = None
+        await m.answer(
+            "Открою раздел «Разобраться». Если список тем не появился, нажми кнопку внизу.",
+            reply_markup=kb,
+        )
+
+@router.message(Command("meditations"))
+async def cmd_meditations(m: Message):
+    try:
+        kb = kb_main()
+    except Exception:
+        kb = None
+    await m.answer(
+        (
+            "Раздел аудио-медитаций скоро добавим. "
+            "А пока можно выбрать дыхательные и телесные практики в разделе «Разобраться»."
+        ),
+        reply_markup=kb,
+    )
+
+@router.message(Command("settings"))
+async def cmd_settings(m: Message):
+    try:
+        kb = kb_main()
+    except Exception:
+        kb = None
+    await m.answer(
+        "Тут будут настройки (тон, подход, приватность). Пока — в разработке.",
+        reply_markup=kb,
+    )
+
+@router.message(Command("about"))
+async def cmd_about(m: Message):
+    try:
+        kb = kb_main()
+    except Exception:
+        kb = None
+    await m.answer(
+        (
+            "Я — бот-поддержка: можно поговорить, быстро снизить тревогу короткими упражнениями "
+            "и сохранить важные мысли. Если что-то не работает — напиши, пожалуйста."
+        ),
+        reply_markup=kb,
+    )
+
+@router.message(Command("help"))
+async def cmd_help(m: Message):
+    try:
+        kb = kb_main()
+    except Exception:
+        kb = None
+    await m.answer(
+        (
+            "Как пользоваться:\\n"
+            "• «Поговорить» — свободный диалог\\n"
+            "• «Разобраться» — короткие практики\\n"
+            "• «Медитации» — скоро аудио\\n"
+            "• «Настройки» — тон и подход\\n"
+            "• «/policy» — правила и политика"
+        ),
+        reply_markup=kb,
+    )
+
+@router.message(Command("pay"))
+async def cmd_pay(m: Message):
+    try:
+        kb = kb_main()
+    except Exception:
+        kb = None
+    await m.answer(
+        (
+            "Поддержка проекта / оплата — скоро. "
+            "Если хочешь поддержать сейчас, напиши, пришлю реквизиты ❤️"
+        ),
+        reply_markup=kb,
+    )
+
+@router.message(Command("policy"))
+async def cmd_policy(m: Message):
+    try:
+        kb = kb_main()
+    except Exception:
+        kb = None
+    await m.answer(
+        (
+            "Правила и политика:\\n"
+            "• Правила: https://tinyurl.com/5n98a7j8\\n"
+            "• Политика: https://tinyurl.com/5n98a7j8"
+        ),
+        reply_markup=kb,
+    )
+# === AUTOCMDS END ===
