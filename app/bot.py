@@ -4,6 +4,7 @@ from __future__ import annotations
 from textwrap import dedent
 from aiogram import F
 import re as _re_for_cmd
+from aiogram.types import Message, BotCommand
 
 # --- Emoji (safe Unicode escapes) ---
 EMO_TALK = "\\U0001F4AC"       # 💬
@@ -53,6 +54,23 @@ router = Router()
 
 
 # --- universal DONE/FINISH gate: sends user to home screen ---
+
+@router.message(F.text.regexp(r'^/(talk|settings|meditations|about|help|pay|policy)(?:@\w+)?(?:\s|$)'))
+async def _route_slash_commands(m: Message):
+    cmd = (m.text or '').split()[0].split('@')[0].lower()
+    mapping = {
+        '/talk': cmd_talk,
+        '/settings': cmd_settings,
+        '/meditations': cmd_meditations,
+        '/about': cmd_about,
+        '/help': cmd_help,
+        '/pay': cmd_pay,
+        '/policy': cmd_policy,
+    }
+    handler = mapping.get(cmd)
+    if handler:
+        await handler(m)
+
 @router.callback_query(F.data.func(lambda d: isinstance(d, str) and any(k in d.lower() for k in (
     "onb:done","onboard:done","onboarding:done","goals:done","goal_done",
     "start:done","start:finish","done","finish","complete","completed","готов"
