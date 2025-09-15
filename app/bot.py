@@ -108,15 +108,18 @@ def kb_main() -> ReplyKeyboardMarkup:
         resize_keyboard=True, one_time_keyboard=False, selective=False
     )
 
+# --- Список тем (уникальные по title) ---
 def kb_topics() -> InlineKeyboardMarkup:
-    """
-    Список тем из TOPICS.
-    """
-    rows = []
-    for topic_id, t in TOPICS.items():
-        title = t.get("title", topic_id)
-        rows.append([InlineKeyboardButton(text=f"🧩 {title}", callback_data=f"work:topic:{topic_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    b = InlineKeyboardBuilder()
+    seen = set()
+    for key, t in TOPICS.items():
+        title = t.get("title", "Тема")
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        b.button(text=f"🧩 {title}", callback_data=f"work:topic:{key}")
+    b.adjust(1)
+    return b.as_markup()
 
 def kb_exercises(topic_id: str) -> InlineKeyboardMarkup:
     """
