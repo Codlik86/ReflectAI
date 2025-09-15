@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import random
 # app/llm_adapter.py
 # -*- coding: utf-8 -*-
-from __future__ import annotations
 
 import os
 from dotenv import load_dotenv, find_dotenv
