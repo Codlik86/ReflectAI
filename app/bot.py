@@ -186,7 +186,7 @@ def _ws_reset(uid: str):
     _WS.pop(uid, None)
 
 from aiogram.filters import CommandStart, Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import text as sql_text
 
@@ -338,6 +338,18 @@ def _append_goal(tg_id: str, goal_code: str) -> None:
 # -------------------- КОМАНДЫ --------------------
 @router.message(CommandStart())
 async def start(m: Message):
+    try:
+        await cb.message.bot.set_my_commands([
+            BotCommand(command='talk', description='Поговорить'),
+            BotCommand(command='work', description='Разобраться (упражнения)'),
+            BotCommand(command='meditations', description='Медитации (аудио, скоро)'),
+            BotCommand(command='settings', description='Настройки'),
+            BotCommand(command='about', description='О проекте'),
+            BotCommand(command='help', description='Помощь'),
+            BotCommand(command='privacy', description='Приватность')
+        ])
+    except Exception:
+        pass
     # регистрация
     with db_session() as s:
         u = s.query(User).filter(User.tg_id == str(m.from_user.id)).first()
@@ -901,6 +913,18 @@ def kb_after_onboard_inline() -> InlineKeyboardMarkup:
 
 @router.callback_query((F.data == "onboard:done") | (F.data == "onboard:ready"))
 async def cb_onboard_done(cb: CallbackQuery):
+    try:
+        await cb.message.bot.set_my_commands([
+            BotCommand(command='talk', description='Поговорить'),
+            BotCommand(command='work', description='Разобраться (упражнения)'),
+            BotCommand(command='meditations', description='Медитации (аудио, скоро)'),
+            BotCommand(command='settings', description='Настройки'),
+            BotCommand(command='about', description='О проекте'),
+            BotCommand(command='help', description='Помощь'),
+            BotCommand(command='privacy', description='Приватность')
+        ])
+    except Exception:
+        pass
     text = (
         "Что дальше? Несколько вариантов:\n\n"
         "1) Если хочется просто поговорить — нажми «Поговорить». Можно без структуры и практик.\n"
