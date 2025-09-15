@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from textwrap import dedent
+from aiogram import F
+import re as _re_for_cmd
 
 # --- Emoji (safe Unicode escapes) ---
 EMO_TALK = "\\U0001F4AC"       # 💬
@@ -1135,3 +1137,27 @@ async def cmd_policy(m: Message):
         reply_markup=kb,
     )
 # === AUTOCMDS END ===
+
+
+def _fallback_cmd_router(m: Message) -> bool:
+    t = getattr(m, "text", None)
+    if not isinstance(t, str):
+        return False
+    return bool(_re_for_cmd.match(r'^/(talk|settings|meditations|about|help|pay|policy)(?:@\w+)?\b', t))
+
+@router.message(_fallback_cmd_router)
+async def _fallback_cmds(m: Message):
+    cmd = m.text.split()[0].split('@')[0]  # '/talk' или '/talk@Bot'
+    mapping = {
+        '/talk': cmd_talk,
+        '/settings': cmd_settings,
+        '/meditations': cmd_meditations,
+        '/about': cmd_about,
+        '/help': cmd_help,
+        '/pay': cmd_pay,
+        '/policy': cmd_policy,
+    }
+    handler = mapping.get(cmd)
+    if handler:
+        await handler(m)
+
