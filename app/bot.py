@@ -413,62 +413,60 @@ async def cb_back_topics(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("work:topic:"))
 async def cb_pick_topic(cb: CallbackQuery):
+    # важно ответить быстро, чтобы не получить "query is too old"
     try:
         await cb.answer()
     except Exception:
         pass
-    await silent_ack(cb)
+
     topic_id = cb.data.split(":")[2]
-    t = TOPICS.get(topic_id, {"title": "Тема"})
+    t = TOPICS.get(topic_id, {})
     title = t.get("title", "Тема")
     intro = t.get("intro")
 
+    # Темы-«рефлексия»: без списка упражнений — сразу тёплое интро и свободный чат
+    if t.get("type") == "chat":
+        intro_long = t.get("intro_long") or intro or (
+            "Давай немного поразмышляем об этом. Напиши пару строк — что волнует, что хочется понять… Я рядом."
+        )
+        text = f"Тема: {title}\n\n{intro_long}"
+        await safe_edit(cb.message, text=text, reply_markup=None)
+        return
+
+    # Обычная тема: показываем интро и список упражнений
     if intro:
-        text = "Тема: " + title + "\n\n" + str(intro)
+        text = f"Тема: {title}\n\n{intro}"
     else:
-        text = "Ок, остаёмся в теме «" + title + "». Выбери упражнение ниже."
-
+        text = f"Ок, остаёмся в теме «{title}». Выбери упражнение ниже."
     await safe_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
-
 @router.callback_query(F.data.startswith("work:ex:"))
 async def cb_pick_exercise(cb: CallbackQuery):
+    # быстро отвечаем на callback
     try:
         await cb.answer()
     except Exception:
         pass
-    await silent_ack(cb)
+
     parts = cb.data.split(":")
     topic_id, ex_id = parts[2], parts[3]
     t = TOPICS.get(topic_id, {})
-    ex = None
-    for item in t.get("exercises", []):
-        if item.get("id") == ex_id:
-            ex = item
-            break
+    ex = next((e for e in t.get("exercises", []) if e.get("id") == ex_id), None)
     if ex is None:
-        try:
-            await cb.answer("Не нашёл упражнение", show_alert=True)
-        except Exception:
-            pass
+        await cb.message.answer("Не нашёл упражнение")
         return
 
     topic_title = t.get("title", "Тема")
     ex_title = ex.get("title", "Упражнение")
 
-    # Режим свободной рефлексии
+    # Упражнение-«рефлексия»: без степпера — сразу тёплое интро, дальше пользователь пишет и общается свободно
     if ex.get("type") == "chat":
-        CHAT_MODE[cb.message.chat.id] = "reflection"
-        intro = ex.get("intro") or "Запускаем мягкую рефлексию. Пиши как есть — я рядом."
-        body = intro + "\n\nНапиши, с чего начнём…"
-        text = render_text_exercise(topic_title, ex_title, body)
-        try:
-            await safe_edit(cb.message, text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⏹ Стоп", callback_data="reflect:stop")],
-                [InlineKeyboardButton(text="◀️ Назад к теме", callback_data=f"work:topic:{topic_id}")]
-            ]))
-        except Exception:
-            await cb.message.answer(text)
+        intro_long = ex.get("intro_long") or ex.get("intro") or (
+            "Предлагаю спокойно поразмышлять. Напиши, что чувствуешь и что сейчас важно… Я здесь и поддержу."
+        )
+        text = f"🧩 {topic_title} → {ex_title}\n\n{intro_long}"
+        await safe_edit(cb.message, text=text, reply_markup=None)
         return
+
     # Текстовое упражнение без шагов
     text_only = ex.get("text") or ex.get("body") or ex.get("content")
     if text_only and not ex.get("steps"):
@@ -476,24 +474,18 @@ async def cb_pick_exercise(cb: CallbackQuery):
         await safe_edit(cb.message, text=text, reply_markup=back_markup_for_topic(topic_id))
         return
 
-    # Шаги (+ интро как шаг 0, если есть)
-    steps: List[str] = list(ex.get("steps", []))
+    # Обычный степпер
+    steps = ex.get("steps", [])
     intro = ex.get("intro")
-    steps_all = ([str(intro)] + [str(s) for s in steps]) if intro else [str(s) for s in steps]
-
+    steps_all = ([intro] + steps) if intro else steps
     if not steps_all:
-        try:
-            await cb.answer("Пустое упражнение", show_alert=True)
-        except Exception:
-            pass
+        await cb.message.answer("Пустое упражнение")
         return
 
     uid = str(cb.from_user.id)
     _ws_set(uid, topic=topic_id, ex=ex_id, step=0)
-
     text = render_step_text(topic_title, ex_title, steps_all[0])
     await safe_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, 0, len(steps_all)))
-
 @router.callback_query(F.data.startswith("work:step:"))
 async def cb_step_next(cb: CallbackQuery):
     await silent_ack(cb)
