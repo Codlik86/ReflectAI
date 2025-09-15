@@ -147,13 +147,15 @@ def kb_stepper2(topic_id: str, ex_id: str, cur: int, total: int) -> InlineKeyboa
 # minimal main menu (auto-added)
 
 # Инлайн-CTA после онбординга
+
+# --- CTA после онбординга: инлайн-кнопки (надёжно через Builder) ---
 def kb_cta_home() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="💬 Поговорить", callback_data="cta:talk")],
-        [InlineKeyboardButton(text="🧩 Разобраться", callback_data="cta:work")],
-        [InlineKeyboardButton(text="🎧 Медитации", callback_data="cta:meditations")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    b = InlineKeyboardBuilder()
+    b.button(text="�� Поговорить", callback_data="cta:talk")
+    b.button(text="🧩 Разобраться", callback_data="cta:work")
+    b.button(text="🧘 Медитации", callback_data="cta:meditations")
+    b.adjust(1)
+    return b.as_markup()
 
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -199,6 +201,7 @@ from app.tools import (
     debounce_ok,
 )
 from app.rag_qdrant import search as rag_search
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 router = Router()
 adapter: LLMAdapter | None = None
