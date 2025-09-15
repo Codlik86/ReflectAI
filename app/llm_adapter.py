@@ -1,3 +1,4 @@
+import random
 # app/llm_adapter.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
@@ -64,7 +65,8 @@ class LLMAdapter:
         system = kwargs.pop("system", None)
         user_text = kwargs.pop("user", None)
         temperature = float(kwargs.pop("temperature", 0.6))
-        max_tokens = int(kwargs.pop("max_tokens", 700))
+        mtx = kwargs.pop("max_tokens", None)
+        max_tokens = int(mtx) if mtx is not None else random.choice([220, 260, 300, 340, 380, 420])
         extra: Optional[Dict[str, Any]] = kwargs.pop("extra", None)
 
         # Старый стиль позиционных аргументов: (system, user)
