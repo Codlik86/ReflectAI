@@ -54,7 +54,6 @@ router = Router()
 
 # app/bot.py
 # -*- coding: utf-8 -*-
-from __future__ import annotations
 from textwrap import dedent
 from aiogram import F
 import re as _re_for_cmd
