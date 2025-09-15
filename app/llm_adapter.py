@@ -10,7 +10,6 @@ from typing import Optional, Dict, Any, List
 
 import httpx
 
-
 class LLMAdapter:
     """
     Адаптер к /chat/completions (OpenAI-совместимые API, в т.ч. прокси).
@@ -128,7 +127,6 @@ class LLMAdapter:
         if self._client:
             await self._client.aclose()
             self._client = None
-
 
 def apply_generation_defaults(payload: dict) -> dict:
     """
