@@ -3,8 +3,8 @@
 RAG (Qdrant) helper: silent context building with MMR reranking + optional compression.
 
 Public API:
-- async def search(query: str, k: int = 4, max_chars: int = 1400) -> str
-- async def search_with_meta(query: str, k: int = 4, max_chars: int = 1400) -> (str, list[dict])
+- async def search(query: str, k: int = 4, max_chars: int = 1400, lang: Optional[str] = None) -> str
+- async def search_with_meta(query: str, k: int = 4, max_chars: int = 1400, lang: Optional[str] = None) -> (str, list[dict])
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def _norm(a): return math.sqrt(sum((x*x) for x in a)) or 1.0
 def _cosine(a, b): return _dot(a, b) / (_norm(a) * _norm(b))
 
 # --- core: MMR ---------------------------------------------------------------
-async def build_context_mmr(query: str, *, initial_limit: int = 24, select: int = 8, max_chars: int = 1400, lambda_mult: float = 0.6, filter_by: Optional[Dict[str, Any]] = None) -> Tuple[str, List[Dict[str, Any]]]:
+async def build_context_mmr(query: str, *, initial_limit: int = 24, select: int = 8, max_chars: int = 1400, lambda_mult: float = 0.6, filter_by: Optional[Dict[str, Any]] = None, lang: Optional[str] = None) -> Tuple[str, List[Dict[str, Any]]]:
     from qdrant_client.http.models import Filter, FieldCondition, MatchValue  # type: ignore
 
     client = get_client()
