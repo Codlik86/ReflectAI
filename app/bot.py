@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 # --- Per-topic emojis for /work ---
-DEFAULT_TOPIC_ICON = "🧭"  # общий эмодзи по умолчанию
+DEFAULT_TOPIC_ICON = "🌿"  # общий эмодзи по умолчанию
 TOPIC_ICONS = {
     "reflection": "🪞",            # Рефлексия
     "anxiety": "🌬️",               # Тревога
@@ -134,7 +134,7 @@ def kb_topics() -> InlineKeyboardMarkup:
         if not title or title in seen:
             continue
         seen.add(title)
-        b.button(text=f"🧩 {title}", callback_data=f"work:topic:{key}")
+        b.button(text=f"🌿 {title}", callback_data=f"work:topic:{key}")
     b.adjust(1)
     return b.as_markup()
 
@@ -159,7 +159,7 @@ def back_markup_for_topic(topic_id: str) -> InlineKeyboardMarkup:
     """
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад к упражнениям", callback_data=f"work:topic:{topic_id}")],
-        [InlineKeyboardButton(text="🧩 Другие темы", callback_data="work:back_topics")],
+        [InlineKeyboardButton(text="🌿 Другие темы", callback_data="work:back_topics")],
     ])
 
 def kb_stepper2(topic_id: str, ex_id: str, cur: int, total: int) -> InlineKeyboardMarkup:
@@ -178,11 +178,11 @@ def kb_stepper2(topic_id: str, ex_id: str, cur: int, total: int) -> InlineKeyboa
 
 # ==== Вспомогательные рендер-функции =======================================
 def render_step_text(topic_title: str, ex_title: str, step_text: str) -> str:
-    header = "🧩 " + topic_title + " → " + ex_title
+    header = "🌿 " + topic_title + " → " + ex_title
     return header + "\n\n" + str(step_text)
 
 def render_text_exercise(topic_title: str, ex_title: str, text: str) -> str:
-    header = "🧩 " + topic_title + " → " + ex_title
+    header = "🌿 " + topic_title + " → " + ex_title
     return header + "\n\n" + str(text)
 
 # ==== Эфемерное состояние упражнения (на пользователя) =====================
@@ -483,7 +483,7 @@ async def cb_pick_exercise(cb: CallbackQuery):
         intro_long = ex.get("intro_long") or ex.get("intro") or (
             "Предлагаю спокойно поразмышлять. Напиши, что чувствуешь и что сейчас важно… Я здесь и поддержу."
         )
-        text = f"🧩 {topic_title} → {ex_title}\n\n{intro_long}"
+        text = f"🌿 {topic_title} → {ex_title}\n\n{intro_long}"
         await safe_edit(cb.message, text=text, reply_markup=None)
         return
 
@@ -569,7 +569,7 @@ def tools_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="💡 Рефлексия", callback_data="tool_reframe"),
-            InlineKeyboardButton(text="🧩 Микрошаг",  callback_data="tool_micro"),
+            InlineKeyboardButton(text="🌿 Микрошаг",  callback_data="tool_micro"),
         ],
     ])
 
@@ -676,7 +676,7 @@ async def on_text(m: Message):
         else:
             a = st["answers"]
             summary = (
-                "🧩 Итог рефлексии\n\n"
+                "🌿 Итог рефлексии\n\n"
                 f"• Мысль: {a.get('thought','—')}\n"
                 f"• Эмоция (1–10): {a.get('emotion','—')}\n"
                 f"• Действие: {a.get('behavior','—')}\n"
