@@ -5,6 +5,12 @@ import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import PointStruct
 from dotenv import load_dotenv
+# ensure project root on sys.path when run as a file
+import sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 load_dotenv()
 
