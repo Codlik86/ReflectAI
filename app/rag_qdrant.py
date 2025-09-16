@@ -1,183 +1,191 @@
-# app/rag_qdrant.py
+# -*- coding: utf-8 -*-
+"""
+RAG (Qdrant) helper: silent context building with MMR reranking.
+
+Public API:
+- async def search(query: str, k: int = 4, max_chars: int = 1400) -> str
+- async def search_with_meta(query: str, k: int = 4, max_chars: int = 1400) -> (str, list[dict])
+"""
+from __future__ import annotations
 
 import os
-RAG_TRACE = os.getenv('RAG_TRACE','0')=='1'
-from typing import List, Dict, Any, Optional, Set
-import httpx
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+import math
+from typing import List, Tuple, Dict, Any, Optional
 
-from app.qdrant_client import get_client
+# --- Qdrant client -----------------------------------------------------------
+try:
+    from app.qdrant_client import get_client  # type: ignore
+except Exception:
+    from qdrant_client import QdrantClient  # type: ignore
+    def get_client() -> "QdrantClient":  # type: ignore
+        url = os.getenv("QDRANT_URL", "http://localhost:6333")
+        api_key = os.getenv("QDRANT_API_KEY")
+        return QdrantClient(url=url, api_key=api_key)  # type: ignore
 
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "reflectai_corpus")
+RAG_TRACE = os.getenv("RAG_TRACE", "0") == "1"
 
-OPENAI_BASE = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+# --- Embeddings --------------------------------------------------------------
+def _get_embedder():
+    prov = os.getenv("EMBED_PROVIDER", "openai").lower()
+    if prov == "openai":
+        try:
+            from openai import OpenAI  # type: ignore
+            client = OpenAI()
+            model = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+            def _emb(texts: List[str]) -> List[List[float]]:
+                res = client.embeddings.create(model=model, input=texts)
+                return [d.embedding for d in res.data]
+            return _emb
+        except Exception:
+            pass
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        mname = os.getenv("SBERT_MODEL", "intfloat/multilingual-e5-small")
+        model = SentenceTransformer(mname)
+        def _emb(texts: List[str]) -> List[List[float]]:
+            return model.encode(texts).tolist()
+        return _emb
+    except Exception as e:
+        raise RuntimeError("No embedding provider available. Set OPENAI_API_KEY or install sentence-transformers.") from e
 
-# Корзины, чтобы ответы были разнообразными (когнитивное/поведенческое/психообразование)
-PREFERRED_BUCKETS = [
-    {
-        "name": "cognitive",
-        "tags": {
-            "cognitive_restructuring",
-            "socratic_questioning",
-            "cognitive_model",
-            "defusion",
-        },
-    },
-    {
-        "name": "behavioral",
-        "tags": {
-            "behavioural_activation",  # британское написание
-            "behavioral_experiments",
-            "exposure",
-            "problem_solving",
-            "values",
-        },
-    },
-    {
-        "name": "psychoeducation",
-        "tags": {
-            "psychoeducation",
-            "expectations",
-            "homework",
-            "session_structure",
-            "relapse_prevention",
-            "self_help",
-        },
-    },
-]
+_EMBED = None
+async def embed(text_or_texts: str | List[str]) -> List[float] | List[List[float]]:
+    global _EMBED
+    if _EMBED is None:
+        _EMBED = _get_embedder()
+    if isinstance(text_or_texts, list):
+        return _EMBED(text_or_texts)
+    return _EMBED([text_or_texts])[0]
 
-# Не запрещаем, но мягко снижаем приоритет, если только что предлагали
-DEPRIORITIZE: Set[str] = {"breathing"}
+# --- helpers -----------------------------------------------------------------
+def _text_from_payload(pl: Dict[str, Any]) -> str:
+    t = pl.get("text")
+    if t:
+        return str(t)
+    for k in ("page_content", "chunk", "content"):
+        if pl.get(k):
+            return str(pl[k])
+    return ""
 
-async def embed(text: str) -> List[float]:
-    if not OPENAI_KEY:
-        raise RuntimeError("OPENAI_API_KEY missing")
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}"}
-    payload = {"model": EMBED_MODEL, "input": text}
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(f"{OPENAI_BASE}/embeddings", json=payload, headers=headers)
-        r.raise_for_status()
-        data = r.json()
-        return data["data"][0]["embedding"]
+def _split_sents_ru(text: str) -> List[str]:
+    import re
+    parts = re.split(r'(?<=[\.!\?])\s+(?=[А-ЯA-ZЁ])', text.strip())
+    return [p.strip() for p in parts if p.strip()]
 
-def _bucket_of(tagset: Set[str]) -> Optional[str]:
-    for b in PREFERRED_BUCKETS:
-        if tagset & b["tags"]:
-            return b["name"]
-    return None
+def _dot(a, b): return sum((x*y) for x, y in zip(a, b))
+def _norm(a): return math.sqrt(sum((x*x) for x in a)) or 1.0
+def _cosine(a, b): return _dot(a, b) / (_norm(a) * _norm(b))
 
-def _diversify(scored_points, k: int, last_suggested_tag: Optional[str] = None):
-    """
-    Вход: результаты Qdrant (объекты со свойствами .payload и .score)
-    Выход: k элементов с разнообразием по корзинам и мягким анти-повтором.
-    """
-    pool = []
-    for p in scored_points:
-        payload = (getattr(p, "payload", None) or {})
-        tags = set(payload.get("tags") or [])
-        pool.append(
-            {
-                "p": p,
-                "tags": tags,
-                "bucket": _bucket_of(tags),
-                "score": float(getattr(p, "score", 0.0) or 0.0),
-            }
-        )
-
-    # 1) Если в прошлом ответе уже предлагали дыхание — по возможности убираем его из кандидатов
-    if last_suggested_tag == "breathing":
-        filtered = [x for x in pool if "breathing" not in x["tags"]]
-        pool = filtered or pool  # если всё исчезло — откатимся
-
-    picked = []
-
-    # 2) Сначала закрываем ключевые корзины по одному элементу
-    for bucket_name in ["cognitive", "behavioral", "psychoeducation"]:
-        cand = [x for x in pool if x["bucket"] == bucket_name]
-        if cand:
-            best = sorted(cand, key=lambda x: x["score"], reverse=True)[0]
-            picked.append(best)
-            pool.remove(best)
-            if len(picked) >= k:
-                break
-
-    # 3) Добираем оставшиеся лучшие, избегая перенасыщения одними и теми же тегами
-    seen_tags = set().union(*[x["tags"] for x in picked]) if picked else set()
-    for x in sorted(pool, key=lambda x: x["score"], reverse=True):
-        if len(picked) >= k:
-            break
-        if (x["tags"] & seen_tags) and (x["tags"] & DEPRIORITIZE):
-            continue
-        picked.append(x)
-        seen_tags |= x["tags"]
-
-    return [x["p"] for x in picked]
-
-def _text_from_payload(payload: Dict[str, Any]) -> str:
-    # Основной путь — payload["text"]; фоллбеки на случай старых точек
-    return (
-        (payload or {}).get("text")
-        or (payload or {}).get("content")
-        or (payload or {}).get("document")
-        or ""
-    ).strip()
-
-async def search(
+# --- core: MMR ---------------------------------------------------------------
+async def build_context_mmr(
     query: str,
-    k: int = 4,
+    *,
+    initial_limit: int = 24,
+    select: int = 8,
     max_chars: int = 1400,
-    filter_by: Dict[str, Any] | None = None,
-    last_suggested_tag: Optional[str] = None,
-) -> str:
-    """
-    Возвращает СТРОКУ контекста (склеенные выдержки) для подсказки LLM.
-    — Берём limit=16 лучших кандидатов из Qdrant.
-    — Отбираем k (по умолчанию 4) с диверсификацией по корзинам.
-    — Мягко снижаем повтор дыхания, если недавно советовали.
-    """
-    client: QdrantClient = get_client()
+    lambda_mult: float = 0.6,
+    filter_by: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    from qdrant_client.http.models import Filter, FieldCondition, MatchValue  # type: ignore
+
+    client = get_client()
     qvec = await embed(query)
 
     qfilter = None
     if filter_by:
-        conds = []
-        for kf, val in filter_by.items():
-            conds.append(FieldCondition(key=kf, match=MatchValue(value=val)))
-        qfilter = Filter(must=conds)
+        must = [FieldCondition(key=k, match=MatchValue(value=v)) for k, v in filter_by.items()]  # type: ignore
+        qfilter = Filter(must=must)  # type: ignore
 
     hits = client.search(
         collection_name=QDRANT_COLLECTION,
-        query_vector=qvec,
-        limit=16,  # берём больше кандидатов, потом диверсифицируем
+        query_vector=qvec,  # type: ignore[arg-type]
+        limit=initial_limit,
         query_filter=qfilter,
         with_payload=True,
         with_vectors=False,
     )
 
-    if not hits:
-        return ""
+    cand = []
+    for h in hits:
+        pl = h.payload or {}
+        txt = _text_from_payload(pl).strip()
+        if not txt:
+            continue
+        cand.append({
+            "text": txt,
+            "src": pl.get("source") or pl.get("file") or "",
+            "title": pl.get("title") or "",
+            "hit_score": float(getattr(h, "score", 0.0)),
+        })
+    if not cand:
+        return "", []
 
-    selected = _diversify(hits, k=k, last_suggested_tag=last_suggested_tag)
+    texts = [c["text"] for c in cand]
+    vecs = await embed(texts)  # type: ignore[assignment]
+    sims_q = [_cosine(qvec, v) for v in vecs]  # type: ignore[arg-type]
 
-    # Склеиваем тексты; разделяем маркером для читаемости
+    selected_idx: List[int] = []
+    used_sources = set()
+
+    while len(selected_idx) < min(select, len(cand)):
+        best_i, best_val = None, -1e9
+        for i, v in enumerate(vecs):
+            if i in selected_idx:
+                continue
+            max_sim_to_sel = max((_cosine(v, vecs[j]) for j in selected_idx), default=0.0)  # type: ignore[arg-type]
+            src_penalty = 0.05 if cand[i]["src"] in used_sources else 0.0
+            mmr = lambda_mult * sims_q[i] - (1.0 - lambda_mult) * max_sim_to_sel - src_penalty
+            if mmr > best_val:
+                best_val, best_i = mmr, i
+        if best_i is None:
+            break
+        selected_idx.append(best_i)
+        used_sources.add(cand[best_i]["src"])
+
     pieces: List[str] = []
     total = 0
-    for p in selected:
-        t = _text_from_payload(getattr(p, "payload", {}) or {})
-        if not t:
-            continue
-        # обрезка по лимиту символов
-        take = max_chars - total
-        if take <= 0:
+    for i in selected_idx:
+        chunk = cand[i]["text"]
+        need = max_chars - total
+        if need <= 0:
             break
-        if len(t) > take:
-            t = t[:take].rstrip() + "…"
-        pieces.append(t)
-        total += len(t)
-        if total >= max_chars:
-            break
+        if len(chunk) <= need:
+            pieces.append(chunk)
+            total += len(chunk)
+        else:
+            sents = _split_sents_ru(chunk)
+            acc, cur = [], 0
+            for s in sents:
+                if cur + len(s) + 1 > need:
+                    break
+                acc.append(s)
+                cur += len(s) + 1
+            if acc:
+                pieces.append(" ".join(acc).strip() + "…")
+                total += cur
 
-    return ("\n\n---\n\n").join(pieces)
+    ctx = "\n\n---\n\n".join(pieces).strip()
+    meta = [{"source": cand[i]["src"], "title": cand[i]["title"], "score": sims_q[i]} for i in selected_idx]
+
+    if RAG_TRACE:
+        try:
+            print("[RAG.mmr] query=", query[:60].replace("\n", " "),
+                  "ctx_len=", len(ctx),
+                  "picked=", [m["source"] for m in meta])
+        except Exception:
+            pass
+    return ctx, meta
+
+# --- public API --------------------------------------------------------------
+async def search_with_meta(query: str, k: int = 4, max_chars: int = 1400, **kwargs) -> Tuple[str, List[Dict[str, Any]]]:
+    return await build_context_mmr(
+        query,
+        initial_limit=max(16, k * 4),
+        select=k,
+        max_chars=max_chars,
+    )
+
+async def search(query: str, k: int = 4, max_chars: int = 1400, **kwargs) -> str:
+    ctx, _ = await search_with_meta(query, k=k, max_chars=max_chars)
+    return ctx
