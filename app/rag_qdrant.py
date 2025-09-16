@@ -1,6 +1,7 @@
 # app/rag_qdrant.py
-RAG_TRACE = os.getenv('RAG_TRACE','0')=='1'
+
 import os
+RAG_TRACE = os.getenv('RAG_TRACE','0')=='1'
 from typing import List, Dict, Any, Optional, Set
 import httpx
 from qdrant_client import QdrantClient
@@ -51,7 +52,6 @@ PREFERRED_BUCKETS = [
 # Не запрещаем, но мягко снижаем приоритет, если только что предлагали
 DEPRIORITIZE: Set[str] = {"breathing"}
 
-
 async def embed(text: str) -> List[float]:
     if not OPENAI_KEY:
         raise RuntimeError("OPENAI_API_KEY missing")
@@ -63,13 +63,11 @@ async def embed(text: str) -> List[float]:
         data = r.json()
         return data["data"][0]["embedding"]
 
-
 def _bucket_of(tagset: Set[str]) -> Optional[str]:
     for b in PREFERRED_BUCKETS:
         if tagset & b["tags"]:
             return b["name"]
     return None
-
 
 def _diversify(scored_points, k: int, last_suggested_tag: Optional[str] = None):
     """
@@ -118,7 +116,6 @@ def _diversify(scored_points, k: int, last_suggested_tag: Optional[str] = None):
 
     return [x["p"] for x in picked]
 
-
 def _text_from_payload(payload: Dict[str, Any]) -> str:
     # Основной путь — payload["text"]; фоллбеки на случай старых точек
     return (
@@ -127,7 +124,6 @@ def _text_from_payload(payload: Dict[str, Any]) -> str:
         or (payload or {}).get("document")
         or ""
     ).strip()
-
 
 async def search(
     query: str,
