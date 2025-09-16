@@ -18,8 +18,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 
 # В aiogram v3 билдер можно не использовать для простых клавиатур
-# from aiogram.utils.keyboard import InlineKeyboardBuilder
-
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import text as sql_text
 
 # ==== Внутренние импорты проекта ============================================
