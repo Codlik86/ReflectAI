@@ -1,4 +1,5 @@
 # app/rag_qdrant.py
+RAG_TRACE = os.getenv('RAG_TRACE','0')=='1'
 import os
 from typing import List, Dict, Any, Optional, Set
 import httpx

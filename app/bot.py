@@ -750,39 +750,22 @@ async def on_text(m: Message):
         await m.answer(CRISIS_REPLY)
         return
 
-    # мягкий RAG (если доступен)
-    if rag_search is not None:
-        try:
-            rag_ctx = await rag_search(user_text, k=3, max_chars=1200)
-        except Exception:
-            rag_ctx = ""
-    else:
-        rag_ctx = ""
-
-    # длинная память (последние дни)
-    long_tail = _load_recent_turns(tg_id, days=7, limit=24)
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if rag_ctx:
-        messages.append({"role": "system", "content": "Короткий контекст:\n" + rag_ctx})
-    messages.extend(long_tail[-10:])          # из БД
-    messages.extend(DIALOG_HISTORY[chat_id])  # из RAM
-    messages.append({"role": "user", "content": user_text})
-
+        # мягкий RAG (если доступен)
+    rag_ctx = ""
     try:
-        # обязательно передаём user
-        answer = await adapter.complete_chat(user=tg_id, messages=messages, temperature=0.6)
-    except Exception as e:
-        answer = f"Не получилось обратиться к модели: {e}"
-
-    _push(chat_id, "user", user_text)
-    _push(chat_id, "assistant", answer)
-    _save_turn(tg_id, "user", user_text)
-    _save_turn(tg_id, "assistant", answer)
-
-    await m.answer(answer, reply_markup=None)
-
-
+        if rag_search is not None:
+            rag_ctx = await rag_search(user_text, k=3, max_chars=1200)
+    except Exception:
+        rag_ctx = ""
+    # скрытый лог в stdout (только при RAG_TRACE=1)
+    import os as _os
+    if _os.getenv('RAG_TRACE','0') == '1':
+        try:
+            from app.rag_qdrant import search_with_meta as _rag_meta
+            _, _meta = await _rag_meta(user_text, k=3, max_chars=1200)
+            print('[RAG] ctx_len=', len(rag_ctx), ' sources=', ', '.join(str(d.get('source')) for d in (_meta or [])[:5]))
+        except Exception:
+            print('[RAG] ctx_len=', len(rag_ctx))
 @router.callback_query(F.data == "reflect:stop")
 async def reflect_stop(cb: CallbackQuery):
     CHAT_MODE.pop(cb.message.chat.id, None)
