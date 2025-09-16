@@ -9,8 +9,26 @@ Public API:
 from __future__ import annotations
 
 import os
+RAG_LANG = os.getenv('RAG_LANG') or None
+
+def _filter_lang(hits, lang):
+    """Оставляет только документы с payload['lang']==lang. Если lang пустой — возвращает как есть."""
+    if not lang:
+        return hits
+    out = []
+    for h in (hits or []):
+        payload = None
+        # qdrant-client может отдавать hit как объект с .payload или как dict
+        if hasattr(h, "payload"):
+            payload = getattr(h, "payload", None)
+        elif isinstance(h, dict):
+            payload = h.get("payload")
+        if isinstance(payload, dict) and payload.get("lang") == lang:
+            out.append(h)
+    return out
+
 import math
-from typing import List, Tuple, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # --- Qdrant client -----------------------------------------------------------
 try:
@@ -88,15 +106,7 @@ def _norm(a): return math.sqrt(sum((x*x) for x in a)) or 1.0
 def _cosine(a, b): return _dot(a, b) / (_norm(a) * _norm(b))
 
 # --- core: MMR ---------------------------------------------------------------
-async def build_context_mmr(
-    query: str,
-    *,
-    initial_limit: int = 24,
-    select: int = 8,
-    max_chars: int = 1400,
-    lambda_mult: float = 0.6,
-    filter_by: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, List[Dict[str, Any]]]:
+async def build_context_mmr(query: str, *, initial_limit: int = 24, select: int = 8, max_chars: int = 1400, lambda_mult: float = 0.6, filter_by: Optional[Dict[str, Any]] = None) -> Tuple[str, List[Dict[str, Any]]]:
     from qdrant_client.http.models import Filter, FieldCondition, MatchValue  # type: ignore
 
     client = get_client()
