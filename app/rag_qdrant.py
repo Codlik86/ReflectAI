@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-RAG (Qdrant) helper: silent context building with MMR reranking.
+RAG (Qdrant) helper: silent context building with MMR reranking + optional compression.
 
 Public API:
 - async def search(query: str, k: int = 4, max_chars: int = 1400) -> str
@@ -27,11 +27,18 @@ RAG_TRACE = os.getenv("RAG_TRACE", "0") == "1"
 
 # --- Embeddings --------------------------------------------------------------
 def _get_embedder():
+    """
+    Returns callable embed(texts: List[str]) -> List[List[float]].
+    Prefers OpenAI (respects OPENAI_BASE_URL), falls back to sentence-transformers if installed.
+    """
     prov = os.getenv("EMBED_PROVIDER", "openai").lower()
     if prov == "openai":
         try:
             from openai import OpenAI  # type: ignore
-            client = OpenAI()
+            client = OpenAI(
+                base_url=os.getenv("OPENAI_BASE_URL") or None,
+                api_key=os.getenv("OPENAI_API_KEY"),
+            )
             model = os.getenv("EMBED_MODEL", "text-embedding-3-small")
             def _emb(texts: List[str]) -> List[List[float]]:
                 res = client.embeddings.create(model=model, input=texts)
@@ -47,7 +54,10 @@ def _get_embedder():
             return model.encode(texts).tolist()
         return _emb
     except Exception as e:
-        raise RuntimeError("No embedding provider available. Set OPENAI_API_KEY or install sentence-transformers.") from e
+        raise RuntimeError(
+            "No embedding provider available. Set OPENAI_API_KEY (and OPENAI_BASE_URL if proxy) "
+            "or install sentence-transformers."
+        ) from e
 
 _EMBED = None
 async def embed(text_or_texts: str | List[str]) -> List[float] | List[List[float]]:
@@ -177,6 +187,57 @@ async def build_context_mmr(
             pass
     return ctx, meta
 
+# --- compression flags (optional) ---
+RAG_COMPRESS = os.getenv("RAG_COMPRESS","0") == "1"
+RAG_COMPRESS_MODEL = os.getenv("RAG_COMPRESS_MODEL","gpt-4o-mini")
+RAG_MAX_CHARS = int(os.getenv("RAG_MAX_CHARS","1400"))
+
+def _get_chat_client():
+    from openai import OpenAI  # type: ignore
+    return OpenAI(
+        base_url=os.getenv("OPENAI_BASE_URL") or None,
+        api_key=os.getenv("OPENAI_API_KEY"),
+    )
+
+async def compress_context(ctx: str, query: str, *, max_chars: int = 1200) -> str:
+    """
+    Сжимает многоисточниковый контекст в один компактный связный кусок на русском.
+    Не добавляет ссылки/источники. Тёплый нейтральный тон.
+    """
+    if not ctx or len(ctx) <= max_chars:
+        return ctx
+    try:
+        client = _get_chat_client()
+        prompt_sys = (
+            "Ты помогаешь эмоциональной поддержке на русском. "
+            "Дано сырьё из нескольких фрагментов (из статей/руководств). "
+            "Сожми это в один связный фрагмент, релевантный запросу. "
+            "Пиши просто и тепло, без категоричности и диагнозов. "
+            "Не упоминай источники/ссылки. Без ссылочных меток. "
+            f"До ~{max_chars} символов. Только текст."
+        )
+        prompt_usr = (
+            "Запрос пользователя:\\n"
+            f"{query}\\n\\n"
+            "Сырой контекст (фрагменты):\\n"
+            f"{ctx}\\n\\n"
+            "Сожми и переформулируй в один понятный абзац или два, сохранив ключевые идеи и мягкие практические шаги."
+        )
+        resp = client.chat.completions.create(
+            model=RAG_COMPRESS_MODEL,
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": prompt_sys},
+                {"role": "user", "content": prompt_usr},
+            ],
+        )
+        txt = (resp.choices[0].message.content or "").strip()
+        if not txt:
+            return ctx
+        return (txt[:max_chars].rstrip() + "…") if len(txt) > max_chars else txt
+    except Exception:
+        return ctx
+
 # --- public API --------------------------------------------------------------
 async def search_with_meta(query: str, k: int = 4, max_chars: int = 1400, **kwargs) -> Tuple[str, List[Dict[str, Any]]]:
     return await build_context_mmr(
@@ -187,5 +248,13 @@ async def search_with_meta(query: str, k: int = 4, max_chars: int = 1400, **kwar
     )
 
 async def search(query: str, k: int = 4, max_chars: int = 1400, **kwargs) -> str:
+    """
+    Возвращает строку-контекст. Внутри: MMR-сборка -> (опционально) компрессор.
+    """
     ctx, _ = await search_with_meta(query, k=k, max_chars=max_chars)
+    if RAG_COMPRESS:
+        limit = min(max_chars, RAG_MAX_CHARS)
+        if limit < 600:
+            limit = int(max_chars * 0.85)
+        ctx = await compress_context(ctx, query, max_chars=limit)
     return ctx
