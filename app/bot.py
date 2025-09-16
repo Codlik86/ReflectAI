@@ -126,6 +126,7 @@ def kb_main() -> ReplyKeyboardMarkup:
     )
 
 # --- Список тем (уникальные по title) ---
+
 def kb_topics() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     seen = set()
@@ -134,7 +135,8 @@ def kb_topics() -> InlineKeyboardMarkup:
         if not title or title in seen:
             continue
         seen.add(title)
-        b.button(text=f"🌿 {title}", callback_data=f"work:topic:{key}")
+        icon = topic_icon(key, t)
+        b.button(text=f"{icon} {title}", callback_data=f"work:topic:{key}")
     b.adjust(1)
     return b.as_markup()
 
@@ -449,15 +451,15 @@ async def cb_pick_topic(cb: CallbackQuery):
         intro_long = t.get("intro_long") or intro or (
             "Давай немного поразмышляем об этом. Напиши пару строк — что волнует, что хочется понять… Я рядом."
         )
-        text = f"Тема: {title}\n\n{intro_long}"
+        text = f"Тема: {topic_icon(topic_id, t)} {title}\n\n{intro_long}"
         await safe_edit(cb.message, text=text, reply_markup=None)
         return
 
     # Обычная тема: показываем интро и список упражнений
     if intro:
-        text = f"Тема: {title}\n\n{intro}"
+        text = f"Тема: {topic_icon(topic_id, t)} {title}\n\n{intro}"
     else:
-        text = f"Ок, остаёмся в теме «{title}». Выбери упражнение ниже."
+        text = f"Ок, остаёмся в теме {topic_icon(topic_id, t)} «{title}». Выбери упражнение ниже."
     await safe_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
 @router.callback_query(F.data.startswith("work:ex:"))
 async def cb_pick_exercise(cb: CallbackQuery):
