@@ -1,6 +1,24 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+# --- Per-topic emojis for /work ---
+DEFAULT_TOPIC_ICON = "🧭"  # общий эмодзи по умолчанию
+TOPIC_ICONS = {
+    "reflection": "🪞",            # Рефлексия
+    "anxiety": "🌬️",               # Тревога
+    "anger": "🔥",                  # Злость
+    "pain_melancholy": "🌧️",       # Боль и тоска
+    "sleep": "🌙",                  # Сон
+    "breath_body": "🧘",            # Дыхание и тело
+    "procrastination": "⏳",        # Прокрастинация
+    "burnout": "🪫",                # Выгорание
+    "decisions": "🧭",              # Решения и неопределённость
+    "social_anxiety": "🗣️",        # Социальная тревога
+}
+def topic_icon(tid: str, t: dict) -> str:
+    return TOPIC_ICONS.get(tid, t.get("icon", DEFAULT_TOPIC_ICON))
+
+
 # ==== Импорты ===============================================================
 from textwrap import dedent
 from collections import defaultdict, deque
