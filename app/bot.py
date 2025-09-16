@@ -1,6 +1,50 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+# --- universal edit helper: edits text OR caption safely ---
+async def smart_edit(message, text, **kwargs):
+    """
+    Универсальное редактирование ответов:
+    - если сообщение текстовое — edit_text
+    - если это медиа с подписью — edit_caption
+    - иначе отправляем новое сообщение
+    Всегда молча игнорирует "message is not modified".
+    """
+    try:
+        # Текстовое сообщение
+        if getattr(message, "text", None) is not None:
+            if message.text != text:
+                await message.edit_text(text, **kwargs)
+            return
+
+        # Медиа/подпись
+        has_media = any([
+            getattr(message, "caption", None) is not None,
+            getattr(message, "photo", None),
+            getattr(message, "video", None),
+            getattr(message, "animation", None),
+            getattr(message, "document", None),
+            getattr(message, "audio", None),
+            getattr(message, "voice", None),
+        ])
+        if has_media:
+            cur = getattr(message, "caption", None)
+            if cur != text:
+                await message.edit_caption(caption=text, **kwargs)
+            return
+
+        # Фолбэк — новое сообщение
+        await message.answer(text, **kwargs)
+
+    except Exception as e:
+        msg = str(e).lower()
+        if "message is not modified" in msg:
+            return
+        try:
+            await message.answer(text, **kwargs)
+        except Exception:
+            await message.answer(text)
+
 # --- Per-topic emojis for /work ---
 DEFAULT_TOPIC_ICON = "🌿"  # общий эмодзи по умолчанию
 TOPIC_ICONS = {
@@ -443,7 +487,7 @@ async def _open_work_from_keyboard(m: Message):
 @router.callback_query(F.data == "work:back_topics")
 async def cb_back_topics(cb: CallbackQuery):
     await silent_ack(cb)
-    await safe_edit(cb.message, text="Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
+    await smart_edit(cb.message, text="Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
 
 @router.callback_query(F.data.startswith("work:topic:"))
 async def cb_pick_topic(cb: CallbackQuery):
@@ -464,7 +508,7 @@ async def cb_pick_topic(cb: CallbackQuery):
             "Давай немного поразмышляем об этом. Напиши пару строк — что волнует, что хочется понять… Я рядом."
         )
         text = f"Тема: {topic_icon(topic_id, t)} {title}\n\n{intro_long}"
-        await safe_edit(cb.message, text=text, reply_markup=None)
+        await smart_edit(cb.message, text=text, reply_markup=None)
         return
 
     # Обычная тема: показываем интро и список упражнений
@@ -472,7 +516,7 @@ async def cb_pick_topic(cb: CallbackQuery):
         text = f"Тема: {topic_icon(topic_id, t)} {title}\n\n{intro}"
     else:
         text = f"Ок, остаёмся в теме {topic_icon(topic_id, t)} «{title}». Выбери упражнение ниже."
-    await safe_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
+    await smart_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
 @router.callback_query(F.data.startswith("work:ex:"))
 async def cb_pick_exercise(cb: CallbackQuery):
     # быстро отвечаем на callback
@@ -498,14 +542,14 @@ async def cb_pick_exercise(cb: CallbackQuery):
             "Предлагаю спокойно поразмышлять. Напиши, что чувствуешь и что сейчас важно… Я здесь и поддержу."
         )
         text = f"🌿 {topic_title} → {ex_title}\n\n{intro_long}"
-        await safe_edit(cb.message, text=text, reply_markup=None)
+        await smart_edit(cb.message, text=text, reply_markup=None)
         return
 
     # Текстовое упражнение без шагов
     text_only = ex.get("text") or ex.get("body") or ex.get("content")
     if text_only and not ex.get("steps"):
         text = render_text_exercise(topic_title, ex_title, str(text_only))
-        await safe_edit(cb.message, text=text, reply_markup=back_markup_for_topic(topic_id))
+        await smart_edit(cb.message, text=text, reply_markup=back_markup_for_topic(topic_id))
         return
 
     # Обычный степпер
@@ -519,7 +563,7 @@ async def cb_pick_exercise(cb: CallbackQuery):
     uid = str(cb.from_user.id)
     _ws_set(uid, topic=topic_id, ex=ex_id, step=0)
     text = render_step_text(topic_title, ex_title, steps_all[0])
-    await safe_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, 0, len(steps_all)))
+    await smart_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, 0, len(steps_all)))
 @router.callback_query(F.data.startswith("work:step:"))
 async def cb_step_next(cb: CallbackQuery):
     await silent_ack(cb)
@@ -554,14 +598,14 @@ async def cb_step_next(cb: CallbackQuery):
         # завершение
         _ws_reset(uid)
         done_text = "✅ Готово. Хочешь выбрать другое упражнение или тему?"
-        await safe_edit(cb.message, text=done_text, reply_markup=kb_exercises(topic_id))
+        await smart_edit(cb.message, text=done_text, reply_markup=kb_exercises(topic_id))
         return
 
     _ws_set(uid, step=cur)
     topic_title = t.get("title", "Тема")
     ex_title = (ex.get("title") or "Упражнение")
     text = render_step_text(topic_title, ex_title, steps_all[cur])
-    await safe_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, cur, len(steps_all)))
+    await smart_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, cur, len(steps_all)))
 
 @router.callback_query(F.data == "work:stop")
 async def cb_stop(cb: CallbackQuery):
@@ -570,7 +614,7 @@ async def cb_stop(cb: CallbackQuery):
         _ws_reset(str(cb.from_user.id))
     except Exception:
         pass
-    await safe_edit(
+    await smart_edit(
         cb.message,
         text="Остановил упражнение. Можем просто поговорить или выбрать другую тему.",
         reply_markup=kb_topics(),
