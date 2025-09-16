@@ -69,7 +69,7 @@ except Exception:
 
 # ==== Константы/эмодзи ======================================================
 EMO_TALK = "\U0001F4AC"        # 💬
-EMO_PUZZLE = "\U0001F9E9"      # 🧩
+EMO_HERB = "\U0001f33f"        # 🌿
 EMO_HEADPHONES = "\U0001F3A7"  # 🎧
 EMO_GEAR = "\u2699\ufe0f"      # ⚙️
 
@@ -119,7 +119,7 @@ def kb_main() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=f"{EMO_TALK} Поговорить")],
-            [KeyboardButton(text=f"{EMO_PUZZLE} Разобраться"), KeyboardButton(text=f"{EMO_HEADPHONES} Медитации")],
+            [KeyboardButton(text=f"{EMO_HERB} Разобраться"), KeyboardButton(text=f"{EMO_HEADPHONES} Медитации")],
             [KeyboardButton(text=f"{EMO_GEAR} Настройки")],
         ],
         resize_keyboard=True, one_time_keyboard=False, selective=False
@@ -311,7 +311,7 @@ def onb_goals_kb() -> InlineKeyboardMarkup:
 async def on_btn_talk(m: Message):
     await m.answer("Я рядом. Расскажи, что на душе — начнём с этого.", reply_markup=None)
 
-@router.message(F.text == f"{EMO_PUZZLE} Разобраться")
+@router.message(F.text == f"{EMO_HERB} Разобраться")
 async def on_btn_work(m: Message):
     await m.answer("Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
 
@@ -424,7 +424,7 @@ async def cb_done_gate(cb: CallbackQuery):
         await cb.message.answer(get_home_text())
 
 # ==== Работа с темами/упражнениями =========================================
-@router.message(F.text == f"{EMO_PUZZLE} Разобраться")
+@router.message(F.text == f"{EMO_HERB} Разобраться")
 async def _open_work_from_keyboard(m: Message):
     await on_btn_work(m)
 
