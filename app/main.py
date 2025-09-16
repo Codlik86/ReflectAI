@@ -38,10 +38,6 @@ async def telegram_webhook(request: Request):
     await dp.feed_update(bot, update)
     return Response(status_code=200)
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
 @app.on_event("startup")
 async def on_startup():
     await bot.set_webhook(
@@ -54,3 +50,10 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
+
+@app.api_route("/health", methods=["GET","HEAD"], include_in_schema=False)
+async def health(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    # оставляем прежнее поведение GET — JSON {"status":"ok"}
+    return {"status": "ok"}
