@@ -290,7 +290,10 @@ def _append_goal(tg_id: str, goal_code: str) -> None:
 
 # ==== Онбординг =============================================================
 ONB_IMAGES = {
-    "cover": "https://file.garden/aML3M6Sqrg21TaIT/kind-creature%20(3).png",
+    "cover": "https://file.garden/aML3M6Sqrg21TaIT/kind-creature-min.jpg",
+    "talk": "https://file.garden/aML3M6Sqrg21TaIT/warm-conversation-min.jpg",
+    "work": "https://file.garden/aML3M6Sqrg21TaIT/_practices-min.jpg",
+    "meditations": "https://file.garden/aML3M6Sqrg21TaIT/meditation-min.jpg",
 }
 
 def onb_start_kb() -> InlineKeyboardMarkup:
@@ -309,15 +312,24 @@ def onb_goals_kb() -> InlineKeyboardMarkup:
 
 @router.message(F.text == f"{EMO_TALK} Поговорить")
 async def on_btn_talk(m: Message):
-    await m.answer("Я рядом. Расскажи, что на душе — начнём с этого.", reply_markup=None)
+    try:
+        await m.answer_photo(ONB_IMAGES["talk"], caption="Я рядом. Расскажи, что на душе — начнём с этого.", reply_markup=None)
+    except Exception:
+        await m.answer("Я рядом. Расскажи, что на душе — начнём с этого.", reply_markup=None)
 
 @router.message(F.text == f"{EMO_HERB} Разобраться")
 async def on_btn_work(m: Message):
-    await m.answer("Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
+    try:
+        await m.answer_photo(ONB_IMAGES["work"], caption="Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
+    except Exception:
+        await m.answer("Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
 
 @router.message(F.text == f"{EMO_HEADPHONES} Медитации")
 async def on_btn_meditations(m: Message):
-    await m.answer("Раздел с аудио-медитациями скоро добавим. А пока можно выбрать упражнения в «Разобраться».", reply_markup=None)
+    try:
+        await m.answer_photo(ONB_IMAGES["meditations"], caption="Раздел с аудио-медитациями скоро добавим. А пока можно выбрать упражнения в «Разобраться».", reply_markup=None)
+    except Exception:
+        await m.answer("Раздел с аудио-медитациями скоро добавим. А пока можно выбрать упражнения в «Разобраться».", reply_markup=None)
 
 @router.message(F.text == f"{EMO_GEAR} Настройки")
 async def on_btn_settings(m: Message):
