@@ -3,6 +3,7 @@ load_dotenv()
 
 import os
 from fastapi import FastAPI, Request, Response
+import logging, os
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Update
 from aiogram.enums import ParseMode
@@ -32,6 +33,10 @@ app = FastAPI()
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
+    if os.getenv('BOT_DEBUG','0')=='1':
+        logging.getLogger('aiogram').setLevel(logging.DEBUG)
+    logging.getLogger('webhook').info('incoming update')
+
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         return Response(status_code=403)
     update = Update.model_validate(await request.json(), context={"bot": bot})
