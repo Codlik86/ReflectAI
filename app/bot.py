@@ -71,12 +71,8 @@ from typing import Dict, Deque, List, Optional
 import asyncio
 
 from aiogram import Router, F
-from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton,
-    BotCommand,
-)
+from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BotCommand
 from aiogram.exceptions import TelegramBadRequest
 
 # В aiogram v3 билдер можно не использовать для простых клавиатур
@@ -774,3 +770,41 @@ async def reflect_stop(cb: CallbackQuery):
         await cb.answer()
     except Exception:
         pass
+
+
+@router.message(Command(commands={"ping"}))
+async def on_cmd_ping(m: Message):
+    try:
+        await m.answer("pong ✅")
+    except Exception:
+        # на всякий
+        pass
+
+
+# ==== FREE-TEXT FALLBACK (auto-insert)
+@router.message(F.text)
+async def on_any_text_fallback(m: Message):
+    """Всегда отвечает тёплым текстом. Оборачивает LLM в try/except.
+    Не ломает основные сценарии: стоит в самом низу файла и сработает, только если другие не перехватили.
+    """
+    try:
+        from app.llm_adapter import complete_chat
+        user_id = str(m.from_user.id) if getattr(m, "from_user", None) else "anon"
+        messages = [
+            {"role":"system","content":"Ты — «Помни», тёплый, бережный AI-друг. Говори по-русски, мягко и по-человечески. Без диагнозов и без перечисления источников."},
+            {"role":"user","content": m.text.strip() if m.text else ""}
+        ]
+        reply = await complete_chat(user=user_id, messages=messages, temperature=0.4)
+        reply = (reply or "").strip()
+        if reply:
+            await m.answer(reply)
+            return
+    except Exception as e:
+        # Пишем в логи, но не молчим для пользователя
+        try:
+            import logging
+            logging.exception("LLM fallback error: %s", e)
+        except Exception:
+            pass
+    # Безопасный тёплый ответ при любой ошибке
+    await m.answer("Похоже, у меня что-то пошло не так… Но я рядом. Можем начать с простого: опиши, что сейчас больше всего беспокоит. 🌿")
