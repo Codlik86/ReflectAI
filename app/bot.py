@@ -33,6 +33,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from aiogram import Router, F
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
@@ -168,38 +169,7 @@ def render_step_text(topic_title: str, ex_title: str, step_text: str) -> str:
 
 @router.message(Command("start"))
 async def cmd_start(m: Message):
-    # Пробуем отправить обложку; если не выйдет — просто текст
-    try:
-        await m.answer_photo(
-            ONB_IMAGES["cover"],
-            caption=(
-                "Привет — я «Помни». Я рядом, чтобы поддержать, помочь разобраться и мягко направить. "
-                "Выбирай режим ниже или просто напиши, как ты сейчас. 🌿"
-            ),
-            reply_markup=kb_main(),
-        )
-    except Exception:
-        await m.answer(
-            "Привет — я «Помни». Я рядом, чтобы поддержать, помочь разобраться и мягко направить. "
-            "Выбирай режим ниже или просто напиши, как ты сейчас. 🌿",
-            reply_markup=kb_main(),
-        )
-
-    # Команды в меню Telegram
-    try:
-        await m.bot.set_my_commands([
-            BotCommand(command="talk", description="Поговорить"),
-            BotCommand(command="work", description="Разобраться (упражнения)"),
-            BotCommand(command="meditations", description="Медитации"),
-            BotCommand(command="settings", description="Настройки"),
-            BotCommand(command="about", description="О проекте"),
-            BotCommand(command="help", description="Подсказка"),
-            BotCommand(command="pay", description="Поддержать"),
-            BotCommand(command="policy", description="Приватность"),
-            BotCommand(command="ping", description="Проверка связи"),
-        ])
-    except Exception:
-        pass
+    return await show_onboarding(m)
 
 # ============================== КНОПКИ МЕНЮ ================================
 
@@ -427,5 +397,86 @@ async def __last_resort(m: Message):
             await m.answer("я здесь 🌿 " + (txt[:80] + ("…" if len(txt) > 80 else "")))
         else:
             await m.answer("я здесь 🌿")
+    except Exception:
+        pass
+
+
+# ==== Онбординг: быстрые цели и старт ===============================
+
+# Временное хранилище выборов (на сессию процесса)
+from collections import defaultdict
+_ONB_PREFS: dict[int, set[str]] = defaultdict(set)
+
+def kb_onb_prefs():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🧘‍♂️ Снизить тревогу", callback_data="onb:p:anxiety")
+    kb.button(text="🌙 Улучшить сон", callback_data="onb:p:sleep")
+    kb.button(text="✨ Повысить самооценку", callback_data="onb:p:selfesteem")
+    kb.button(text="🎯 Найти ресурсы и мотивацию", callback_data="onb:p:motivation")
+    kb.button(text="✅ Готово", callback_data="onb:done")
+    # по одному в ряд — как на скрине
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def show_onboarding(m: Message):
+    text = (
+        "👋 Привет, друг!\n\n"
+        "Класс! Тогда пару быстрых настроек 🛠️\n\n"
+        "Выбери, что сейчас важнее (можно несколько), а затем нажми «Готово»:"
+    )
+    # если есть ONB_IMAGES["cover"] — показываем красивую обложку;
+    # иначе обычный текст
+    try:
+        img = ONB_IMAGES.get("cover")  # type: ignore[name-defined]
+    except Exception:
+        img = None
+    if img:
+        try:
+            await m.answer_photo(img, caption=text, reply_markup=kb_onb_prefs())
+            return
+        except Exception:
+            pass
+    await m.answer(text, reply_markup=kb_onb_prefs())
+
+@router.callback_query(F.data.startswith("onb:p:"))
+async def onb_pick_pref(cb: CallbackQuery):
+    uid = cb.from_user.id if cb.from_user else 0
+    code = cb.data.split(":", 2)[-1]
+    bucket = _ONB_PREFS[uid]
+    # переключатель
+    if code in bucket:
+        bucket.remove(code)
+        await cb.answer("Убрали из списка")
+    else:
+        bucket.add(code)
+        await cb.answer("Добавлено ✔️")
+    # тихо, без перерисовки клавиатуры (так надёжнее с медиа-сообщением)
+
+@router.callback_query(F.data == "onb:done")
+async def onb_done(cb: CallbackQuery):
+    uid = cb.from_user.id if cb.from_user else 0
+    chosen = _ONB_PREFS.pop(uid, set())
+
+    # Текст как на скриншоте
+    follow = (
+        "Что дальше? Несколько вариантов:\n\n"
+        f"1) Хочешь просто поговорить — нажми «Поговорить». Без рамок и практик: поделись тем, что происходит, я поддержу и помогу разложить.\n"
+        f"2) Нужно быстро разобраться — открой «Разобраться». Там короткие упражнения на 5–10 минут: от дыхания и анти-катастрофизации до плана при панике и S-T-O-P.\n"
+        f"3) Хочешь разгрузить голову — в «Медитациях» будут короткие аудио для тревоги, сна и концентрации — добавим совсем скоро.\n\n"
+        "Пиши, как тебе удобно. Я рядом ❤️"
+    )
+    try:
+        # если исходное сообщение было с фото — меняем подпись,
+        # иначе просто отправим новое
+        try:
+            await cb.message.edit_caption(follow)
+        except Exception:
+            await cb.message.edit_text(follow)
+    except Exception:
+        await cb.message.answer(follow)
+
+    # Покажем основное меню, если у тебя есть kb_main()
+    try:
+        await cb.message.answer("Выбирай, с чего начнём:", reply_markup=kb_main())  # type: ignore[name-defined]
     except Exception:
         pass
