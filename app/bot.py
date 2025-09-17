@@ -1,334 +1,86 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-# --- universal edit helper: edits text OR caption safely ---
-async def smart_edit(message, text, **kwargs):
+# ======================= УНИВЕРСАЛЬНОЕ РЕДАКТИРОВАНИЕ =======================
+
+async def smart_edit(message, text: str, **kwargs):
     """
-    Универсальное редактирование ответов:
-    - если сообщение текстовое — edit_text
-    - если это медиа с подписью — edit_caption
-    - иначе отправляем новое сообщение
-    Всегда молча игнорирует "message is not modified".
+    Безопасное редактирование (и текста, и подписи к медиа).
+    Если редактировать нельзя — отправляет новое сообщение.
+    Игнорирует "message is not modified".
     """
     try:
-        # Текстовое сообщение
         if getattr(message, "text", None) is not None:
-            if message.text != text:
+            if message.text != text or kwargs.get("reply_markup") is not None:
                 await message.edit_text(text, **kwargs)
             return
-
-        # Медиа/подпись
-        has_media = any([
-            getattr(message, "caption", None) is not None,
-            getattr(message, "photo", None),
-            getattr(message, "video", None),
-            getattr(message, "animation", None),
-            getattr(message, "document", None),
-            getattr(message, "audio", None),
-            getattr(message, "voice", None),
-        ])
-        if has_media:
-            cur = getattr(message, "caption", None)
-            if cur != text:
-                await message.edit_caption(caption=text, **kwargs)
+        if getattr(message, "caption", None) is not None:
+            if message.caption != text or kwargs.get("reply_markup") is not None:
+                await message.edit_caption(text, **kwargs)
             return
-
-        # Фолбэк — новое сообщение
         await message.answer(text, **kwargs)
-
     except Exception as e:
-        msg = str(e).lower()
-        if "message is not modified" in msg:
-            return
         try:
+            # иногда Telegram ругается на edit; отправляем новое
             await message.answer(text, **kwargs)
         except Exception:
-            await message.answer(text)
+            pass
 
-# --- Per-topic emojis for /work ---
-DEFAULT_TOPIC_ICON = "🌿"  # общий эмодзи по умолчанию
+# ================================ ИМПОРТЫ ===================================
+
+import asyncio
+import os
+from typing import Dict, List, Optional, Tuple
+
+from aiogram import Router, F
+from aiogram.filters import Command
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    BotCommand,
+)
+
+# Внутренние модули приложения
+from app.exercises import TOPICS  # словарь тем/упражнений
+from app.safety import is_crisis, CRISIS_REPLY
+from app.llm_adapter import LLMAdapter
+
+# RAG — может быть отключён; подхватываем мягко
+try:
+    from app.rag_qdrant import search as rag_search, search_with_meta as rag_meta
+except Exception:
+    rag_search = None
+    rag_meta = None
+
+# =========================== ЭМОДЗИ И НАСТРОЙКИ =============================
+
+EMO_TALK = "💬"
+EMO_HERB = "🌿"
+EMO_HEADPHONES = "🎧"
+EMO_GEAR = "⚙️"
+
+# Иконки тем (уникальные, без дубликатов)
+DEFAULT_TOPIC_ICON = "🌿"
 TOPIC_ICONS = {
-    "reflection": "🪞",            # Рефлексия
-    "anxiety": "🌬️",               # Тревога
-    "anger": "🔥",                  # Злость
-    "pain_melancholy": "🌧️",       # Боль и тоска
-    "sleep": "🌙",                  # Сон
-    "breath_body": "🧘",            # Дыхание и тело
-    "procrastination": "⏳",        # Прокрастинация
-    "burnout": "🪫",                # Выгорание
-    "decisions": "🧭",              # Решения и неопределённость
-    "social_anxiety": "🗣️",        # Социальная тревога
+    "reflection": "🪞",
+    "anxiety": "🌬️",
+    "anger": "🔥",
+    "pain_melancholy": "🌧️",
+    "sleep": "🌙",
+    "breath_body": "🧘",
+    "procrastination": "⏳",
+    "burnout": "🪫",
+    "decisions": "🧭",
+    "social_anxiety": "🗣️",
 }
 def topic_icon(tid: str, t: dict) -> str:
     return TOPIC_ICONS.get(tid, t.get("icon", DEFAULT_TOPIC_ICON))
 
-
-# ==== Импорты ===============================================================
-from textwrap import dedent
-from collections import defaultdict, deque
-from typing import Dict, Deque, List, Optional
-
-import asyncio
-
-from aiogram import Router, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BotCommand
-from aiogram.exceptions import TelegramBadRequest
-
-# В aiogram v3 билдер можно не использовать для простых клавиатур
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import text as sql_text
-
-# ==== Внутренние импорты проекта ============================================
-# Важно: оставляю импорт как был у тебя в проекте
-from app.llm_adapter import LLMAdapter
-from app.prompts import SYSTEM_PROMPT
-
-# Доп. тон для режима рефлексии (мягче, меньше буквального зеркаления)
-REFLECTIVE_SUFFIX = (
-    "\n\n[режим рефлексии]\n"
-    "— отвечай тёпло и бережно;\n"
-    "— не повторяй дословно каждое сообщение пользователя, только уместное перефразирование;\n"
-    "— добавляй чуть инициативы и контекста, без моралей;\n"
-    "— допускаются небольшие «человеческие» реакции: да, понимаю… иногда троеточия, эмодзи в меру.\n"
-)
-
-from app.safety import is_crisis, CRISIS_REPLY
-from app.exercises import TOPICS
-from app.db import db_session, User, Insight  # Insight может использоваться в будущем
-from app.tools import (
-    REFRAMING_STEPS,
-    stop_user_task,
-    debounce_ok,
-)
-try:
-    # RAG может быть необязательным — оборачиваю в try
-    from app.rag_qdrant import search as rag_search
-except Exception:
-    rag_search = None  # type: ignore
-
-# ==== Константы/эмодзи ======================================================
-EMO_TALK = "\U0001F4AC"        # 💬
-EMO_HERB = "\U0001f33f"        # 🌿
-EMO_HEADPHONES = "\U0001F3A7"  # 🎧
-EMO_GEAR = "\u2699\ufe0f"      # ⚙️
-
-# ==== Router ================================================================
-router = Router()
-
-# ==== Хелперы UI ============================================================
-async def safe_edit(message: Message, *, text: Optional[str] = None, reply_markup=None) -> None:
-    """
-    Редактирует текст/markup и молча игнорит 'message is not modified'.
-    """
-    try:
-        if text is not None and reply_markup is not None:
-            await message.edit_text(text, reply_markup=reply_markup)
-            return
-        if text is not None:
-            await message.edit_text(text)
-        if reply_markup is not None:
-            await message.edit_reply_markup(reply_markup=reply_markup)
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e):
-            return
-        raise
-
-async def silent_ack(cb: CallbackQuery) -> None:
-    """Быстрый ack для снятия спиннера и во избежание 'query is too old'."""
-    try:
-        await cb.answer()
-    except Exception:
-        pass
-
-# ==== Главный текст после онбординга =======================================
-def get_home_text() -> str:
-    return (
-        "Что дальше? Несколько вариантов:\n\n"
-        "1) Хочешь просто поговорить — нажми «Поговорить». Без рамок и практик: поделись тем, что происходит, я поддержу и помогу разложить.\n"
-        "2) Нужно быстро разобраться — открой «Разобраться». Там короткие упражнения на 5–10 минут: от дыхания и анти-катастрофизации до плана при панике и S-T-O-P.\n"
-        "3) Хочешь разгрузить голову — в «Медитациях» будут короткие аудио для тревоги, сна и концентрации — добавим совсем скоро.\n\n"
-        "Пиши, как тебе удобно. Я рядом ❤️"
-    )
-
-# ==== Клавиатуры ============================================================
-def kb_main() -> ReplyKeyboardMarkup:
-    """
-    Нижняя (persistent) клавиатура.
-    """
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=f"{EMO_TALK} Поговорить")],
-            [KeyboardButton(text=f"{EMO_HERB} Разобраться"), KeyboardButton(text=f"{EMO_HEADPHONES} Медитации")],
-            [KeyboardButton(text=f"{EMO_GEAR} Настройки")],
-        ],
-        resize_keyboard=True, one_time_keyboard=False, selective=False
-    )
-
-# --- Список тем (уникальные по title) ---
-
-def kb_topics() -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    seen = set()
-    for key, t in TOPICS.items():
-        title = t.get("title", "Тема")
-        if not title or title in seen:
-            continue
-        seen.add(title)
-        icon = topic_icon(key, t)
-        b.button(text=f"{icon} {title}", callback_data=f"work:topic:{key}")
-    b.adjust(1)
-    return b.as_markup()
-
-def kb_exercises(topic_id: str) -> InlineKeyboardMarkup:
-    """
-    Список упражнений по теме.
-    """
-    t = TOPICS.get(topic_id, {})
-    rows = []
-    for ex in t.get("exercises", []):
-        title = ex.get("title", ex.get("id", "Упражнение"))
-        rows.append([InlineKeyboardButton(text=title, callback_data=f"work:ex:{topic_id}:{ex.get('id')}")])
-    # Нижние кнопки «назад»
-    rows.append([
-        InlineKeyboardButton(text="◀️ К темам", callback_data="work:back_topics")
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-def back_markup_for_topic(topic_id: str) -> InlineKeyboardMarkup:
-    """
-    Возврат к списку упражнений в теме.
-    """
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад к упражнениям", callback_data=f"work:topic:{topic_id}")],
-        [InlineKeyboardButton(text="🌿 Другие темы", callback_data="work:back_topics")],
-    ])
-
-def kb_stepper2(topic_id: str, ex_id: str, cur: int, total: int) -> InlineKeyboardMarkup:
-    """
-    Шаги упражнения (вперёд / стоп / назад в тему).
-    """
-    is_last = (cur >= total - 1)
-    next_text = "✔️ Завершить" if is_last else "▶️ Далее"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=next_text, callback_data=f"work:step:{topic_id}:{ex_id}")],
-        [
-            InlineKeyboardButton(text="◀️ К упражнениям", callback_data=f"work:topic:{topic_id}"),
-            InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop"),
-        ],
-    ])
-
-# ==== Вспомогательные рендер-функции =======================================
-def render_step_text(topic_title: str, ex_title: str, step_text: str) -> str:
-    header = "🌿 " + topic_title + " → " + ex_title
-    return header + "\n\n" + str(step_text)
-
-def render_text_exercise(topic_title: str, ex_title: str, text: str) -> str:
-    header = "🌿 " + topic_title + " → " + ex_title
-    return header + "\n\n" + str(text)
-
-# ==== Эфемерное состояние упражнения (на пользователя) =====================
-_WS: Dict[str, Dict] = {}
-
-def _ws_get(uid: str) -> Dict:
-    return _WS.get(uid, {})
-
-def _ws_set(uid: str, **fields) -> None:
-    prev = _WS.get(uid, {})
-    prev.update(fields)
-    _WS[uid] = prev
-
-def _ws_reset(uid: str) -> None:
-    _WS.pop(uid, None)
-
-# ==== Короткая память диалога (RAM) ========================================
-DIALOG_HISTORY: Dict[int, Deque[Dict[str, str]]] = defaultdict(lambda: deque(maxlen=8))
-# Режим чата (обычный / reflection)
-CHAT_MODE: Dict[int, str] = {}
-
-def _push(chat_id: int, role: str, content: str) -> None:
-    if content:
-        DIALOG_HISTORY[chat_id].append({"role": role, "content": content})
-
-# ==== «Суперпамять» (SQLite) ===============================================
-def _ensure_tables():
-    with db_session() as s:
-        s.execute(sql_text("""
-        CREATE TABLE IF NOT EXISTS user_prefs (
-          tg_id TEXT PRIMARY KEY,
-          consent_save_all INTEGER DEFAULT 0,
-          goals TEXT DEFAULT '',
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        """))
-        s.execute(sql_text("""
-        CREATE TABLE IF NOT EXISTS dialog_turns (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          tg_id TEXT NOT NULL,
-          role TEXT NOT NULL,
-          text TEXT NOT NULL,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        """))
-        s.commit()
-
-def _can_save_full(tg_id: str) -> bool:
-    _ensure_tables()
-    with db_session() as s:
-        row = s.execute(
-            sql_text("SELECT consent_save_all FROM user_prefs WHERE tg_id=:tg"),
-            {"tg": tg_id}
-        ).fetchone()
-        return bool(row and row[0])
-
-def _save_turn(tg_id: str, role: str, text: str) -> None:
-    if not _can_save_full(tg_id):
-        return
-    _ensure_tables()
-    with db_session() as s:
-        s.execute(
-            sql_text("INSERT INTO dialog_turns (tg_id, role, text) VALUES (:tg, :r, :t)"),
-            {"tg": tg_id, "r": role, "t": (text or "")[:4000]},
-        )
-        s.commit()
-
-def _load_recent_turns(tg_id: str, days: int = 7, limit: int = 24) -> List[Dict[str, str]]:
-    _ensure_tables()
-    with db_session() as s:
-        q = f"""
-          SELECT role, text FROM dialog_turns
-          WHERE tg_id = :tg AND created_at >= datetime('now','-{int(days)} days')
-          ORDER BY id DESC LIMIT {int(limit)}
-        """
-        rows = s.execute(sql_text(q), {"tg": tg_id}).fetchall() or []
-    return [{"role": r, "content": t} for (r, t) in reversed(rows)]
-
-def _set_consent(tg_id: str, yes: bool) -> None:
-    _ensure_tables()
-    with db_session() as s:
-        s.execute(sql_text("""
-            INSERT INTO user_prefs (tg_id, consent_save_all)
-            VALUES (:tg, :c)
-            ON CONFLICT(tg_id) DO UPDATE SET consent_save_all=:c, updated_at=CURRENT_TIMESTAMP
-        """), {"tg": tg_id, "c": 1 if yes else 0})
-        s.commit()
-
-def _append_goal(tg_id: str, goal_code: str) -> None:
-    _ensure_tables()
-    with db_session() as s:
-        row = s.execute(sql_text("SELECT goals FROM user_prefs WHERE tg_id=:tg"), {"tg": tg_id}).fetchone()
-        goals = set(((row[0] or "") if row else "").split(","))
-        if goal_code not in goals:
-            goals.add(goal_code)
-        s.execute(sql_text("""
-            INSERT INTO user_prefs (tg_id, goals)
-            VALUES (:tg, :g)
-            ON CONFLICT(tg_id) DO UPDATE SET goals=:g, updated_at=CURRENT_TIMESTAMP
-        """), {"tg": tg_id, "g": ",".join([g for g in goals if g])})
-        s.commit()
-
-# ==== Онбординг =============================================================
+# Картинки в разделах (обложки)
 ONB_IMAGES = {
     "cover": "https://file.garden/aML3M6Sqrg21TaIT/kind-creature-min.jpg",
     "talk": "https://file.garden/aML3M6Sqrg21TaIT/warm-conversation-min.jpg",
@@ -336,489 +88,344 @@ ONB_IMAGES = {
     "meditations": "https://file.garden/aML3M6Sqrg21TaIT/meditation-min.jpg",
 }
 
-def onb_start_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👋 Привет, друг!", callback_data="onb_hi")]
+# ============================== РОУТЕР БОТА =================================
+
+router = Router()
+
+# ============================== КЛАВИАТУРЫ ==================================
+
+def kb_main() -> ReplyKeyboardMarkup:
+    # Правое меню
+    rows = [
+        [KeyboardButton(text=f"{EMO_TALK} Поговорить")],
+        [KeyboardButton(text=f"{EMO_HERB} Разобраться")],
+        [KeyboardButton(text=f"{EMO_HEADPHONES} Медитации")],
+        [KeyboardButton(text=f"{EMO_GEAR} Настройки")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+def kb_topics() -> InlineKeyboardMarkup:
+    # Список тем из exercises.TOPICS
+    rows: List[List[InlineKeyboardButton]] = []
+    for tid, t in TOPICS.items():
+        title = t.get("title", tid)
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{topic_icon(tid, t)} {title}",
+                callback_data=f"work:topic:{tid}",
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_exercises(topic_id: str) -> InlineKeyboardMarkup:
+    # Список упражнений в теме
+    t = TOPICS.get(topic_id, {})
+    items = t.get("exercises") or []
+    rows: List[List[InlineKeyboardButton]] = []
+    for ex in items:
+        ex_id = ex.get("id")
+        ex_title = ex.get("title", ex_id or "Упражнение")
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🧩 {ex_title}",
+                callback_data=f"work:ex:{topic_id}:{ex_id}",
+            )
+        ])
+    # Навигация
+    rows.append([
+        InlineKeyboardButton(text="◀️ К темам", callback_data="work:back_topics"),
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def onb_goals_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧘 Снизить тревогу", callback_data="goal:anxiety")],
-        [InlineKeyboardButton(text="😴 Улучшить сон", callback_data="goal:sleep")],
-        [InlineKeyboardButton(text="🌟 Повысить самооценку", callback_data="goal:self")],
-        [InlineKeyboardButton(text="🎯 Найти ресурсы и мотивацию", callback_data="goal:motivation")],
-        [InlineKeyboardButton(text="✅ Готово", callback_data="goal_done")],
-    ])
+def kb_back_to_topics(topic_id: Optional[str] = None) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="🌿 Другие темы", callback_data="work:back_topics")]]
+    if topic_id:
+        rows.insert(0, [InlineKeyboardButton(text="◀️ Назад к упражнениям", callback_data=f"work:topic:{topic_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-@router.message(F.text == f"{EMO_TALK} Поговорить")
-async def on_btn_talk(m: Message):
+def kb_stepper(topic_id: str, ex_id: str, cur: int, total: int) -> InlineKeyboardMarkup:
+    is_last = (cur >= total - 1)
+    next_text = "✔️ Завершить" if is_last else "▶️ Далее"
+    rows = [
+        [InlineKeyboardButton(text=next_text, callback_data=f"work:step:{topic_id}:{ex_id}")],
+        [
+            InlineKeyboardButton(text="◀️ К упражнениям", callback_data=f"work:topic:{topic_id}"),
+            InlineKeyboardButton(text="⏹ Стоп", callback_data="work:stop"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# ====================== ВСПОМОГАТЕЛЬНЫЕ РЕНДЕР-ФУНКЦИИ ======================
+
+def render_step_text(topic_title: str, ex_title: str, step_text: str) -> str:
+    return (
+        f"Тема: {topic_title}\n"
+        f"Упражнение: {ex_title}\n\n"
+        f"{step_text}"
+    )
+
+# ================================ /START ====================================
+
+@router.message(Command("start"))
+async def cmd_start(m: Message):
+    # Пробуем отправить обложку; если не выйдет — просто текст
     try:
-        await m.answer_photo(ONB_IMAGES["talk"], caption="Я рядом. Расскажи, что на душе — начнём с этого.", reply_markup=None)
+        await m.answer_photo(
+            ONB_IMAGES["cover"],
+            caption=(
+                "Привет — я «Помни». Я рядом, чтобы поддержать, помочь разобраться и мягко направить. "
+                "Выбирай режим ниже или просто напиши, как ты сейчас. 🌿"
+            ),
+            reply_markup=kb_main(),
+        )
     except Exception:
-        await m.answer("Я рядом. Расскажи, что на душе — начнём с этого.", reply_markup=None)
+        await m.answer(
+            "Привет — я «Помни». Я рядом, чтобы поддержать, помочь разобраться и мягко направить. "
+            "Выбирай режим ниже или просто напиши, как ты сейчас. 🌿",
+            reply_markup=kb_main(),
+        )
 
-@router.message(F.text == f"{EMO_HERB} Разобраться")
-async def on_btn_work(m: Message):
+    # Команды в меню Telegram
     try:
-        await m.answer_photo(ONB_IMAGES["work"], caption="Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
-    except Exception:
-        await m.answer("Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
-
-@router.message(F.text == f"{EMO_HEADPHONES} Медитации")
-async def on_btn_meditations(m: Message):
-    try:
-        await m.answer_photo(ONB_IMAGES["meditations"], caption="Раздел с аудио-медитациями скоро добавим. А пока можно выбрать упражнения в «Разобраться».", reply_markup=None)
-    except Exception:
-        await m.answer("Раздел с аудио-медитациями скоро добавим. А пока можно выбрать упражнения в «Разобраться».", reply_markup=None)
-
-@router.message(F.text == f"{EMO_GEAR} Настройки")
-async def on_btn_settings(m: Message):
-    await m.answer("Настройки: позже здесь появятся выбор тона, методы и приватность. Пока — заглушка.", reply_markup=None)
-
-# ==== Slash-команды (левое меню) ===========================================
-async def set_bot_commands(bot) -> None:
-    try:
-        await bot.set_my_commands([
+        await m.bot.set_my_commands([
             BotCommand(command="talk", description="Поговорить"),
             BotCommand(command="work", description="Разобраться (упражнения)"),
-            BotCommand(command="meditations", description="Медитации (аудио, скоро)"),
+            BotCommand(command="meditations", description="Медитации"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="about", description="О проекте"),
-            BotCommand(command="help", description="Помощь"),
-            BotCommand(command="pay", description="Поддержать проект"),
+            BotCommand(command="help", description="Подсказка"),
+            BotCommand(command="pay", description="Поддержать"),
             BotCommand(command="policy", description="Приватность"),
+            BotCommand(command="ping", description="Проверка связи"),
         ])
     except Exception:
         pass
 
-@router.message(F.text.regexp(r'^/(talk|settings|meditations|about|help|pay|policy|work)(?:@\w+)?(?:\s|$)'))
-async def _route_slash_commands(m: Message):
-    cmd = (m.text or "").split()[0].split("@")[0].lower()
-    if cmd == "/talk":
-        return await on_btn_talk(m)
-    if cmd == "/work":
-        return await on_btn_work(m)
-    if cmd == "/meditations":
-        return await on_btn_meditations(m)
-    if cmd == "/settings":
-        return await on_btn_settings(m)
-    if cmd == "/about":
-        return await m.answer("Pomni — тёплый AI-друг/дневник: слушает, помогает осмыслить переживания, предлагает упражнения и микрошаги.")
-    if cmd == "/help":
-        return await m.answer("Помощь: просто напиши, что происходит. Я поддержу, подскажу упражнения, сохраню важные мысли.")
-    if cmd == "/pay":
-        return await m.answer("Поддержка проекта: скоро добавим способы. Спасибо, что хочешь помочь! ❤️")
-    if cmd == "/policy":
-        return await m.answer("Политика и правила: https://tinyurl.com/5n98a7j8 • https://tinyurl.com/5n98a7j8")
-    # fallback
-    await m.answer("Команда принята.")
+# ============================== КНОПКИ МЕНЮ ================================
 
-@router.message(F.text.regexp(r'^/start(?:@\w+)?(?:\s|$)'))
-async def start(m: Message):
-    await set_bot_commands(m.bot)
-
-    # регистрация пользователя
-    with db_session() as s:
-        u = s.query(User).filter(User.tg_id == str(m.from_user.id)).first()
-        if not u:
-            s.add(User(tg_id=str(m.from_user.id), privacy_level="insights"))
-            s.commit()
-
-    # очищаем RAM-диалог
-    DIALOG_HISTORY.pop(m.chat.id, None)
-
-    caption = (
-        "Привет! Я здесь, чтобы поддержать, выслушать и сохранить важное — не стесняйся.\n\n"
-        "Перед началом подтвердим правила и включим персонализацию.\n"
-        "Продолжая, ты принимаешь наши правила и политику:\n"
-        "https://tinyurl.com/5n98a7j8 • https://tinyurl.com/5n98a7j8\n\n"
-        "Скорее нажимай — и я всё расскажу 👇"
-    )
+@router.message(F.text == f"{EMO_TALK} Поговорить")
+@router.message(Command("talk"))
+async def on_btn_talk(m: Message):
+    # Картинка + мягкое приглашение
     try:
-        await m.answer_photo(ONB_IMAGES["cover"], caption=caption, reply_markup=onb_start_kb())
+        await m.answer_photo(
+            ONB_IMAGES["talk"],
+            caption="Я рядом. Расскажи, что на душе — начнём с этого.",
+        )
     except Exception:
-        await m.answer(caption, reply_markup=onb_start_kb())
+        await m.answer("Я рядом. Расскажи, что на душе — начнём с этого.")
 
-@router.callback_query(F.data == "onb_hi")
-async def onb_hi(cb: CallbackQuery):
-    await silent_ack(cb)
-    _set_consent(str(cb.from_user.id), True)
-    txt = (
-        "Класс! Тогда пару быстрых настроек 🛠️\n\n"
-        "Выбери, что сейчас важнее (можно несколько), а затем нажми «Готово»:"
-    )
-    await cb.message.answer(txt, reply_markup=onb_goals_kb())
-
-@router.callback_query(F.data.startswith("goal:"))
-async def onb_goal_pick(cb: CallbackQuery):
-    await silent_ack(cb)
-    code = cb.data.split(":", 1)[1]
-    _append_goal(str(cb.from_user.id), code)
-    names = {
-        "anxiety": "Снизить тревогу",
-        "sleep": "Улучшить сон",
-        "self": "Повысить самооценку",
-        "motivation": "Найти ресурсы и мотивацию",
-    }
-    try:
-        await cb.answer(f"Добавил: {names.get(code, code)}", show_alert=False)
-    except Exception:
-        pass
-
-@router.callback_query(F.data.in_(("goal_done", "onboard:done", "onb:done", "start:done")))
-async def cb_done_gate(cb: CallbackQuery):
-    # ранний ack
-    await silent_ack(cb)
-    # показываем текст и нижнюю клавиатуру
-    try:
-        await cb.message.answer(get_home_text(), reply_markup=kb_main())
-    except Exception:
-        await cb.message.answer(get_home_text())
-
-# ==== Работа с темами/упражнениями =========================================
 @router.message(F.text == f"{EMO_HERB} Разобраться")
-async def _open_work_from_keyboard(m: Message):
-    await on_btn_work(m)
+@router.message(Command("work"))
+async def on_btn_work(m: Message):
+    try:
+        await m.answer_photo(
+            ONB_IMAGES["work"],
+            caption="Выбери тему, с которой хочешь поработать:",
+            reply_markup=kb_topics(),
+        )
+    except Exception:
+        await m.answer("Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
 
-@router.callback_query(F.data == "work:back_topics")
-async def cb_back_topics(cb: CallbackQuery):
-    await silent_ack(cb)
-    await smart_edit(cb.message, text="Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
+@router.message(F.text == f"{EMO_HEADPHONES} Медитации")
+@router.message(Command("meditations"))
+async def on_btn_meditations(m: Message):
+    try:
+        await m.answer_photo(
+            ONB_IMAGES["meditations"],
+            caption="Раздел с аудио-медитациями скоро добавим. Пока можно выбрать упражнения в «Разобраться».",
+        )
+    except Exception:
+        await m.answer("Раздел с аудио-медитациями скоро добавим. Пока можно выбрать упражнения в «Разобраться».")
 
-@router.callback_query(F.data.startswith("work:topic:"))
-async def cb_pick_topic(cb: CallbackQuery):
-    # важно ответить быстро, чтобы не получить "query is too old"
+@router.message(F.text == f"{EMO_GEAR} Настройки")
+@router.message(Command("settings"))
+async def on_btn_settings(m: Message):
+    await m.answer("Настройки: тон, подход и приватность — скоро появятся.", reply_markup=kb_main())
+
+@router.message(Command("about"))
+async def cmd_about(m: Message):
+    await m.answer(
+        "«Помни» — тёплый AI-друг/дневник. Помогает мягко разобраться в переживаниях, "
+        "предлагает короткие упражнения и микрошаги. Не заменяет терапию, не ставит диагнозов."
+    )
+
+@router.message(Command("help"))
+async def cmd_help(m: Message):
+    await m.answer("Напиши, что происходит — я поддержу, предложу 1–2 идеи и простое упражнение. 🌿")
+
+@router.message(Command("pay"))
+async def cmd_pay(m: Message):
+    await m.answer("Поддержать проект: скоро добавим способы. Спасибо за желание помочь! ❤️")
+
+@router.message(Command("policy"))
+async def cmd_policy(m: Message):
+    await m.answer("Приватность и правила: скоро оформим страницу. Главное — уважение, бережность и безопасность.")
+
+@router.message(Command("ping"))
+async def cmd_ping(m: Message):
+    await m.answer("pong ✅")
+
+# =========================== «РАЗОБРАТЬСЯ» (CALLBACK) ======================
+
+# Память шага упражнения (in-memory; для MVP хватает)
+_WS: Dict[str, Dict[str, object]] = {}  # by user_id: {topic_id, ex_id, step, steps}
+
+def _ws_get(uid: str) -> Dict[str, object]:
+    return _WS.get(uid, {})
+
+def _ws_set(uid: str, **fields):
+    st = _WS.get(uid) or {}
+    st.update(fields)
+    _WS[uid] = st
+
+def _ws_reset(uid: str):
+    _WS.pop(uid, None)
+
+async def _silent_ack(cb: CallbackQuery):
     try:
         await cb.answer()
     except Exception:
         pass
+
+@router.callback_query(F.data == "work:back_topics")
+async def cb_back_topics(cb: CallbackQuery):
+    await _silent_ack(cb)
+    await smart_edit(cb.message, text="Выбери тему, с которой хочешь поработать:", reply_markup=kb_topics())
+
+@router.callback_query(F.data.startswith("work:topic:"))
+async def cb_pick_topic(cb: CallbackQuery):
+    await _silent_ack(cb)
 
     topic_id = cb.data.split(":")[2]
     t = TOPICS.get(topic_id, {})
     title = t.get("title", "Тема")
     intro = t.get("intro")
 
-    # Темы-«рефлексия»: без списка упражнений — сразу тёплое интро и свободный чат
+    # Тема типа chat → сразу свободный тёплый чат
     if t.get("type") == "chat":
         intro_long = t.get("intro_long") or intro or (
-            "Давай немного поразмышляем об этом. Напиши пару строк — что волнует, что хочется понять… Я рядом."
+            "Давай немного поразмышляем. Напиши пару строк — что волнует, что хочется понять. Я рядом. 🌿"
         )
-        text = f"Тема: {topic_icon(topic_id, t)} {title}\n\n{intro_long}"
-        await smart_edit(cb.message, text=text, reply_markup=None)
+        await smart_edit(cb.message, text=f"Тема: {topic_icon(topic_id, t)} {title}\n\n{intro_long}")
         return
 
-    # Обычная тема: показываем интро и список упражнений
-    if intro:
-        text = f"Тема: {topic_icon(topic_id, t)} {title}\n\n{intro}"
-    else:
-        text = f"Ок, остаёмся в теме {topic_icon(topic_id, t)} «{title}». Выбери упражнение ниже."
+    # Обычная тема: интро + упражнения
+    text = f"Тема: {topic_icon(topic_id, t)} {title}\n\n{intro}" if intro else \
+           f"Ок, остаёмся в теме {topic_icon(topic_id, t)} «{title}». Выбери упражнение ниже."
     await smart_edit(cb.message, text=text, reply_markup=kb_exercises(topic_id))
+
 @router.callback_query(F.data.startswith("work:ex:"))
 async def cb_pick_exercise(cb: CallbackQuery):
-    # быстро отвечаем на callback
-    try:
-        await cb.answer()
-    except Exception:
-        pass
+    await _silent_ack(cb)
 
-    parts = cb.data.split(":")
-    topic_id, ex_id = parts[2], parts[3]
+    _, _, topic_id, ex_id = cb.data.split(":", 3)
     t = TOPICS.get(topic_id, {})
-    ex = next((e for e in t.get("exercises", []) if e.get("id") == ex_id), None)
-    if ex is None:
-        await cb.message.answer("Не нашёл упражнение")
+    ex = next((e for e in (t.get("exercises") or []) if e.get("id") == ex_id), {})
+    steps_all: List[str] = ex.get("steps") or []
+
+    if not steps_all:
+        await smart_edit(cb.message, text="Похоже, в этом упражнении пока нет шагов.", reply_markup=kb_exercises(topic_id))
         return
+
+    _ws_set(str(cb.from_user.id), topic_id=topic_id, ex_id=ex_id, step=0, steps=steps_all)
 
     topic_title = t.get("title", "Тема")
-    ex_title = ex.get("title", "Упражнение")
-
-    # Упражнение-«рефлексия»: без степпера — сразу тёплое интро, дальше пользователь пишет и общается свободно
-    if ex.get("type") == "chat":
-        intro_long = ex.get("intro_long") or ex.get("intro") or (
-            "Предлагаю спокойно поразмышлять. Напиши, что чувствуешь и что сейчас важно… Я здесь и поддержу."
-        )
-        text = f"🌿 {topic_title} → {ex_title}\n\n{intro_long}"
-        await smart_edit(cb.message, text=text, reply_markup=None)
-        return
-
-    # Текстовое упражнение без шагов
-    text_only = ex.get("text") or ex.get("body") or ex.get("content")
-    if text_only and not ex.get("steps"):
-        text = render_text_exercise(topic_title, ex_title, str(text_only))
-        await smart_edit(cb.message, text=text, reply_markup=back_markup_for_topic(topic_id))
-        return
-
-    # Обычный степпер
-    steps = ex.get("steps", [])
-    intro = ex.get("intro")
-    steps_all = ([intro] + steps) if intro else steps
-    if not steps_all:
-        await cb.message.answer("Пустое упражнение")
-        return
-
-    uid = str(cb.from_user.id)
-    _ws_set(uid, topic=topic_id, ex=ex_id, step=0)
+    ex_title = ex.get("title") or "Упражнение"
     text = render_step_text(topic_title, ex_title, steps_all[0])
-    await smart_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, 0, len(steps_all)))
-@router.callback_query(F.data.startswith("work:step:"))
-async def cb_step_next(cb: CallbackQuery):
-    await silent_ack(cb)
-    parts = cb.data.split(":")
-    # формат: work:step:{topic}:{ex}
-    if len(parts) < 4:
-        return
-    topic_id, ex_id = parts[2], parts[3]
+    await smart_edit(cb.message, text=text, reply_markup=kb_stepper(topic_id, ex_id, 0, len(steps_all)))
 
+@router.callback_query(F.data.startswith("work:step:"))
+async def cb_next_step(cb: CallbackQuery):
+    await _silent_ack(cb)
+
+    _, _, topic_id, ex_id = cb.data.split(":", 3)
     uid = str(cb.from_user.id)
     st = _ws_get(uid)
-    if not st or st.get("ex") != ex_id or st.get("topic") != topic_id:
-        # если потеряли состояние — начнём сначала
-        try:
-            await cb.answer("Сценарий сброшен, открою упражнение заново…")
-        except Exception:
-            pass
-        return await cb_pick_exercise(cb)
+    steps_all: List[str] = st.get("steps") or []  # type: ignore
 
-    t = TOPICS.get(topic_id, {})
-    ex_list = t.get("exercises", [])
-    ex = next((e for e in ex_list if e.get("id") == ex_id), None)
-    if not ex:
+    if not steps_all:
+        await smart_edit(cb.message, text="Кажется, шаги уже сброшены. Выбери упражнение ещё раз.", reply_markup=kb_exercises(topic_id))
         return
 
-    steps: List[str] = list(ex.get("steps", []))
-    intro = ex.get("intro")
-    steps_all = ([str(intro)] + [str(s) for s in steps]) if intro else [str(s) for s in steps]
-
-    cur = int(st.get("step", 0)) + 1
+    cur = int(st.get("step", 0)) + 1  # type: ignore
     if cur >= len(steps_all):
-        # завершение
         _ws_reset(uid)
-        done_text = "✅ Готово. Хочешь выбрать другое упражнение или тему?"
-        await smart_edit(cb.message, text=done_text, reply_markup=kb_exercises(topic_id))
+        await smart_edit(cb.message, text="✅ Готово. Хочешь выбрать другое упражнение или тему?", reply_markup=kb_exercises(topic_id))
         return
 
     _ws_set(uid, step=cur)
+    t = TOPICS.get(topic_id, {})
+    ex = next((e for e in (t.get("exercises") or []) if e.get("id") == ex_id), {})
     topic_title = t.get("title", "Тема")
-    ex_title = (ex.get("title") or "Упражнение")
+    ex_title = ex.get("title") or "Упражнение"
     text = render_step_text(topic_title, ex_title, steps_all[cur])
-    await smart_edit(cb.message, text=text, reply_markup=kb_stepper2(topic_id, ex_id, cur, len(steps_all)))
+    await smart_edit(cb.message, text=text, reply_markup=kb_stepper(topic_id, ex_id, cur, len(steps_all)))
 
 @router.callback_query(F.data == "work:stop")
 async def cb_stop(cb: CallbackQuery):
-    await silent_ack(cb)
-    try:
-        _ws_reset(str(cb.from_user.id))
-    except Exception:
-        pass
-    await smart_edit(
-        cb.message,
-        text="Остановил упражнение. Можем просто поговорить или выбрать другую тему.",
-        reply_markup=kb_topics(),
-    )
+    await _silent_ack(cb)
+    _ws_reset(str(cb.from_user.id))
+    await smart_edit(cb.message, text="Остановил упражнение. Можем просто поговорить или выбрать другую тему.", reply_markup=kb_topics())
 
-# ==== Инструменты (рефлексия/микрошаг) =====================================
-_reframe_state: Dict[str, Dict] = {}  # user_id -> {"step_idx": int, "answers": dict}
+# ============================== СВОБОДНЫЙ ДИАЛОГ ============================
 
-def tools_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="💡 Рефлексия", callback_data="tool_reframe"),
-            InlineKeyboardButton(text="🌿 Микрошаг",  callback_data="tool_micro"),
-        ],
-    ])
-
-def stop_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏹ Стоп", callback_data="tool_stop")]
-    ])
-
-def save_insight_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💾 Сохранить инсайт", callback_data="save_insight")],
-        [InlineKeyboardButton(text="⬅️ Вернуться к чату", callback_data="open_tools")],
-    ])
-
-@router.callback_query(F.data == "open_tools")
-async def on_open_tools(cb: CallbackQuery):
-    await silent_ack(cb)
-    await cb.message.answer("Чем займёмся?", reply_markup=tools_keyboard())
-
-@router.callback_query(F.data == "tool_reframe")
-async def on_tool_reframe(cb: CallbackQuery):
-    await silent_ack(cb)
-    user_id = str(cb.from_user.id)
-    if not debounce_ok(user_id):
-        return
-    stop_user_task(user_id)
-    _reframe_state[user_id] = {"step_idx": 0, "answers": {}}
-
-    last_user = next((m["content"] for m in reversed(DIALOG_HISTORY[cb.message.chat.id]) if m["role"] == "user"), "")
-    if last_user:
-        preview = last_user[:160] + ("…" if len(last_user) > 160 else "")
-        await cb.message.answer(f"Останемся в теме: «{preview}».", reply_markup=stop_keyboard())
-
-    _, prompt = REFRAMING_STEPS[0]
-    await cb.message.answer("Запускаю короткую рефлексию (4 шага, ~2 минуты).", reply_markup=stop_keyboard())
-    await cb.message.answer(prompt, reply_markup=stop_keyboard())
-
-@router.callback_query(F.data == "tool_micro")
-async def on_tool_micro(cb: CallbackQuery):
-    await silent_ack(cb)
-    chat_id = cb.message.chat.id
-    tg_id = str(cb.from_user.id)
-
-    global adapter
-    if 'adapter' not in globals() or adapter is None:
-        adapter = LLMAdapter()  # type: ignore
-
-    last_user = next((m["content"] for m in reversed(DIALOG_HISTORY[chat_id]) if m["role"] == "user"), "")
-    sys_prompt = SYSTEM_PROMPT
-    if CHAT_MODE.get(chat_id) == "reflection":
-        sys_prompt = SYSTEM_PROMPT + REFLECTIVE_SUFFIX
-    messages = [{"role": "system", "content": sys_prompt}]
-    if last_user:
-        messages.append({"role": "user", "content": last_user})
-    messages.append({"role": "user", "content": "Подскажи 1–2 очень маленьких шага на ближайшие 10–30 минут по этой теме."})
-
-    try:
-        answer = await adapter.complete_chat(user=tg_id, messages=messages, temperature=0.4)
-    except Exception as e:
-        answer = f"Не получилось обратиться к модели: {e}"
-
-    _push(chat_id, "assistant", answer)
-    _save_turn(tg_id, "assistant", answer)
-
-    await cb.message.answer(answer, reply_markup=None)
-
-@router.callback_query(F.data == "tool_stop")
-async def on_tool_stop(cb: CallbackQuery):
-    await silent_ack(cb)
-    user_id = str(cb.from_user.id)
-    stop_user_task(user_id)
-    _reframe_state.pop(user_id, None)
-    await cb.message.answer("Остановил. Чем могу помочь дальше?", reply_markup=None)
-
-# ==== Текстовый диалог («Поговорить») ======================================
-adapter: Optional[LLMAdapter] = None
+_adapter: Optional[LLMAdapter] = None
 
 @router.message(F.text)
 async def on_text(m: Message):
-    # игнорируем слэш-команды — их ловит другой хэндлер
-    if (m.text or "").startswith("/"):
+    # игнорируем команды — они обрабатываются отдельно
+    txt = (m.text or "").strip()
+    if not txt or txt.startswith("/"):
         return
 
-    global adapter
-    if adapter is None:
-        adapter = LLMAdapter()
+    global _adapter
+    if _adapter is None:
+        _adapter = LLMAdapter()
 
-    chat_id = m.chat.id
-    tg_id = str(m.from_user.id)
-    user_text = (m.text or "").strip()
-
-    # если идёт сценарий «Рефлексия» — ведём по шагам
-    if tg_id in _reframe_state:
-        st = _reframe_state[tg_id]
-        step_idx = st["step_idx"]
-        key, _prompt = REFRAMING_STEPS[step_idx]
-        st["answers"][key] = user_text
-
-        if step_idx + 1 < len(REFRAMING_STEPS):
-            st["step_idx"] += 1
-            _, next_prompt = REFRAMING_STEPS[st["step_idx"]]
-            await m.answer(next_prompt, reply_markup=stop_keyboard())
-            return
-        else:
-            a = st["answers"]
-            summary = (
-                "🌿 Итог рефлексии\n\n"
-                f"• Мысль: {a.get('thought','—')}\n"
-                f"• Эмоция (1–10): {a.get('emotion','—')}\n"
-                f"• Действие: {a.get('behavior','—')}\n"
-                f"• Альтернативная мысль: {a.get('alternative','—')}\n\n"
-                "Как это меняет твой взгляд? Что маленькое и конкретное сделаем дальше?"
-            )
-            _reframe_state.pop(tg_id, None)
-            await m.answer(summary, reply_markup=save_insight_keyboard())
-            return
-
-    # safety
-    if is_crisis(user_text):
+    # Лёгкая безопасностная проверка
+    if is_crisis(txt):
         await m.answer(CRISIS_REPLY)
         return
 
-        # мягкий RAG (если доступен)
+    # Мягкий RAG (тихо, без «источников»)
     rag_ctx = ""
-    try:
-        if rag_search is not None:
-            rag_ctx = await rag_search(user_text, k=3, max_chars=1200)
-    except Exception:
-        rag_ctx = ""
-    # скрытый лог в stdout (только при RAG_TRACE=1)
-    import os as _os
-    if _os.getenv('RAG_TRACE','0') == '1':
+    if rag_search is not None:
         try:
-            from app.rag_qdrant import search_with_meta as _rag_meta
-            _, _meta = await _rag_meta(user_text, k=3, max_chars=1200)
-            print('[RAG] ctx_len=', len(rag_ctx), ' sources=', ', '.join(str(d.get('source')) for d in (_meta or [])[:5]))
+            rag_ctx = await rag_search(txt, k=6, max_chars=int(os.getenv("RAG_MAX_CHARS", "1200")))
         except Exception:
-            print('[RAG] ctx_len=', len(rag_ctx))
-@router.callback_query(F.data == "reflect:stop")
-async def reflect_stop(cb: CallbackQuery):
-    CHAT_MODE.pop(cb.message.chat.id, None)
-    await cb.message.answer("Остановил рефлексию. Можем вернуться к упражнениям или просто поговорить.")
+            rag_ctx = ""
+
+    # Сбор сообщений для LLM
+    sys_hint = (
+        "Ты — «Помни», тёплый бережный друг. Поддерживай, проясняй, предлагай мягкие шаги (10–30 минут). "
+        "Без диагнозов и категоричности. Коротко и по-человечески."
+    )
+    messages = [
+        {"role": "system", "content": sys_hint},
+        {"role": "user", "content": txt},
+    ]
+    if rag_ctx:
+        messages.insert(1, {"role": "system", "content": f"Полезные заметки (не цитируй источники вслух, говори от себя):\n{rag_ctx}"})
+
+    # Ответ
     try:
-        await cb.answer()
+        reply = await _adapter.complete_chat(user=str(m.from_user.id), messages=messages, temperature=0.7)
     except Exception:
-        pass
+        # последний шанс, чтобы бот не молчал
+        reply = "Понимаю, как это может выматывать… Давай понемногу: что больше всего тревожит сейчас? 🌿"
 
+    await m.answer(reply)
 
-@router.message(Command(commands={"ping"}))
-async def on_cmd_ping(m: Message):
-    try:
-        await m.answer("pong ✅")
-    except Exception:
-        # на всякий
-        pass
+# ============================ ФОЛБЭК (НЕ МОЛЧАТЬ) ===========================
 
-
-# ==== FREE-TEXT FALLBACK (auto-insert)
-@router.message(F.text)
-async def on_any_text_fallback(m: Message):
-    """Всегда отвечает тёплым текстом. Оборачивает LLM в try/except.
-    Не ломает основные сценарии: стоит в самом низу файла и сработает, только если другие не перехватили.
-    """
-    try:
-        from app.llm_adapter import complete_chat
-        user_id = str(m.from_user.id) if getattr(m, "from_user", None) else "anon"
-        messages = [
-            {"role":"system","content":"Ты — «Помни», тёплый, бережный AI-друг. Говори по-русски, мягко и по-человечески. Без диагнозов и без перечисления источников."},
-            {"role":"user","content": m.text.strip() if m.text else ""}
-        ]
-        reply = await complete_chat(user=user_id, messages=messages, temperature=0.4)
-        reply = (reply or "").strip()
-        if reply:
-            await m.answer(reply)
-            return
-    except Exception as e:
-        # Пишем в логи, но не молчим для пользователя
-        try:
-            import logging
-            logging.exception("LLM fallback error: %s", e)
-        except Exception:
-            pass
-    # Безопасный тёплый ответ при любой ошибке
-    await m.answer("Похоже, у меня что-то пошло не так… Но я рядом. Можем начать с простого: опиши, что сейчас больше всего беспокоит. 🌿")
-
-# ==== LAST-RESORT FALLBACK (auto)
 @router.message()
-async def __last_resort_reply(m: Message):
-    """Последний рубеж: если раньше ничто не сработало — ответим, чтобы бот не молчал."""
+async def __last_resort(m: Message):
     try:
         txt = (m.text or "").strip()
         if txt:
-            await m.answer("я здесь 🌿 " + (txt[:80] + ("…" if len(txt)>80 else "")))
+            await m.answer("я здесь 🌿 " + (txt[:80] + ("…" if len(txt) > 80 else "")))
         else:
             await m.answer("я здесь 🌿")
     except Exception:
-        # даже если тут что-то упало — не мешаем приложению
         pass
