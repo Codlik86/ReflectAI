@@ -480,3 +480,74 @@ async def onb_done(cb: CallbackQuery):
         await cb.message.answer("Выбирай, с чего начнём:", reply_markup=kb_main())  # type: ignore[name-defined]
     except Exception:
         pass
+from aiogram.filters import CommandStart
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+
+
+# ===== Онбординг: клавиатуры и тексты ========================================
+def kb_onb_consent() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="👋 Привет, друг!")]],
+        resize_keyboard=True
+    )
+
+def kb_onb_quick_setup() -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="🧘 Снизить тревогу")],
+        [KeyboardButton(text="😴 Улучшить сон")],
+        [KeyboardButton(text="✨ Повысить самооценку")],
+        [KeyboardButton(text="🎯 Найти ресурсы и мотивацию")],
+        [KeyboardButton(text="✅ Готово")],
+    ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+ONB_COVER_CAPTION = (
+    "Привет! Я здесь, чтобы поддержать, выслушать и сохранить важное — не стесняйся.\n\n"
+    "Перед началом подтвердим правила и включим персонализацию.\n"
+    "Продолжая, ты принимаешь наши правила и политику:\n"
+    "• https://tinyurl.com/5n98a7j8 • https://tinyurl.com/5n98a7j8\n\n"
+    "Скорее нажимай — и я всё расскажу 👇"
+)
+
+ONB_SETTINGS_TEXT = (
+    "Класс! Тогда пару быстрых настроек 🛠️\n\n"
+    "Выбери, что сейчас важнее (можно несколько), а затем нажми «Готово»:"
+)
+
+ONB_WHATS_NEXT = (
+    "Что дальше? Несколько вариантов:\n\n"
+    "1) Хочешь просто поговорить — нажми «Поговорить». Без рамок и практик: поделись тем, что происходит, я поддержу и помогу разложить.\n"
+    "2) Нужно быстро разобраться — открой «Разобраться». Там короткие упражнения на 5–10 минут: от дыхания и анти-катастрофизации до плана при панике и S-T-O-P.\n"
+    "3) Хочешь разгрузить голову — в «Медитациях» будут короткие аудио для тревоги, сна и концентрации — добавим совсем скоро.\n\n"
+    "Пиши, как тебе удобно. Я рядом ❤️"
+)
+
+# Фолбэк-меню на случай, если kb_main() не определён в проекте:
+def _kb_main_fallback():
+    try:
+        return kb_main()
+    except NameError:
+        talk = globals().get("EMO_TALK","💬")+" Поговорить"
+        work = globals().get("EMO_HERB","🌿")+" Разобраться"
+        med  = globals().get("EMO_HEADPHONES","🎧")+" Медитации"
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text=talk)],[KeyboardButton(text=work)],[KeyboardButton(text=med)]],
+            resize_keyboard=True
+        )
+# ==============================================================================
+
+
+@router.message(CommandStart())
+async def cmd_start_onboarding(m: Message):
+    try:
+        await m.answer_photo(ONB_IMAGES["cover"], caption=ONB_COVER_CAPTION, reply_markup=kb_onb_consent())
+    except Exception:
+        await m.answer(ONB_COVER_CAPTION, reply_markup=kb_onb_consent())
+
+@router.message(F.text == "👋 Привет, друг!")
+async def on_onb_hello(m: Message):
+    await m.answer(ONB_SETTINGS_TEXT, reply_markup=kb_onb_quick_setup())
+
+@router.message(F.text == "✅ Готово")
+async def on_onb_ready(m: Message):
+    await m.answer(ONB_WHATS_NEXT, reply_markup=_kb_main_fallback())
