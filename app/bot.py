@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from aiogram.filters import CommandStart, Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+
 # ======================= УНИВЕРСАЛЬНОЕ РЕДАКТИРОВАНИЕ =======================
 
 async def smart_edit(message, text: str, **kwargs):
@@ -551,3 +554,139 @@ async def on_onb_hello(m: Message):
 @router.message(F.text == "✅ Готово")
 async def on_onb_ready(m: Message):
     await m.answer(ONB_WHATS_NEXT, reply_markup=_kb_main_fallback())
+
+
+# === Onboarding/V2 constants ===
+EMO_WAVE = globals().get("EMO_WAVE", "👋")
+EMO_TOOLS = globals().get("EMO_TOOLS", "🛠️")
+POLICY_URL = "https://tinyurl.com/5n98a7j8"
+RULES_URL = "https://tinyurl.com/5n98a7j8"
+
+
+# === Onboarding/V2 helpers ===
+# хранилка временных предпочтений онбординга и голоса
+_ONB_PREFS: dict[int, set[str]] = {}
+_VOICE_PREFS: dict[int, str] = {}
+
+VOICE_CHOICES = {
+    "default": "Универсальный 🌿",
+    "friend":  "Друг/подруга 🤝",
+    "pro":     "Психолог 🎓",
+    "dark":    "Тёмная версия 🖤 (18+)",
+}
+
+def get_user_voice(uid: int) -> str:
+    return _VOICE_PREFS.get(uid, "default")
+
+def set_user_voice(uid: int, v: str) -> None:
+    _VOICE_PREFS[uid] = v
+
+def kb_onb_consent() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Политика", url=POLICY_URL)
+    kb.button(text="Правила",  url=RULES_URL)
+    kb.button(text="Привет, хорошо✅", callback_data="onb:hello")
+    return kb.as_markup()
+
+def kb_onb_prefs() -> ReplyKeyboardMarkup:
+    rb = ReplyKeyboardBuilder()
+    for txt in ["🧘 Снизить тревогу", "😴 Улучшить сон", "💫 Повысить самооценку", "🎯 Найти ресурсы и мотивацию"]:
+        rb.button(text=txt)
+    rb.button(text="✅ Готово")
+    return rb.as_markup(resize_keyboard=True)
+
+def kb_voice() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text=VOICE_CHOICES["default"], callback_data="voice:set:default")
+    kb.button(text=VOICE_CHOICES["friend"] , callback_data="voice:set:friend")
+    kb.button(text=VOICE_CHOICES["pro"]    , callback_data="voice:set:pro")
+    kb.button(text=VOICE_CHOICES["dark"]   , callback_data="voice:set:dark")
+    return kb.as_markup()
+
+def get_home_text() -> str:
+    # если в исходнике уже есть такая функция — оставляем твою.
+    return "Выбирай режим ниже или просто напиши, как ты сейчас. " + EMO_HERB
+
+
+
+# === Onboarding V2 (экраны по ТЗ) ===
+
+@router.message(CommandStart())
+async def on_cmd_start_v2(m: Message):
+    # Экран 1: картинка + согласие
+    caption = (
+        "Привет! Я здесь, чтобы поддержать, выслушать и сохранить важное — не стесняйся.\n\n"
+        "Перед началом подтвердим правила и включим персонализацию.\n"
+        "Продолжая, ты принимаешь наши правила и политику:\n"
+        f"{POLICY_URL} • {RULES_URL}\n\n"
+        "Скорее нажимай — и я всё расскажу 👇"
+    )
+    try:
+        await m.answer_photo(ONB_IMAGES.get("cover"), caption=caption, reply_markup=kb_onb_consent())
+    except Exception:
+        await m.answer(caption, reply_markup=kb_onb_consent())
+
+@router.callback_query(F.data == "onb:hello")
+async def cb_onb_hello(cb: CallbackQuery):
+    uid = cb.from_user.id
+    _ONB_PREFS[uid] = set()
+    # Экран 2: «Привет, друг!» + быстрые настройки
+    try:
+        await cb.message.answer(f"{EMO_WAVE} Привет, друг!")
+    except Exception:
+        pass
+    text = (
+        "Класс! Тогда пару быстрых настроек " + EMO_TOOLS + "\n\n"
+        "Выбери, что сейчас важнее (можно несколько), а затем нажми «Готово»:"
+    )
+    await cb.message.answer(text, reply_markup=kb_onb_prefs())
+    await cb.answer()
+
+# собираем простые предпочтения
+@router.message(F.text.in_({"🧘 Снизить тревогу","😴 Улучшить сон","💫 Повысить самооценку","🎯 Найти ресурсы и мотивацию"}))
+async def on_onb_pick(m: Message):
+    uid = m.from_user.id
+    _ONB_PREFS.setdefault(uid, set()).add(m.text)
+
+@router.message(F.text == "✅ Готово")
+async def on_onb_done(m: Message):
+    # Экран 3: финальный
+    text = (
+        "Что дальше? Несколько вариантов:\n\n"
+        "1) Хочешь просто поговорить — нажми «Поговорить». Без рамок и практик: поделись тем, что происходит, я поддержу и помогу разложить.\n"
+        "2) Нужно оперативно поработать — зайди в «Разобраться». Там короткие упражнения на разные темы.\n"
+        "3) Хочешь аудио-передышку — в «Медитациях» будут короткие аудио для тревоги, сна и концентрации — добавим совсем скоро.\n\n"
+        "Пиши, как удобно — я рядом ❤️"
+    )
+    try:
+        # если есть твой kb_main() — покажем его, иначе просто текст
+        kb = globals().get("kb_main")
+        if callable(kb):
+            await m.answer(text, reply_markup=kb())
+        else:
+            await m.answer(text)
+    except Exception:
+        await m.answer(text)
+
+# === /voice — выбор тона общения ===
+
+@router.message(Command("voice"))
+async def cmd_voice(m: Message):
+    v = get_user_voice(m.from_user.id)
+    await m.answer(
+        "Выбери стиль общения для режима «Поговорить»:\n"
+        f"Текущий: {VOICE_CHOICES.get(v, 'Универсальный 🌿')}",
+        reply_markup=kb_voice()
+    )
+
+@router.callback_query(F.data.startswith("voice:set:"))
+async def cb_voice_set(cb: CallbackQuery):
+    uid = cb.from_user.id
+    v = cb.data.split(":", 2)[-1]
+    if v not in VOICE_CHOICES:
+        await cb.answer("Неизвестный стиль", show_alert=True); return
+    set_user_voice(uid, v)
+    await cb.message.answer(f"Стиль обновлён: {VOICE_CHOICES[v]}")
+    await cb.answer("Готово")
+
+
