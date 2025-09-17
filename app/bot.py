@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+import re
 
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
@@ -688,5 +689,4 @@ async def cb_voice_set(cb: CallbackQuery):
     set_user_voice(uid, v)
     await cb.message.answer(f"Стиль обновлён: {VOICE_CHOICES[v]}")
     await cb.answer("Готово")
-
 
