@@ -261,26 +261,36 @@ def kb_settings() -> InlineKeyboardMarkup:
 def topic_emoji(tid: str, title: str) -> str:
     t = (tid or "").lower()
     name = (title or "").lower()
-    if any(k in t or k in name for k in ["anx", "тревог"]): return "😰"
-    if any(k in t or k in name for k in ["stress", "стресс"]): return "🌀"
-    if any(k in t or k in name for k in ["sleep", "сон"]): return "💤"
-    if any(k in t or k in name for k in ["clarity", "ясност", "цель", "план"]): return "🧭"
-    if any(k in t or k in name for k in ["panic", "паник"]): return "💥"
-    if any(k in t or k in name for k in ["depress", "депресс"]): return "🌧"
-    if any(k in t or k in name for k in ["self", "самооцен", "уверенн"]): return "🌱"
-    if any(k in t or k in name for k in ["relat", "отношен", "семь", "друг"]): return "💞"
-    if any(k in t or k in name for k in ["mindful", "осознан", "медитац"]): return "🧘"
-    if any(k in t or k in name for k in ["work", "выгора", "burnout"]): return "🔥"
+    def has(*keys): return any(k in t or k in name for k in keys)
+
+    if has("anx", "тревог"): return "😰"
+    if has("panic", "паник"): return "💥"
+    if has("stress", "стресс"): return "🌀"
+    if has("sleep", "сон", "бессон"): return "😴"
+    if has("mindful", "осознан", "медитац", "дыхани"): return "🫁"
+    if has("procrast", "прокраст"): return "🐢"
+    if has("burnout", "выгора", "устал"): return "🔥"
+    if has("clarity", "ясност", "цель", "план", "решен", "неопредел"): return "🧭"
+    if has("relat", "отношен", "семь", "друз"): return "💞"
+    if has("self", "самооцен", "уверенн"): return "🌱"
+    if has("body", "тело", "напряж"): return "🦴"
+    if has("social", "социал", "застенч", "знакомств", "тревога"): return "🫣"
+    if has("grief", "горе", "потер"): return "🖤"
+    if has("anger", "злост", "раздраж"): return "😤"
+    if has("depress", "депресс"): return "🌧"
     return EMO_HERB
 
 def _topic_title(tid: str) -> str:
+    import hashlib
     t = TOPICS.get(tid, {})
     title = t.get("title", tid)
-    emoji = t.get("emoji") or topic_emoji(tid, title)
-    if emoji == EMO_HERB:
-        pool = ["🌈","✨","🫶","🛡️","🧩","📈","🪴","🌊","☀️","🌙","🧠","🫁","🧪","🫧","🧲","🎯","💡","🎈","🪄"]
-        idx = int(hashlib.md5((tid or title).encode("utf-8")).hexdigest(), 16) % len(pool)
-        emoji = pool[idx]
+    emoji = (t.get("emoji") or "").strip()
+    if not emoji or emoji == EMO_HERB:
+        emoji = topic_emoji(tid, title)
+        if not emoji or emoji == EMO_HERB:
+            pool = ["🌈","✨","🫶","🛡️","🧩","📈","🪴","🌊","☀️","🌙","🧠","🫁","🧪","🫧","🧲","🎯","💡","🎈","🪄"]
+            idx = int(hashlib.md5((tid or title).encode("utf-8")).hexdigest(), 16) % len(pool)
+            emoji = pool[idx]
     return f"{emoji} {title}"
 
 def kb_topics() -> InlineKeyboardMarkup:
@@ -632,10 +642,18 @@ async def on_text(m: Message):
             + "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки пользователю]\n"
             + rag_ctx
         ).strip()
+    import os
+    if os.getenv("BOT_DEBUG") == "1":
+        try:
+            _prv = sys_prompt[:160] + ("…" if len(sys_prompt) > 160 else "")
+            print("[CHAT] sys_prompt:", _prv)
+            print("[CHAT] style:", style_key, "mode:", CHAT_MODE.get(chat_id))
+        except Exception:
+            pass
 
     # История
-    history = list(DIALOG_HISTORY[chat_id])
-    messages = history + [{"role": "user", "content": user_text}]
+history = list(DIALOG_HISTORY[chat_id])
+messages = [{"role": "system", "content": sys_prompt}] + history + [{"role": "user", "content": user_text}]
 
     # Вызов модели: системный промпт передаём отдельным аргументом
     try:
