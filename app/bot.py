@@ -490,10 +490,6 @@ async def on_ex_click(cb: CallbackQuery):
         EX_STATE.pop(cb.message.chat.id, None)
         await cb.message.answer("Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
         return
-
-    _set_user_voice(str(cb.from_user.id), style)
-    await cb.message.answer(f"Стиль обновлён: <b>{style}</b> ✅")
-
 # ===== Медитации =====
 
 @router.message(F.text == "⚙️ Настройки")
