@@ -72,6 +72,35 @@ VOICE_STYLES = {
     "dark":    "Стиль ответа: взрослая ирония (18+). Умно и бережно, без токсичности и осуждения.",
 }
 
+def _style_overlay(style_key: str) -> str:
+    key = (style_key or "default").lower()
+    if key == "default":
+        return ""
+    try:
+        mod = PROMPTS
+    except NameError:
+        mod = None
+
+    def _get_from_prompts(names):
+        if not mod:
+            return ""
+        for n in names:
+            val = getattr(mod, n, None)
+            if isinstance(val, str) and val.strip():
+                return val
+        return ""
+
+    if key == "friend":
+        txt = _get_from_prompts(["STYLE_FRIEND", "STYLE_TALK_FRIEND", "VOICE_FRIEND", "STYLE_FRIENDLY"])
+        return txt or VOICE_STYLES.get("friend", "")
+    if key == "pro":
+        txt = _get_from_prompts(["STYLE_PRO", "STYLE_PSYCHOLOGIST", "STYLE_CLINICAL"])
+        return txt or VOICE_STYLES.get("pro", "")
+    if key == "dark":
+        txt = _get_from_prompts(["STYLE_DARK", "STYLE_IRONY_18", "STYLE_IRONY"])
+        return txt or VOICE_STYLES.get("dark", "")
+    return VOICE_STYLES.get(key, "")
+
 REFLECTIVE_SUFFIX = (
     "\n\nРежим рефлексии: задавай короткие вопросы по одному, помогай структурировать мысли, поддерживай темп."
 )
@@ -564,6 +593,12 @@ async def on_text(m: Message):
 
     # System prompt + (optional) reflective suffix + RAG-context
     sys_prompt = SYSTEM_PROMPT
+    overlay = _style_overlay(style_key)
+    if overlay:
+        sys_prompt = sys_prompt + "
+
+" + overlay
+
     if CHAT_MODE.get(chat_id) == "reflection":
         sys_prompt += REFLECTIVE_SUFFIX
     if rag_ctx:
