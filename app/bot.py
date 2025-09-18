@@ -611,6 +611,13 @@ async def on_stop_word(m: Message):
 # ===== LLM chat =====
 @router.message(F.text & ~F.text.regexp(r'^/'))@router.message(F.text & ~F.text.regexp(r'^/'))
 async def on_text(m: Message):
+    chat_id = str(m.chat.id)
+    user_text = m.text or ""
+    style_key = _get_user_voice(chat_id)
+    overlay = _style_overlay(style_key)
+    sys_prompt = SYSTEM_PROMPT
+    if overlay:
+        sys_prompt += "\n\n" + overlay
     chat_id = m.chat.id
     tg_id = str(m.from_user.id)
     user_text = (m.text or "").strip()
@@ -637,6 +644,14 @@ async def on_text(m: Message):
     if CHAT_MODE.get(chat_id) == "reflection":
         sys_prompt = sys_prompt + REFLECTIVE_SUFFIX
     if rag_ctx:
+    # Debug sys_prompt
+    import os
+    if os.getenv("BOT_DEBUG") == "1":
+        try:
+            print("[CHAT] sys_prompt:", (sys_prompt[:160] + ("…" if len(sys_prompt) > 160 else "")))
+            print("[CHAT] style:", style_key, "mode:", CHAT_MODE.get(chat_id))
+        except Exception:
+            pass
         sys_prompt = (
             sys_prompt
             + "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки пользователю]\n"
