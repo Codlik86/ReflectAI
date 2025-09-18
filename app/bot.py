@@ -5,6 +5,7 @@ app/bot.py — ReflectAI
 """
 import os
 import sqlite3
+import hashlib
 from contextlib import contextmanager
 from collections import defaultdict, deque
 from typing import Dict, Deque, Optional, Tuple, List, Any
@@ -598,7 +599,7 @@ async def on_stop_word(m: Message):
         await m.answer("Окей, выходим из режима рефлексии. Можем продолжить обычный разговор 💬")
 
 # ===== LLM chat =====
-@router.message(F.text & ~F.text.regexp(r'^/'))
+@router.message(F.text & ~F.text.regexp(r'^/'))@router.message(F.text & ~F.text.regexp(r'^/'))
 async def on_text(m: Message):
     chat_id = m.chat.id
     tg_id = str(m.from_user.id)
@@ -617,7 +618,7 @@ async def on_text(m: Message):
         except Exception:
             rag_ctx = ""
 
-    # Style overlay
+    # Сбор системного промпта + тон (overlay)
     style_key = _get_user_voice(tg_id)
     sys_prompt = SYSTEM_PROMPT
     overlay = _style_overlay(style_key)
@@ -633,12 +634,17 @@ async def on_text(m: Message):
         ).strip()
 
     # История
-history = list(DIALOG_HISTORY[chat_id])
-messages = history + [{"role": "user", "content": user_text}]
+    history = list(DIALOG_HISTORY[chat_id])
+    messages = history + [{"role": "user", "content": user_text}]
 
-    # LLM
+    # Вызов модели: системный промпт передаём отдельным аргументом
     try:
-        answer = await chat_with_style(messages=messages, style_hint=overlay or VOICE_STYLES.get(style_key, ""), temperature=0.6)
+        answer = await chat_with_style(
+            system=sys_prompt,
+            messages=messages,
+            style_hint=overlay or VOICE_STYLES.get(style_key, ""),
+            temperature=0.6,
+        )
     except Exception:
         answer = "Похоже, модель сейчас недоступна. Я рядом 🌿 Попробуешь ещё раз?"
 
@@ -646,7 +652,7 @@ messages = history + [{"role": "user", "content": user_text}]
     _push(chat_id, "assistant", answer)
     await m.answer(answer)
 
-# ===== Debug =====
+
 @router.message(Command("debug_prompt"))
 async def on_debug_prompt(m: Message):
     preview = SYSTEM_PROMPT[:200] + ("…" if len(SYSTEM_PROMPT) > 200 else "")
@@ -656,7 +662,7 @@ async def on_debug_prompt(m: Message):
         f"<code>{preview}</code>"
     )
 
-# ===== Service =====
+
 @router.message(Command("ping"))
 async def on_ping(m: Message):
     await m.answer("pong ✅")
