@@ -1,4 +1,8 @@
-# app/bot.py
+# -*- coding: utf-8 -*-
+"""
+app/bot.py — ReflectAI
+Полная рабочая версия.
+"""
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -14,32 +18,11 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramBadRequest
 
-# ===== Imports from project modules (prompts/exercises/llm/rag) =====
-try:
-    from app.prompts import SYSTEM_PROMPT
-except Exception:
-    try:
-        from prompts import SYSTEM_PROMPT
-    except Exception:
-        SYSTEM_PROMPT = (
-            "Ты — бережный русскоязычный психологический ассистент ReflectAI. "
-            "Не даёшь диагнозов и не заменяешь врача. При рисках мягко советуешь обратиться к специалисту."
-        )
-
-try:
-    from app.exercises import TOPICS
-except Exception:
-    from exercises import TOPICS
-
-try:
-    from app.llm_adapter import chat_with_style
-except Exception:
-    from llm_adapter import chat_with_style
-
+# ===== RAG (опционально) =====
 rag_search_fn = None
 try:
     from app import rag_qdrant
-    rag_search_fn = rag_qdrant.search
+    rag_search_fn = rag_qdrant.search  # async fn
 except Exception:
     try:
         import rag_qdrant
@@ -47,10 +30,69 @@ except Exception:
     except Exception:
         rag_search_fn = None
 
+# ===== prompts: умный загрузчик =====
+PROMPT_SOURCE = "fallback"
+try:
+    import app.prompts as PROMPTS
+    PROMPT_SOURCE = "app.prompts"
+except Exception:
+    try:
+        import prompts as PROMPTS
+        PROMPT_SOURCE = "prompts"
+    except Exception:
+        PROMPTS = None
+        PROMPT_SOURCE = "fallback"
+
+SYSTEM_PROMPT: str
+if PROMPTS is not None:
+    talk = getattr(PROMPTS, "TALK_SYSTEM_PROMPT", None)
+    if isinstance(talk, str) and talk.strip():
+        SYSTEM_PROMPT = talk
+        PROMPT_SOURCE += ".TALK_SYSTEM_PROMPT"
+    else:
+        base = getattr(PROMPTS, "SYSTEM_PROMPT", "")
+        style = getattr(PROMPTS, "STYLE_TALK", "")
+        if isinstance(base, str) and base.strip() and isinstance(style, str) and style.strip():
+            SYSTEM_PROMPT = base + "\n\n" + style
+            PROMPT_SOURCE += ".SYSTEM_PROMPT+STYLE_TALK"
+        elif isinstance(base, str) and base.strip():
+            SYSTEM_PROMPT = base
+            PROMPT_SOURCE += ".SYSTEM_PROMPT"
+        else:
+            SYSTEM_PROMPT = ""
+else:
+    SYSTEM_PROMPT = ""
+
+if not SYSTEM_PROMPT:
+    SYSTEM_PROMPT = (
+        "Ты — тёплый русскоязычный ассистент ReflectAI. Общайся на «ты», просто и бережно. "
+        "Не ставь диагнозов и не замещай врача; при рисках мягко предлагай обратиться к специалисту. "
+        "Поддерживай, задавай уточняющие вопросы, помогай структурировать мысли. Без ссылок на источники."
+    )
+    PROMPT_SOURCE = "fallback.default"
+
+# ===== exercises / llm =====
+try:
+    from app.exercises import TOPICS
+except Exception:
+    from exercises import TOPICS  # type: ignore
+
+try:
+    from app.llm_adapter import chat_with_style
+except Exception:
+    from llm_adapter import chat_with_style  # type: ignore
+
 # ===== Router =====
 router = Router()
 
-# ===== Constants / Config =====
+# Debug: печать источника промпта
+if os.getenv("BOT_DEBUG") == "1":
+    try:
+        print(f"[PROMPT] loaded from: {PROMPT_SOURCE}; length={len(SYSTEM_PROMPT)}")
+    except Exception:
+        pass
+
+# ===== Config/Const =====
 EMO_HERB = "🌿"
 
 ONB_IMAGES = {
@@ -61,8 +103,8 @@ ONB_IMAGES = {
     "meditations": os.getenv("ONB_IMG_MEDIT", ""),
 }
 
-POLICY_URL = os.getenv("POLICY_URL", "#")
-TERMS_URL = os.getenv("TERMS_URL", "#")
+POLICY_URL = os.getenv("POLICY_URL", "")
+TERMS_URL = os.getenv("TERMS_URL", "")
 LEGAL_CRAFT_LINK = os.getenv("LEGAL_CRAFT_LINK", "https://s.craft.me/APV7T8gRf3w2Ay")
 
 VOICE_STYLES = {
@@ -72,47 +114,44 @@ VOICE_STYLES = {
     "dark":    "Стиль ответа: взрослая ирония (18+). Умно и бережно, без токсичности и осуждения.",
 }
 
+REFLECTIVE_SUFFIX = (
+    "\n\nРежим рефлексии: задавай короткие вопросы по одному, помогай замечать мысли/чувства/потребности, "
+    "мягко наводи на шаги самопомощи. Поддерживай и не перегружай советами."
+)
+
 def _style_overlay(style_key: str) -> str:
+    """Возвращает текст-оверлей выбранного тона поверх базового промпта."""
     key = (style_key or "default").lower()
     if key == "default":
         return ""
-    try:
-        mod = PROMPTS
-    except NameError:
-        mod = None
 
-    def _get_from_prompts(names):
-        if not mod:
+    def _get_from_prompts(names: List[str]) -> str:
+        if not PROMPTS:
             return ""
         for n in names:
-            val = getattr(mod, n, None)
+            val = getattr(PROMPTS, n, None)
             if isinstance(val, str) and val.strip():
                 return val
         return ""
 
     if key == "friend":
         txt = _get_from_prompts(["STYLE_FRIEND", "STYLE_TALK_FRIEND", "VOICE_FRIEND", "STYLE_FRIENDLY"])
-        return txt or VOICE_STYLES.get("friend", "")
+        return txt or VOICE_STYLES["friend"]
     if key == "pro":
         txt = _get_from_prompts(["STYLE_PRO", "STYLE_PSYCHOLOGIST", "STYLE_CLINICAL"])
-        return txt or VOICE_STYLES.get("pro", "")
+        return txt or VOICE_STYLES["pro"]
     if key == "dark":
         txt = _get_from_prompts(["STYLE_DARK", "STYLE_IRONY_18", "STYLE_IRONY"])
-        return txt or VOICE_STYLES.get("dark", "")
+        return txt or VOICE_STYLES["dark"]
     return VOICE_STYLES.get(key, "")
 
-REFLECTIVE_SUFFIX = (
-    "\n\nРежим рефлексии: задавай короткие вопросы по одному, помогай структурировать мысли, поддерживай темп."
-)
-
-# ===== Simple Dialogue Memory (per-chat short history) =====
+# ===== Memory (in-memory + sqlite prefs) =====
 DIALOG_HISTORY: Dict[int, Deque[Dict[str, str]]] = defaultdict(lambda: deque(maxlen=14))
 CHAT_MODE: Dict[int, str] = defaultdict(lambda: "talk")   # 'talk' | 'reflection'
 
 def _push(chat_id: int, role: str, content: str):
     DIALOG_HISTORY[chat_id].append({"role": role, "content": content})
 
-# ===== Persistent user prefs (SQLite) =====
 DB_PATH = os.getenv("BOT_DB_PATH", "bot.db")
 
 @contextmanager
@@ -135,24 +174,6 @@ def _ensure_tables():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         """)
-        for ddl in [
-            "ALTER TABLE user_prefs ADD COLUMN voice_style TEXT DEFAULT 'default';",
-            "ALTER TABLE user_prefs ADD COLUMN consent_save_all INTEGER DEFAULT 0;",
-            "ALTER TABLE user_prefs ADD COLUMN goals TEXT DEFAULT '';",
-        ]:
-            try:
-                s.execute(ddl)
-            except Exception:
-                pass
-        s.commit()
-
-def _set_consent(tg_id: str, value: int = 1):
-    _ensure_tables()
-    with db_session() as s:
-        s.execute("""
-            INSERT INTO user_prefs (tg_id, consent_save_all) VALUES (?, ?)
-            ON CONFLICT(tg_id) DO UPDATE SET consent_save_all=excluded.consent_save_all, updated_at=CURRENT_TIMESTAMP
-        """, (tg_id, value))
         s.commit()
 
 def _get_user_voice(tg_id: str) -> str:
@@ -170,21 +191,16 @@ def _set_user_voice(tg_id: str, style: str) -> None:
         """, (tg_id, style))
         s.commit()
 
-def _append_goal(tg_id: str, goal_key: str):
+def _set_consent(tg_id: str, value: int = 1) -> None:
     _ensure_tables()
     with db_session() as s:
-        row = s.execute("SELECT goals FROM user_prefs WHERE tg_id=?", (tg_id,)).fetchone()
-        goals = set((row[0].split(",") if (row and row[0]) else []))
-        if goal_key not in goals:
-            goals.add(goal_key)
         s.execute("""
-            INSERT INTO user_prefs (tg_id, goals) VALUES (?, ?)
-            ON CONFLICT(tg_id) DO UPDATE SET goals=?, updated_at=CURRENT_TIMESTAMP
-        """, (tg_id, ",".join([g for g in goals if g])))
+            INSERT INTO user_prefs (tg_id, consent_save_all) VALUES (?, ?)
+            ON CONFLICT(tg_id) DO UPDATE SET consent_save_all=excluded.consent_save_all, updated_at=CURRENT_TIMESTAMP
+        """, (tg_id, value))
         s.commit()
 
 # ===== Keyboards =====
-
 def kb_main() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -195,18 +211,17 @@ def kb_main() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+def _valid_url(u: str) -> bool:
+    return bool(u) and (u.startswith("http://") or u.startswith("https://"))
+
 def kb_onb_step1() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Старт ▶️", callback_data="onb:start")]
     ])
 
-def _valid_url(u: str) -> bool:
-    return bool(u) and (u.startswith("http://") or u.startswith("https://"))
-
 def kb_onb_step2() -> InlineKeyboardMarkup:
-    buttons = []
-    row = []
-    # Если ссылки валидны — даём url-кнопки; иначе callback с текстовой заглушкой
+    buttons: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
     if _valid_url(POLICY_URL):
         row.append(InlineKeyboardButton(text="Политика", url=POLICY_URL))
     else:
@@ -228,12 +243,6 @@ def kb_goals() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✅ Готово", callback_data="goal:done")],
     ])
 
-def kb_settings() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎚️ Тон", callback_data="settings:tone")],
-        [InlineKeyboardButton(text="🔒 Privacy", callback_data="settings:privacy")],
-    ])
-
 def kb_tone() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎚️ По умолчанию", callback_data="tone:set:default")],
@@ -242,26 +251,47 @@ def kb_tone() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🕶️ Ирония 18+",   callback_data="tone:set:dark")],
     ])
 
+def kb_settings() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎚️ Тон", callback_data="settings:tone")],
+        [InlineKeyboardButton(text="🔒 Privacy", callback_data="settings:privacy")],
+    ])
+
+def topic_emoji(tid: str, title: str) -> str:
+    t = (tid or "").lower()
+    name = (title or "").lower()
+    if any(k in t or k in name for k in ["anx", "тревог"]): return "😰"
+    if any(k in t or k in name for k in ["stress", "стресс"]): return "🌀"
+    if any(k in t or k in name for k in ["sleep", "сон"]): return "💤"
+    if any(k in t or k in name for k in ["clarity", "ясност", "цель", "план"]): return "🧭"
+    if any(k in t or k in name for k in ["panic", "паник"]): return "💥"
+    if any(k in t or k in name for k in ["depress", "депресс"]): return "🌧"
+    if any(k in t or k in name for k in ["self", "самооцен", "уверенн"]): return "🌱"
+    if any(k in t or k in name for k in ["relat", "отношен", "семь", "друг"]): return "💞"
+    if any(k in t or k in name for k in ["mindful", "осознан", "медитац"]): return "🧘"
+    if any(k in t or k in name for k in ["work", "выгора", "burnout"]): return "🔥"
+    return EMO_HERB
+
 def _topic_title(tid: str) -> str:
     t = TOPICS.get(tid, {})
     title = t.get("title", tid)
-    emoji = t.get("emoji") or EMO_HERB
+    emoji = t.get("emoji") or topic_emoji(tid, title)
     return f"{emoji} {title}"
 
 def kb_topics() -> InlineKeyboardMarkup:
-    rows = []
-    ordered_ids = list(TOPICS.keys())
-    if "reflection" in ordered_ids:
-        ordered_ids.remove("reflection")
-        ordered_ids = ["reflection"] + ordered_ids
-    for tid in ordered_ids:
+    rows: List[List[InlineKeyboardButton]] = []
+    ids = list(TOPICS.keys())
+    if "reflection" in ids:
+        ids.remove("reflection")
+        ids = ["reflection"] + ids
+    for tid in ids:
         rows.append([InlineKeyboardButton(text=_topic_title(tid), callback_data=f"topic:{tid}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_exercises(tid: str) -> InlineKeyboardMarkup:
     t = TOPICS.get(tid, {})
     exs = t.get("exercises", []) or []
-    rows = []
+    rows: List[List[InlineKeyboardButton]] = []
     for ex in exs:
         eid = ex["id"]
         rows.append([InlineKeyboardButton(text=f"• {ex['title']}", callback_data=f"ex:{tid}:{eid}:start")])
@@ -278,21 +308,14 @@ def step_keyboard(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMar
         [InlineKeyboardButton(text="🏁 Завершить", callback_data=f"ex:{tid}:{eid}:finish")],
     ])
 
-def stop_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏹️ Стоп", callback_data="reflect:stop")]])
-
 # ===== Helpers =====
-
 async def _safe_edit_text(msg: Message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
     try:
         await msg.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as e:
         if "not modified" in str(e).lower():
             return
-        try:
-            await msg.answer(text, reply_markup=reply_markup)
-        except Exception:
-            raise
+        await msg.answer(text, reply_markup=reply_markup)
 
 async def _safe_edit_caption(msg: Message, caption: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
     try:
@@ -300,10 +323,7 @@ async def _safe_edit_caption(msg: Message, caption: str, reply_markup: Optional[
     except TelegramBadRequest as e:
         if "not modified" in str(e).lower():
             return
-        try:
-            await msg.answer(caption, reply_markup=reply_markup)
-        except Exception:
-            raise
+        await msg.answer(caption, reply_markup=reply_markup)
 
 async def _silent_ack(cb: CallbackQuery):
     try:
@@ -311,8 +331,17 @@ async def _silent_ack(cb: CallbackQuery):
     except Exception:
         pass
 
-# ===== Onboarding texts =====
+async def _start_reflection_chat(message: Message):
+    chat_id = message.chat.id
+    CHAT_MODE[chat_id] = "reflection"
+    txt = (
+        "Окей, давай в свободном формате поразбираемся. "
+        "Я буду отвечать в рефлексивном ключе: помогать замечать мысли, чувства и потребности, "
+        "и мягко наводить на шаги поддержки. Чтобы выйти — напиши «Стоп» или нажми Меню."
+    )
+    await message.answer(txt)
 
+# ===== Onboarding texts =====
 def onb_text_1() -> str:
     return (
         "Привет! Здесь ты можешь выговориться, посоветоваться или просто получить поддержку. "
@@ -344,8 +373,7 @@ def get_home_text() -> str:
         "\nМожешь ввести /tone чтобы выбрать стиль ответа."
     )
 
-# ===== Handlers =====
-
+# ===== Handlers: onboarding =====
 @router.message(Command("start"))
 async def on_start(m: Message):
     img = ONB_IMAGES.get("cover1") or ""
@@ -397,17 +425,53 @@ async def on_onb_terms(cb: CallbackQuery):
 async def on_onb_agree(cb: CallbackQuery):
     await _silent_ack(cb)
     _set_consent(str(cb.from_user.id), 1)
-    try:
-        await cb.message.answer(onb_text_3(), reply_markup=kb_main())
-    except Exception:
-        await cb.message.answer(get_home_text(), reply_markup=kb_main())
+    await cb.message.answer(onb_text_3(), reply_markup=kb_main())
 
+# ===== Меню / Настройки =====
 @router.message(F.text.in_({"Меню", "меню"}))
 async def on_menu_text(m: Message):
     await m.answer(get_home_text(), reply_markup=kb_main())
 
-# ===== Раздел «Разобраться» =====
+@router.message(F.text == "⚙️ Настройки")
+async def on_settings(m: Message):
+    txt = (
+        "Настройки:\n"
+        "• Выбрать тон ответа — кнопка ниже.\n"
+        "• Политика/правила — открою ссылку.\n"
+        "Позже добавим больше параметров."
+    )
+    await m.answer(txt, reply_markup=kb_settings())
 
+@router.callback_query(F.data == "settings:tone")
+async def on_settings_tone(cb: CallbackQuery):
+    await _silent_ack(cb)
+    cur = _get_user_voice(str(cb.from_user.id))
+    await cb.message.answer(f"Текущий тон: <b>{cur}</b>. Выбери ниже:", reply_markup=kb_tone())
+
+@router.callback_query(F.data == "settings:privacy")
+async def on_settings_privacy(cb: CallbackQuery):
+    await _silent_ack(cb)
+    link = LEGAL_CRAFT_LINK
+    await cb.message.answer(f"Политика и правила: {link}")
+
+# ===== Tone (/tone, /voice) =====
+@router.message(Command("tone"))
+@router.message(Command("voice"))
+async def on_cmd_tone(m: Message):
+    cur = _get_user_voice(str(m.from_user.id))
+    await m.answer(f"Выбери стиль голоса. Текущий: <b>{cur}</b>.", reply_markup=kb_tone())
+
+@router.callback_query(F.data.startswith("tone:set:"))
+async def on_tone_set(cb: CallbackQuery):
+    await _silent_ack(cb)
+    new_style = cb.data.split(":", 2)[2] if ":" in cb.data else "default"
+    if new_style not in VOICE_STYLES:
+        await cb.message.answer("Неизвестный стиль. Давай ещё раз: /tone")
+        return
+    _set_user_voice(str(cb.from_user.id), new_style)
+    await cb.message.answer(f"Стиль обновлён: <b>{new_style}</b> ✅")
+
+# ===== Раздел «Разобраться» =====
 @router.message(F.text == f"{EMO_HERB} Разобраться")
 async def on_work_section(m: Message):
     img = ONB_IMAGES.get("work") or ""
@@ -423,17 +487,6 @@ async def on_work_section(m: Message):
 async def on_topics_back(cb: CallbackQuery):
     await _silent_ack(cb)
     await _safe_edit_text(cb.message, "Выбирай тему:", kb_topics())
-
-
-async def _start_reflection_chat(message: Message):
-    chat_id = message.chat.id
-    CHAT_MODE[chat_id] = "reflection"
-    txt = (
-        "Окей, давай в свободном формате поразбираемся. "
-        "Я буду отвечать в рефлексивном ключе: помогать замечать мысли, чувства и потребности, "
-        "и мягко наводить на шаги поддержки. Чтобы выйти из режима рефлексии — напиши «Стоп» или нажми Меню."
-    )
-    await message.answer(txt)
 
 @router.callback_query(F.data.startswith("topic:"))
 async def on_topic_pick(cb: CallbackQuery):
@@ -453,10 +506,7 @@ async def on_topic_pick(cb: CallbackQuery):
     if cb.message.photo:
         await _safe_edit_caption(cb.message, text, kb_exercises(tid))
     else:
-        try:
-            await _safe_edit_text(cb.message, text, kb_exercises(tid))
-        except Exception:
-            await cb.message.answer(text, reply_markup=kb_exercises(tid))
+        await _safe_edit_text(cb.message, text, kb_exercises(tid))
 
 # ===== Упражнения =====
 EX_STATE: Dict[int, Dict[str, Any]] = defaultdict(dict)
@@ -466,7 +516,6 @@ def _find_exercise(tid: str, eid: str) -> Tuple[Optional[Dict[str, Any]], List[s
     for ex in (t.get("exercises") or []):
         if ex.get("id") == eid:
             steps = ex.get("steps") or []
-            # "без шагов": если steps пусто, но есть 'text'/'content' — делаем одиночный шаг
             if not steps:
                 text = ex.get("text") or ex.get("content") or ""
                 if text:
@@ -478,7 +527,6 @@ def _find_exercise(tid: str, eid: str) -> Tuple[Optional[Dict[str, Any]], List[s
 async def on_ex_click(cb: CallbackQuery):
     await _silent_ack(cb)
     parts = cb.data.split(":")
-    # ex:<tid>:<eid>:start | ex:<tid>:<eid>:step:<idx> | ex:<tid>:<eid>:finish
     if len(parts) < 4:
         await cb.message.answer("Не понял команду упражнения.")
         return
@@ -519,43 +567,8 @@ async def on_ex_click(cb: CallbackQuery):
         EX_STATE.pop(cb.message.chat.id, None)
         await cb.message.answer("Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
         return
-# ===== Медитации =====
 
-@router.message(F.text == "⚙️ Настройки")
-async def on_settings(m: Message):
-    txt = (
-        "Настройки:\n"
-        "• Выбрать тон ответа — кнопка ниже.\n"
-        "• Политика/правила — открою ссылку.\n"
-        "Позже добавим больше параметров."
-    )
-    await m.answer(txt, reply_markup=kb_settings())
-
-@router.callback_query(F.data == "settings:tone")
-async def on_settings_tone(cb: CallbackQuery):
-    await _silent_ack(cb)
-    cur = _get_user_voice(str(cb.from_user.id))
-    await cb.message.answer(f"Текущий тон: <b>{cur}</b>. Выбери ниже:", reply_markup=kb_tone())
-
-@router.callback_query(F.data == "settings:privacy")
-async def on_settings_privacy(cb: CallbackQuery):
-    await _silent_ack(cb)
-    # Используем ранее добавленный LEGAL_CRAFT_LINK, если есть; иначе просто напомним про /tone
-    link = globals().get("LEGAL_CRAFT_LINK") or "https://s.craft.me/APV7T8gRf3w2Ay"
-    await cb.message.answer(f"Политика и правила: {link}")
-@router.message(F.text == "🎧 Медитации")
-async def on_meditations(m: Message):
-    img = ONB_IMAGES.get("meditations") or ""
-    caption = "Скоро добавим подборку коротких аудио-практик. Пока можешь зайти в «Разобраться» или «Поговорить»."
-    if img:
-        try:
-            await m.answer_photo(img, caption=caption)
-            return
-        except Exception:
-            pass
-    await m.answer(caption)
-
-# ===== Поговорить (вход) =====
+# ===== Talk entrances =====
 @router.message(F.text == "💬 Поговорить")
 async def on_talk_enter(m: Message):
     img = ONB_IMAGES.get("talk") or ""
@@ -568,13 +581,26 @@ async def on_talk_enter(m: Message):
             pass
     await m.answer(caption)
 
-# ===== Поговорить (LLM) =====
+@router.message(Command("talk"))
+async def on_talk_cmd(m: Message):
+    await on_talk_enter(m)
+
+# ===== Reflection stop by text =====
+@router.message(F.text.regexp(r'(?i)^(стоп|stop)$'))
+async def on_stop_word(m: Message):
+    chat_id = m.chat.id
+    if CHAT_MODE.get(chat_id) == "reflection":
+        CHAT_MODE[chat_id] = "talk"
+        await m.answer("Окей, выходим из режима рефлексии. Можем продолжить обычный разговор 💬")
+
+# ===== LLM chat =====
 @router.message(F.text)
 async def on_text(m: Message):
     chat_id = m.chat.id
     tg_id = str(m.from_user.id)
     user_text = (m.text or "").strip()
-# Soft RAG (пытаемся с lang, если сигнатура без него — повторяем без lang)
+
+    # RAG (мягко, без падений)
     rag_ctx = ""
     if rag_search_fn:
         try:
@@ -587,20 +613,14 @@ async def on_text(m: Message):
         except Exception:
             rag_ctx = ""
 
-    # Style
+    # Style overlay
     style_key = _get_user_voice(tg_id)
-    style_hint = VOICE_STYLES.get(style_key, VOICE_STYLES["default"])
-
-    # System prompt + (optional) reflective suffix + RAG-context
     sys_prompt = SYSTEM_PROMPT
     overlay = _style_overlay(style_key)
     if overlay:
-        sys_prompt = sys_prompt + "
-
-" + overlay
-
+        sys_prompt = sys_prompt + "\n\n" + overlay
     if CHAT_MODE.get(chat_id) == "reflection":
-        sys_prompt += REFLECTIVE_SUFFIX
+        sys_prompt = sys_prompt + REFLECTIVE_SUFFIX
     if rag_ctx:
         sys_prompt = (
             sys_prompt
@@ -608,13 +628,13 @@ async def on_text(m: Message):
             + rag_ctx
         ).strip()
 
-    # History
+    # История
     history = list(DIALOG_HISTORY[chat_id])
     messages = [{"role": "system", "content": sys_prompt}] + history + [{"role": "user", "content": user_text}]
 
     # LLM
     try:
-        answer = await chat_with_style(messages=messages, style_hint=style_hint, temperature=0.6)
+        answer = await chat_with_style(messages=messages, style_hint=overlay or VOICE_STYLES.get(style_key, ""), temperature=0.6)
     except Exception:
         answer = "Похоже, модель сейчас недоступна. Я рядом 🌿 Попробуешь ещё раз?"
 
@@ -622,14 +642,17 @@ async def on_text(m: Message):
     _push(chat_id, "assistant", answer)
     await m.answer(answer)
 
-# ===== Service commands =====
+# ===== Debug =====
+@router.message(Command("debug_prompt"))
+async def on_debug_prompt(m: Message):
+    preview = SYSTEM_PROMPT[:200] + ("…" if len(SYSTEM_PROMPT) > 200 else "")
+    await m.answer(
+        f"Источник промпта: <code>{PROMPT_SOURCE}</code>\n"
+        f"Длина: {len(SYSTEM_PROMPT)}\n\n"
+        f"<code>{preview}</code>"
+    )
 
-@router.message(F.text.regexp(r'(?i)^(стоп|stop)$'))
-async def on_stop_word(m: Message):
-    chat_id = m.chat.id
-    if CHAT_MODE.get(chat_id) == "reflection":
-        CHAT_MODE[chat_id] = "talk"
-        await m.answer("Окей, выходим из режима рефлексии. Можем продолжить обычный разговор 💬")
+# ===== Service =====
 @router.message(Command("ping"))
 async def on_ping(m: Message):
     await m.answer("pong ✅")
