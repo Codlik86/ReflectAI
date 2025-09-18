@@ -395,6 +395,17 @@ async def on_topics_back(cb: CallbackQuery):
     await _silent_ack(cb)
     await _safe_edit_text(cb.message, "Выбирай тему:", kb_topics())
 
+
+async def _start_reflection_chat(message: Message):
+    chat_id = message.chat.id
+    CHAT_MODE[chat_id] = "reflection"
+    txt = (
+        "Окей, давай в свободном формате поразбираемся. "
+        "Я буду отвечать в рефлексивном ключе: помогать замечать мысли, чувства и потребности, "
+        "и мягко наводить на шаги поддержки. Чтобы выйти из режима рефлексии — напиши «Стоп» или нажми Меню."
+    )
+    await message.answer(txt)
+
 @router.callback_query(F.data.startswith("topic:"))
 async def on_topic_pick(cb: CallbackQuery):
     await _silent_ack(cb)
@@ -405,7 +416,7 @@ async def on_topic_pick(cb: CallbackQuery):
         return
 
     if t.get("type") == "chat" or tid == "reflection":
-        await reflect_start(cb)
+        await _start_reflection_chat(cb.message)
         return
 
     intro = (t.get("intro") or "").strip()
