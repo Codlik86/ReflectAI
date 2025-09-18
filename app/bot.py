@@ -64,6 +64,20 @@ ONB_IMAGES = {
     "meditations": os.getenv("ONB_IMG_MEDIT", "")
 }
 
+# Фоллбэки на случай пустых env (замени на свои ссылки/ID)
+DEFAULT_ONB_IMAGES = {
+    "cover": "https://file.garden/aML3M6Sqrg21TaIT/kind-creature-min.jpg",
+    "talk": "https://file.garden/aML3M6Sqrg21TaIT/_practices-min.jpg",
+    "work": "https://example.com/reflectai/work.jpg",
+    "meditations": "https://file.garden/aML3M6Sqrg21TaIT/meditation%20(1)-min.jpg",
+}
+
+def get_onb_image(key: str) -> str:
+    val = (ONB_IMAGES.get(key) or "").strip()
+    if val:
+        return val
+    return DEFAULT_ONB_IMAGES.get(key, "")
+
 # тихие ссылки
 POLICY_URL = os.getenv("POLICY_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
 TERMS_URL  = os.getenv("TERMS_URL",  "https://s.craft.me/APV7T8gRf3w2Ay")
@@ -326,7 +340,7 @@ def get_home_text() -> str:
 @router.message(Command("start"))
 async def on_start(m: Message):
     CHAT_MODE[m.chat.id] = "talk"
-    img = ONB_IMAGES.get("cover") or ""
+    img = get_onb_image("cover")
     caption = onb_text_1()
     if img:
         try:
@@ -352,7 +366,7 @@ async def on_onb_agree(cb: CallbackQuery):
 @router.callback_query(F.data == "menu:work")
 async def on_menu_work(cb: CallbackQuery):
     await _silent_ack(cb)
-    img = ONB_IMAGES.get("work") or ""
+    img = get_onb_image("work")
     if img:
         try:
             await cb.message.edit_media()  # не трогаем медиа, просто отправим новое
@@ -369,7 +383,7 @@ async def on_menu_work(cb: CallbackQuery):
 async def on_menu_talk(cb: CallbackQuery):
     await _silent_ack(cb)
     CHAT_MODE[cb.message.chat.id] = "talk"
-    img = ONB_IMAGES.get("talk") or ""
+    img = get_onb_image("talk")
     caption = "Я рядом и слушаю. О чём хочется поговорить?"
     if img:
         try:
@@ -382,7 +396,7 @@ async def on_menu_talk(cb: CallbackQuery):
 @router.callback_query(F.data == "menu:meditations")
 async def on_menu_meditations(cb: CallbackQuery):
     await _silent_ack(cb)
-    img = ONB_IMAGES.get("meditations") or ""
+    img = get_onb_image("meditations")
     caption = "🎧 Медитации — скоро добавим аудио-подборки. Пока можно попробовать дыхательные практики в упражнениях."
     if img:
         try:
@@ -419,7 +433,7 @@ async def on_menu_text(m: Message):
 # ====== Раздел «Разобраться» ======
 @router.message(F.text == f"{EMO_HERB} Разобраться")
 async def on_work_section(m: Message):
-    img = ONB_IMAGES.get("work") or ""
+    img = get_onb_image("work")
     if img:
         try:
             await m.answer_photo(img, caption="Выбирай тему:", reply_markup=kb_topics())
@@ -553,7 +567,7 @@ def _push(chat_id: int, role: str, content: str):
 @router.message(F.text == "💬 Поговорить")
 async def on_talk_button(m: Message):
     CHAT_MODE[m.chat.id] = "talk"
-    img = ONB_IMAGES.get("talk") or ""
+    img = get_onb_image("talk")
     caption = "Я рядом и слушаю. О чём хочется поговорить?"
     if img:
         try:
