@@ -87,19 +87,14 @@ except Exception:
 router = Router()
 
 # Debug: печать источника промпта
+import os
 if os.getenv("BOT_DEBUG") == "1":
     try:
-        print(f"[PROMPT] loaded from: {PROMPT_SOURCE}; length={len(SYSTEM_PROMPT)}")
+        _prv = sys_prompt[:160] + ("…" if len(sys_prompt) > 160 else "")
+        print("[CHAT] sys_prompt:", _prv)
+        print("[CHAT] style:", style_key, "mode:", CHAT_MODE.get(chat_id))
     except Exception:
         pass
-
-# ===== Config/Const =====
-EMO_HERB = "🌿"
-
-ONB_IMAGES = {
-    "cover1": os.getenv("ONB_IMG_COVER", ""),
-    "cover2": os.getenv("ONB_IMG_COVER2", ""),
-    "talk": os.getenv("ONB_IMG_TALK", ""),
     "work": os.getenv("ONB_IMG_WORK", ""),
     "meditations": os.getenv("ONB_IMG_MEDIT", ""),
 }
