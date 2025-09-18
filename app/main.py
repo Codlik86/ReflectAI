@@ -6,11 +6,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import Update
 
-# Import router
-try:
-    from app.bot import router as bot_router
-except Exception:
-    from bot import router as bot_router
+# Важно: относительный импорт внутри пакета app
+from .bot import router as bot_router
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
