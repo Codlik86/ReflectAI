@@ -1,27 +1,47 @@
-
+# >>>>> START OF FILE app/bot.py
+# (весь файл ниже)
 import os
 import asyncio
 import sqlite3
 from contextlib import contextmanager
 from collections import defaultdict, deque
-from typing import Dict, Deque, Tuple, Optional
+from typing import Dict, Deque, Optional
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton
+)
 from aiogram.filters import Command
 
-# --- Local adapters ---
+# --- Import system prompt and topics from your existing files ---
+try:
+    from app.prompts import SYSTEM_PROMPT  # preferred path
+except Exception:
+    try:
+        from prompts import SYSTEM_PROMPT   # fallback if running flat
+    except Exception:
+        SYSTEM_PROMPT = (
+            "Ты — бережный русскоязычный психологический ассистент ReflectAI. "
+            "Не даёшь диагнозов и не заменяешь врача. При рисках мягко советуешь обратиться к специалисту."
+        )
+
+try:
+    from app.exercises import TOPICS  # preferred path
+except Exception:
+    from exercises import TOPICS      # fallback if running flat
+
+# --- Local adapters (LLM) ---
 try:
     from app.llm_adapter import chat_with_style
 except Exception:
-    # Fallback to local import path when running as a single file
     from llm_adapter import chat_with_style
 
 # --- Optional RAG (defensive import) ---
 rag_available = False
 rag_search_fn = None
 try:
-    # Expecting module app.rag_qdrant with async def search(text, k, max_chars) -> str
     from app import rag_qdrant
     rag_available = True
     rag_search_fn = rag_qdrant.search
@@ -39,7 +59,7 @@ router = Router()
 # --- Constants / Config ---
 EMO_HERB = "🌿"
 
-# Images (can be empty strings; bot will fallback to text)
+# Images via ENV (optional)
 ONB_IMAGES = {
     "cover": os.getenv("ONB_IMG_COVER", ""),
     "talk": os.getenv("ONB_IMG_TALK", ""),
@@ -54,11 +74,6 @@ VOICE_STYLES = {
     "dark":    "Стиль ответа: взрослая ирония 18+. Иронично, но бережно; никакой токсичности.",
 }
 
-SYSTEM_PROMPT = (
-    "Ты — бережный русскоязычный психологический ассистент ReflectAI. "
-    "Не даёшь диагнозов и не заменяешь врача. При рисках мягко советуешь обратиться к специалисту или горячим линиям. "
-    "Отвечай кратко и по делу, но тепло."
-)
 REFLECTIVE_SUFFIX = (
     "\n\nРежим рефлексии: задавай короткие наводящие вопросы по одному, помогай структурировать мысли."
 )
@@ -90,7 +105,6 @@ def _ensure_tables():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         """)
-        # soft migration (ignore if exists)
         try:
             s.execute("ALTER TABLE user_prefs ADD COLUMN voice_style TEXT DEFAULT 'default';")
         except Exception:
@@ -140,16 +154,51 @@ def kb_goals() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✅ Готово", callback_data="goal_done")],
     ])
 
+def _topic_title(tid: str) -> str:
+    t = TOPICS.get(tid, {})
+    title = t.get("title", tid)
+    emoji = t.get("emoji") or EMO_HERB
+    return f"{emoji} {title}"
+
 def kb_topics() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧩 Когнитивная переоценка", callback_data="topic:reframe")],
-        [InlineKeyboardButton(text="📝 Рефлексия (короткая)", callback_data="reflect:start")],
-    ])
+    rows = []
+    # show reflection first if present
+    ordered_ids = list(TOPICS.keys())
+    if "reflection" in ordered_ids:
+        ordered_ids.remove("reflection")
+        ordered = ["reflection"] + ordered_ids
+    else:
+        ordered = ordered_ids
+    for tid in ordered:
+        rows.append([InlineKeyboardButton(text=_topic_title(tid), callback_data=f"topic:{tid}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_exercises(tid: str) -> InlineKeyboardMarkup:
+    t = TOPICS.get(tid, {})
+    exs = t.get("exercises", []) or []
+    rows = []
+    for ex in exs:
+        eid = ex["id"]
+        rows.append([InlineKeyboardButton(text=f"• {ex['title']}", callback_data=f"ex:{tid}:{eid}:start")])
+    # back
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к темам", callback_data="topics:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def stop_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏹️ Стоп", callback_data="reflect:stop")]
     ])
+
+def step_keyboard(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMarkup:
+    if idx + 1 < total:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="▶️ Далее", callback_data=f"ex:{tid}:{eid}:step:{idx+1}")],
+            [InlineKeyboardButton(text="🏁 Завершить", callback_data=f"ex:{tid}:{eid}:finish")],
+        ])
+    else:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏁 Завершить", callback_data=f"ex:{tid}:{eid}:finish")],
+        ])
 
 # --- Utils ---
 
@@ -166,7 +215,7 @@ def get_home_text() -> str:
     return (
         f"{EMO_HERB} Готово! Вот что дальше:\n\n"
         "• «💬 Поговорить» — просто расскажи, что на душе.\n"
-        "• «🌿 Разобраться» — выбери тему и пройди шаги.\n"
+        "• «🌿 Разобраться» — выбери тему и пройди упражнения.\n"
         "• «🎧 Медитации» — расслабиться и выдохнуть.\n"
         "\nМожешь ввести /voice чтобы выбрать стиль ответа."
     )
@@ -189,8 +238,8 @@ async def on_start(m: Message):
 @router.callback_query(F.data.startswith("goal:"))
 async def onb_goal_pick(cb: CallbackQuery):
     await silent_ack(cb)
-    # Здесь можно сохранять выбранные цели в user_prefs.goals (опционально)
-    await cb.message.edit_reply_markup(reply_markup=kb_goals())  # просто перерисуем для наглядности
+    # здесь можно сохранять выбранные цели
+    await cb.message.edit_reply_markup(reply_markup=kb_goals())
 
 @router.callback_query(F.data == "goal_done")
 async def onb_goal_done(cb: CallbackQuery):
@@ -203,6 +252,8 @@ async def onb_goal_done(cb: CallbackQuery):
             await cb.message.answer(get_home_text(), reply_markup=kb_main())
     except Exception:
         await cb.message.answer(get_home_text(), reply_markup=kb_main())
+
+# --- Voice selection ---
 
 @router.message(Command("voice"))
 async def on_cmd_voice(m: Message):
@@ -220,7 +271,110 @@ async def on_voice_set(cb: CallbackQuery):
     _set_user_voice(str(cb.from_user.id), style)
     await cb.message.answer(f"Стиль обновлён: <b>{style}</b> ✅")
 
-# Reflection mini-flow (very short 4 steps)
+# --- Раздел «Разобраться»: темы и степперы ---
+
+@router.message(F.text == f"{EMO_HERB} Разобраться")
+async def on_work_section(m: Message):
+    # image + caption
+    try:
+        if ONB_IMAGES["work"]:
+            await m.answer_photo(ONB_IMAGES["work"], caption="Выбирай тему:", reply_markup=kb_topics())
+        else:
+            await m.answer("Выбирай тему:", reply_markup=kb_topics())
+    except Exception:
+        await m.answer("Выбирай тему:", reply_markup=kb_topics())
+
+@router.callback_query(F.data == "topics:back")
+async def on_topics_back(cb: CallbackQuery):
+    await silent_ack(cb)
+    await cb.message.edit_text("Выбирай тему:", reply_markup=kb_topics())
+
+@router.callback_query(F.data.startswith("topic:"))
+async def on_topic_pick(cb: CallbackQuery):
+    await silent_ack(cb)
+    tid = cb.data.split(":", 1)[1]
+    t = TOPICS.get(tid)
+    if not t:
+        await cb.message.answer("Не нашёл тему. Вернёмся к списку:", reply_markup=kb_topics())
+        return
+
+    # chat-type topics (e.g., 'reflection') — route to flow
+    if t.get("type") == "chat":
+        if tid == "reflection":
+            # Start reflection flow
+            await reflect_start(cb)
+            return
+        else:
+            await cb.message.answer("Эта тема открывается как чат. Напиши, с чего начнём.")
+            return
+
+    intro = t.get("intro") or _topic_title(tid)
+    text = f"<b>{_topic_title(tid)}</b>\n\n{intro}"
+    try:
+        await cb.message.edit_text(text, reply_markup=kb_exercises(tid))
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb_exercises(tid))
+
+# Exercise stepper state (in-memory)
+EX_STATE: Dict[int, Dict[str, object]] = defaultdict(dict)
+
+def _ex_steps(tid: str, eid: str):
+    t = TOPICS.get(tid, {})
+    for ex in t.get("exercises", []) or []:
+        if ex["id"] == eid:
+            return ex, ex.get("steps", []) or []
+    return None, []
+
+@router.callback_query(F.data.startswith("ex:"))
+async def on_ex_click(cb: CallbackQuery):
+    await silent_ack(cb)
+    parts = cb.data.split(":")
+    # formats:
+    # ex:<tid>:<eid>:start
+    # ex:<tid>:<eid>:step:<idx>
+    # ex:<tid>:<eid>:finish
+    if len(parts) < 4:
+        await cb.message.answer("Не понял команду упражнения.")
+        return
+    _, tid, eid, action, *rest = parts
+
+    ex, steps = _ex_steps(tid, eid)
+    if not ex:
+        await cb.message.answer("Не нашёл упражнение. Вернёмся к теме.", reply_markup=kb_exercises(tid))
+        return
+
+    if action == "start":
+        EX_STATE[cb.message.chat.id] = {"tid": tid, "eid": eid, "idx": 0}
+        intro = ex.get("intro") or ""
+        head = f"<b>{_topic_title(tid)}</b>\n— {ex['title']}\n\n{intro}"
+        await cb.message.answer(head)
+        # first step
+        step_text = steps[0] if steps else "Шагов нет."
+        await cb.message.answer(step_text, reply_markup=step_keyboard(tid, eid, 0, len(steps)))
+        return
+
+    if action == "step":
+        if not rest:
+            await cb.message.answer("Нужен номер шага.")
+            return
+        try:
+            idx = int(rest[0])
+        except Exception:
+            idx = 0
+        if idx < 0 or idx >= len(steps):
+            await cb.message.answer("Это все шаги. Завершаем?", reply_markup=step_keyboard(tid, eid, len(steps)-1, len(steps)))
+            return
+        EX_STATE[cb.message.chat.id] = {"tid": tid, "eid": eid, "idx": idx}
+        step_text = steps[idx]
+        await cb.message.answer(step_text, reply_markup=step_keyboard(tid, eid, idx, len(steps)))
+        return
+
+    if action == "finish":
+        EX_STATE.pop(cb.message.chat.id, None)
+        await cb.message.answer("Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
+        return
+
+# --- Reflection mini-flow (short 4 steps) ---
 
 REFRAMING_STEPS = [
     ("situation", "Опиши ситуацию в двух-трёх предложениях."),
@@ -249,13 +403,23 @@ async def reflect_stop(cb: CallbackQuery):
 
 # --- TALK: main text handler ---
 
+@router.message(F.text == "💬 Поговорить")
+async def on_talk_enter(m: Message):
+    try:
+        if ONB_IMAGES["talk"]:
+            await m.answer_photo(ONB_IMAGES["talk"], caption="Я здесь, чтобы выслушать. О чём хочется поговорить?")
+        else:
+            await m.answer("Я здесь, чтобы выслушать. О чём хочется поговорить?")
+    except Exception:
+        await m.answer("Я здесь, чтобы выслушать. О чём хочется поговорить?")
+
 @router.message(F.text)
 async def on_text(m: Message):
     chat_id = m.chat.id
     tg_id = str(m.from_user.id)
     user_text = (m.text or "").strip()
 
-    # Reflection steps handler
+    # Reflection steps
     if CHAT_MODE.get(chat_id) == "reflection":
         state = _reframe_state.setdefault(tg_id, {"step_idx": 0, "answers": {}})
         step_idx: int = int(state.get("step_idx", 0))
@@ -266,7 +430,6 @@ async def on_text(m: Message):
         step_idx += 1
 
         if step_idx >= len(REFRAMING_STEPS):
-            # Finish and summarize
             CHAT_MODE[chat_id] = "talk"
             _reframe_state.pop(tg_id, None)
             summary = (
@@ -296,8 +459,10 @@ async def on_text(m: Message):
     style_key = _get_user_voice(tg_id)
     style_hint = VOICE_STYLES.get(style_key, VOICE_STYLES["default"])
 
-    # System with RAG
+    # System with (optional) reflective suffix and RAG
     sys_prompt = SYSTEM_PROMPT
+    if CHAT_MODE.get(chat_id) == "reflection":
+        sys_prompt += REFLECTIVE_SUFFIX
     if rag_ctx:
         sys_prompt = (
             sys_prompt
@@ -319,3 +484,4 @@ async def on_text(m: Message):
     _push(chat_id, "assistant", answer)
     await m.answer(answer)
     return
+# <<<<< END OF FILE app/bot.py
