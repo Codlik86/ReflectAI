@@ -63,6 +63,7 @@ ONB_IMAGES = {
 
 POLICY_URL = os.getenv("POLICY_URL", "#")
 TERMS_URL = os.getenv("TERMS_URL", "#")
+LEGAL_CRAFT_LINK = os.getenv("LEGAL_CRAFT_LINK", "https://s.craft.me/APV7T8gRf3w2Ay")
 
 VOICE_STYLES = {
     "default": "Стиль ответа: нейтральный, бережный. Коротко, по делу, без диагнозов и категоричных советов.",
@@ -174,14 +175,17 @@ def _valid_url(u: str) -> bool:
 
 def kb_onb_step2() -> InlineKeyboardMarkup:
     buttons = []
-    # показываем ссылки только если заданы валидные URL
     row = []
+    # Если ссылки валидны — даём url-кнопки; иначе callback с текстовой заглушкой
     if _valid_url(POLICY_URL):
         row.append(InlineKeyboardButton(text="Политика", url=POLICY_URL))
+    else:
+        row.append(InlineKeyboardButton(text="Политика", callback_data="onb:policy"))
     if _valid_url(TERMS_URL):
         row.append(InlineKeyboardButton(text="Правила", url=TERMS_URL))
-    if row:
-        buttons.append(row)
+    else:
+        row.append(InlineKeyboardButton(text="Правила", callback_data="onb:terms"))
+    buttons.append(row)
     buttons.append([InlineKeyboardButton(text="Привет, хорошо ✅", callback_data="onb:agree")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -332,6 +336,26 @@ async def on_onb_start(cb: CallbackQuery):
             await cb.message.answer(caption, reply_markup=kb_onb_step2())
     else:
         await _safe_edit_text(cb.message, caption, kb_onb_step2())
+
+@router.callback_query(F.data == "onb:policy")
+async def on_onb_policy(cb: CallbackQuery):
+    await _silent_ack(cb)
+    txt = (
+        "Политика конфиденциальности и условия использования доступны по ссылке:\n"
+        f"{LEGAL_CRAFT_LINK}\n\n"
+        "Нажимая «Привет, хорошо ✅», ты подтверждаешь ознакомление."
+    )
+    await cb.message.answer(txt)
+
+@router.callback_query(F.data == "onb:terms")
+async def on_onb_terms(cb: CallbackQuery):
+    await _silent_ack(cb)
+    txt = (
+        "Правила сервиса и условия использования доступны по ссылке:\n"
+        f"{LEGAL_CRAFT_LINK}\n\n"
+        "Нажимая «Привет, хорошо ✅», ты подтверждаешь ознакомление."
+    )
+    await cb.message.answer(txt)
 
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
