@@ -1,7 +1,10 @@
-# app/bot.py
+cd /path/to/your/project
+mkdir -p app
+
+cat > app/bot.py <<'PYCODE'
 import os
 import sqlite3
-from contextmanager import contextmanager
+from contextlib import contextmanager
 from collections import defaultdict, deque
 from typing import Dict, Deque, Optional, Tuple, List, Any
 
@@ -15,7 +18,6 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 
 # ===== Imports from project modules (prompts/exercises/llm/rag) =====
-# SYSTEM_PROMPT — из твоего файла prompts.py (важно: твой тщательно проработанный текст)
 try:
     from app.prompts import SYSTEM_PROMPT
 except Exception:
@@ -27,19 +29,16 @@ except Exception:
             "Не даёшь диагнозов и не заменяешь врача. При рисках мягко советуешь обратиться к специалисту."
         )
 
-# Список тем/упражнений — из твоего exercises.py
 try:
     from app.exercises import TOPICS
 except Exception:
     from exercises import TOPICS
 
-# Адаптер LLM с подмешиванием стиля
 try:
     from app.llm_adapter import chat_with_style
 except Exception:
     from llm_adapter import chat_with_style
 
-# Опциональный RAG (если есть модуль search(...) — подмешаем контекст)
 rag_search_fn = None
 try:
     from app import rag_qdrant
@@ -51,16 +50,13 @@ except Exception:
     except Exception:
         rag_search_fn = None
 
-# ===== Router =====
 router = Router()
 
-# ===== Constants / Config =====
 EMO_HERB = "🌿"
 
-# Изображения из окружения (можно задавать в Render)
 ONB_IMAGES = {
-    "cover1": os.getenv("ONB_IMG_COVER", ""),     # экран 1
-    "cover2": os.getenv("ONB_IMG_COVER2", ""),    # экран 2 (если не задан — используем cover1)
+    "cover1": os.getenv("ONB_IMG_COVER", ""),
+    "cover2": os.getenv("ONB_IMG_COVER2", ""),
     "talk": os.getenv("ONB_IMG_TALK", ""),
     "work": os.getenv("ONB_IMG_WORK", ""),
     "meditations": os.getenv("ONB_IMG_MEDIT", ""),
@@ -69,7 +65,6 @@ ONB_IMAGES = {
 POLICY_URL = os.getenv("POLICY_URL", "#")
 TERMS_URL = os.getenv("TERMS_URL", "#")
 
-# Стили тона
 VOICE_STYLES = {
     "default": "Стиль ответа: нейтральный, бережный. Коротко, по делу, без диагнозов и категоричных советов.",
     "friend":  "Стиль ответа: тёплый друг. Проще слова, много поддержки, мягкие вопросы. Никакой назидательности.",
@@ -81,14 +76,12 @@ REFLECTIVE_SUFFIX = (
     "\n\nРежим рефлексии: задавай короткие вопросы по одному, помогай структурировать мысли, поддерживай темп."
 )
 
-# ===== Simple Dialogue Memory (per-chat short history) =====
 DIALOG_HISTORY: Dict[int, Deque[Dict[str, str]]] = defaultdict(lambda: deque(maxlen=14))
-CHAT_MODE: Dict[int, str] = defaultdict(lambda: "talk")   # 'talk' | 'reflection'
+CHAT_MODE: Dict[int, str] = defaultdict(lambda: "talk")
 
 def _push(chat_id: int, role: str, content: str):
     DIALOG_HISTORY[chat_id].append({"role": role, "content": content})
 
-# ===== Persistent user prefs (SQLite) =====
 DB_PATH = os.getenv("BOT_DB_PATH", "bot.db")
 
 @contextmanager
@@ -111,19 +104,15 @@ def _ensure_tables():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         """)
-        # мягкие миграции
-        try:
-            s.execute("ALTER TABLE user_prefs ADD COLUMN voice_style TEXT DEFAULT 'default';")
-        except Exception:
-            pass
-        try:
-            s.execute("ALTER TABLE user_prefs ADD COLUMN consent_save_all INTEGER DEFAULT 0;")
-        except Exception:
-            pass
-        try:
-            s.execute("ALTER TABLE user_prefs ADD COLUMN goals TEXT DEFAULT '';")
-        except Exception:
-            pass
+        for col, ddl in [
+            ("voice_style", "ALTER TABLE user_prefs ADD COLUMN voice_style TEXT DEFAULT 'default';"),
+            ("consent_save_all", "ALTER TABLE user_prefs ADD COLUMN consent_save_all INTEGER DEFAULT 0;"),
+            ("goals", "ALTER TABLE user_prefs ADD COLUMN goals TEXT DEFAULT '';"),
+        ]:
+            try:
+                s.execute(ddl)
+            except Exception:
+                pass
         s.commit()
 
 def _set_consent(tg_id: str, value: int = 1):
@@ -162,8 +151,6 @@ def _append_goal(tg_id: str, goal_key: str):
             ON CONFLICT(tg_id) DO UPDATE SET goals=?, updated_at=CURRENT_TIMESTAMP
         """, (tg_id, ",".join([g for g in goals if g])))
         s.commit()
-
-# ===== Keyboards =====
 
 def kb_main() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -241,8 +228,6 @@ def step_keyboard(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMar
 def stop_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏹️ Стоп", callback_data="reflect:stop")]])
 
-# ===== Helpers =====
-
 async def _safe_edit_text(msg: Message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
     try:
         await msg.edit_text(text, reply_markup=reply_markup)
@@ -270,8 +255,6 @@ async def _silent_ack(cb: CallbackQuery):
         await cb.answer()
     except Exception:
         pass
-
-# ===== Onboarding texts =====
 
 def onb_text_1() -> str:
     return (
@@ -304,9 +287,6 @@ def get_home_text() -> str:
         "\nМожешь ввести /tone чтобы выбрать стиль ответа."
     )
 
-# ===== Handlers =====
-
-# /start: показываем Экран 1 (обложка + кнопка Старт)
 @router.message(Command("start"))
 async def on_start(m: Message):
     img = ONB_IMAGES.get("cover1") or ""
@@ -318,7 +298,6 @@ async def on_start(m: Message):
             pass
     await m.answer(onb_text_1(), reply_markup=kb_onb_step1())
 
-# Экран 2: картинка + ссылки на правила + кнопка «Привет, хорошо ✅»
 @router.callback_query(F.data == "onb:start")
 async def on_onb_start(cb: CallbackQuery):
     await _silent_ack(cb)
@@ -335,7 +314,6 @@ async def on_onb_start(cb: CallbackQuery):
     else:
         await _safe_edit_text(cb.message, caption, kb_onb_step2())
 
-# Экран 3 (финальный): текст + показать основное меню
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
     await _silent_ack(cb)
@@ -345,12 +323,10 @@ async def on_onb_agree(cb: CallbackQuery):
     except Exception:
         await cb.message.answer(get_home_text(), reply_markup=kb_main())
 
-# Быстрый экран «Что дальше?» (если понадобится повторно)
 @router.message(F.text.in_({"Меню", "меню"}))
 async def on_menu_text(m: Message):
     await m.answer(get_home_text(), reply_markup=kb_main())
 
-# Переход в «Разобраться»
 @router.message(F.text == f"{EMO_HERB} Разобраться")
 async def on_work_section(m: Message):
     img = ONB_IMAGES.get("work") or ""
@@ -367,7 +343,6 @@ async def on_topics_back(cb: CallbackQuery):
     await _silent_ack(cb)
     await _safe_edit_text(cb.message, "Выбирай тему:", kb_topics())
 
-# Выбор темы
 @router.callback_query(F.data.startswith("topic:"))
 async def on_topic_pick(cb: CallbackQuery):
     await _silent_ack(cb)
@@ -376,12 +351,9 @@ async def on_topic_pick(cb: CallbackQuery):
     if not t:
         await cb.message.answer("Не нашёл тему. Вернёмся к списку:", reply_markup=kb_topics())
         return
-
-    # Чатовые темы (например, 'reflection')
     if t.get("type") == "chat" or tid == "reflection":
         await reflect_start(cb)
         return
-
     intro = (t.get("intro") or "").strip()
     text = f"<b>{_topic_title(tid)}</b>\n\n{intro}" if intro else f"<b>{_topic_title(tid)}</b>"
     if cb.message.photo:
@@ -392,7 +364,6 @@ async def on_topic_pick(cb: CallbackQuery):
         except Exception:
             await cb.message.answer(text, reply_markup=kb_exercises(tid))
 
-# ====== Exercises stepper ======
 EX_STATE: Dict[int, Dict[str, Any]] = defaultdict(dict)
 
 def _find_exercise(tid: str, eid: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
@@ -400,7 +371,6 @@ def _find_exercise(tid: str, eid: str) -> Tuple[Optional[Dict[str, Any]], List[s
     for ex in (t.get("exercises") or []):
         if ex.get("id") == eid:
             steps = ex.get("steps") or []
-            # Поддержка "без шагов": если steps пусто, но есть 'text' — делаем одиночный шаг
             if not steps:
                 text = ex.get("text") or ex.get("content") or ""
                 if text:
@@ -412,19 +382,14 @@ def _find_exercise(tid: str, eid: str) -> Tuple[Optional[Dict[str, Any]], List[s
 async def on_ex_click(cb: CallbackQuery):
     await _silent_ack(cb)
     parts = cb.data.split(":")
-    # ex:<tid>:<eid>:start
-    # ex:<tid>:<eid>:step:<idx>
-    # ex:<tid>:<eid>:finish
     if len(parts) < 4:
         await cb.message.answer("Не понял команду упражнения.")
         return
     _, tid, eid, action, *rest = parts
-
     ex, steps = _find_exercise(tid, eid)
     if not ex:
         await cb.message.answer("Не нашёл упражнение. Вернёмся к теме.", reply_markup=kb_exercises(tid))
         return
-
     if action == "start":
         EX_STATE[cb.message.chat.id] = {"tid": tid, "eid": eid, "idx": 0}
         intro = ex.get("intro") or ""
@@ -434,7 +399,6 @@ async def on_ex_click(cb: CallbackQuery):
         step_text = steps[0] if steps else "Шагов нет."
         await cb.message.answer(step_text, reply_markup=step_keyboard(tid, eid, 0, len(steps)))
         return
-
     if action == "step":
         if not rest:
             await cb.message.answer("Нужен номер шага.")
@@ -450,13 +414,11 @@ async def on_ex_click(cb: CallbackQuery):
         step_text = steps[idx]
         await cb.message.answer(step_text, reply_markup=step_keyboard(tid, eid, idx, len(steps)))
         return
-
     if action == "finish":
         EX_STATE.pop(cb.message.chat.id, None)
         await cb.message.answer("Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
         return
 
-# ===== Reflection mini-flow (as separate "topic") =====
 REFRAMING_STEPS = [
     ("situation", "Опиши ситуацию в двух-трёх предложениях."),
     ("thought", "Какая автоматическая мысль возникла?"),
@@ -482,7 +444,6 @@ async def reflect_stop(cb: CallbackQuery):
     CHAT_MODE[chat_id] = "talk"
     await cb.message.answer("Окей, остановились. Можем вернуться позже. 💬")
 
-# ===== Tone (/tone, /voice) =====
 @router.message(Command("tone"))
 @router.message(Command("voice"))
 async def on_cmd_tone(m: Message):
@@ -499,7 +460,6 @@ async def on_tone_set(cb: CallbackQuery):
     _set_user_voice(str(cb.from_user.id), style)
     await cb.message.answer(f"Стиль обновлён: <b>{style}</b> ✅")
 
-# ===== Meditations =====
 @router.message(F.text == "🎧 Медитации")
 async def on_meditations(m: Message):
     img = ONB_IMAGES.get("meditations") or ""
@@ -512,7 +472,6 @@ async def on_meditations(m: Message):
             pass
     await m.answer(caption)
 
-# ===== Talk (entry) =====
 @router.message(F.text == "💬 Поговорить")
 async def on_talk_enter(m: Message):
     img = ONB_IMAGES.get("talk") or ""
@@ -525,23 +484,19 @@ async def on_talk_enter(m: Message):
             pass
     await m.answer(caption)
 
-# ===== Talk (LLM) =====
 @router.message(F.text)
 async def on_text(m: Message):
     chat_id = m.chat.id
     tg_id = str(m.from_user.id)
     user_text = (m.text or "").strip()
 
-    # Reflection steps
     if CHAT_MODE.get(chat_id) == "reflection":
         state = _reframe_state.setdefault(tg_id, {"step_idx": 0, "answers": {}})
         step_idx: int = int(state.get("step_idx", 0))
         answers: Dict[str, str] = state.get("answers", {})  # type: ignore
-
         key, _prompt = REFRAMING_STEPS[step_idx]
         answers[key] = user_text
         step_idx += 1
-
         if step_idx >= len(REFRAMING_STEPS):
             CHAT_MODE[chat_id] = "talk"
             _reframe_state.pop(tg_id, None)
@@ -560,7 +515,6 @@ async def on_text(m: Message):
             await m.answer(REFRAMING_STEPS[step_idx][1], reply_markup=stop_keyboard())
             return
 
-    # Soft RAG
     rag_ctx = ""
     if rag_search_fn:
         try:
@@ -568,11 +522,9 @@ async def on_text(m: Message):
         except Exception:
             rag_ctx = ""
 
-    # Style
     style_key = _get_user_voice(tg_id)
     style_hint = VOICE_STYLES.get(style_key, VOICE_STYLES["default"])
 
-    # System prompt + (optional) reflective suffix + RAG-context
     sys_prompt = SYSTEM_PROMPT
     if CHAT_MODE.get(chat_id) == "reflection":
         sys_prompt += REFLECTIVE_SUFFIX
@@ -583,11 +535,9 @@ async def on_text(m: Message):
             + rag_ctx
         ).strip()
 
-    # History
     history = list(DIALOG_HISTORY[chat_id])
     messages = [{"role": "system", "content": sys_prompt}] + history + [{"role": "user", "content": user_text}]
 
-    # LLM
     try:
         answer = await chat_with_style(messages=messages, style_hint=style_hint, temperature=0.6)
     except Exception:
@@ -597,7 +547,7 @@ async def on_text(m: Message):
     _push(chat_id, "assistant", answer)
     await m.answer(answer)
 
-# ===== Service commands =====
 @router.message(Command("ping"))
 async def on_ping(m: Message):
     await m.answer("pong ✅")
+PYCODE
