@@ -169,11 +169,21 @@ def kb_onb_step1() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Старт ▶️", callback_data="onb:start")]
     ])
 
+def _valid_url(u: str) -> bool:
+    return bool(u) and (u.startswith("http://") or u.startswith("https://"))
+
 def kb_onb_step2() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Политика", url=POLICY_URL), InlineKeyboardButton(text="Правила", url=TERMS_URL)],
-        [InlineKeyboardButton(text="Привет, хорошо ✅", callback_data="onb:agree")]
-    ])
+    buttons = []
+    # показываем ссылки только если заданы валидные URL
+    row = []
+    if _valid_url(POLICY_URL):
+        row.append(InlineKeyboardButton(text="Политика", url=POLICY_URL))
+    if _valid_url(TERMS_URL):
+        row.append(InlineKeyboardButton(text="Правила", url=TERMS_URL))
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="Привет, хорошо ✅", callback_data="onb:agree")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def kb_goals() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
