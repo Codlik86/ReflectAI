@@ -1,5 +1,3 @@
-# >>>>> START OF FILE app/bot.py
-# (весь файл ниже)
 import os
 import asyncio
 import sqlite3
@@ -14,6 +12,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton
 )
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest  # <-- добавили
 
 # --- Import system prompt and topics from your existing files ---
 try:
@@ -142,7 +141,7 @@ def kb_voice() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎚️ По умолчанию", callback_data="voice:set:default")],
         [InlineKeyboardButton(text="🤝 Друг",         callback_data="voice:set:friend")],
         [InlineKeyboardButton(text="🧠 Про",          callback_data="voice:set:pro")],
-        [InlineKeyboardButton(text="🕶️ Ирония 18+",   callback_data="voice:set:dark")],
+        [InlineKeyboardButton(text="��️ Ирония 18+",   callback_data="voice:set:dark")],
     ])
 
 def kb_goals() -> InlineKeyboardMarkup:
@@ -237,9 +236,16 @@ async def on_start(m: Message):
 
 @router.callback_query(F.data.startswith("goal:"))
 async def onb_goal_pick(cb: CallbackQuery):
+    # просто подтверждаем и пытаемся «перерисовать» клавиатуру,
+    # но если разметка не изменилась — молча игнорируем ошибку TG
     await silent_ack(cb)
-    # здесь можно сохранять выбранные цели
-    await cb.message.edit_reply_markup(reply_markup=kb_goals())
+    try:
+        await cb.message.edit_reply_markup(reply_markup=kb_goals())
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            # ничего страшного, просто не меняем
+            return
+        raise
 
 @router.callback_query(F.data == "goal_done")
 async def onb_goal_done(cb: CallbackQuery):
@@ -287,7 +293,12 @@ async def on_work_section(m: Message):
 @router.callback_query(F.data == "topics:back")
 async def on_topics_back(cb: CallbackQuery):
     await silent_ack(cb)
-    await cb.message.edit_text("Выбирай тему:", reply_markup=kb_topics())
+    try:
+        await cb.message.edit_text("Выбирай тему:", reply_markup=kb_topics())
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        raise
 
 @router.callback_query(F.data.startswith("topic:"))
 async def on_topic_pick(cb: CallbackQuery):
@@ -312,8 +323,14 @@ async def on_topic_pick(cb: CallbackQuery):
     text = f"<b>{_topic_title(tid)}</b>\n\n{intro}"
     try:
         await cb.message.edit_text(text, reply_markup=kb_exercises(tid))
-    except Exception:
-        await cb.message.answer(text, reply_markup=kb_exercises(tid))
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        # На иных ошибках пробуем отправить новое сообщение
+        try:
+            await cb.message.answer(text, reply_markup=kb_exercises(tid))
+        except Exception:
+            raise
 
 # Exercise stepper state (in-memory)
 EX_STATE: Dict[int, Dict[str, object]] = defaultdict(dict)
@@ -484,4 +501,3 @@ async def on_text(m: Message):
     _push(chat_id, "assistant", answer)
     await m.answer(answer)
     return
-# <<<<< END OF FILE app/bot.py
