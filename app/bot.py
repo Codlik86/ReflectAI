@@ -161,6 +161,7 @@ def kb_main() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=f"{EMO_HERB} Разобраться")],
             [KeyboardButton(text="💬 Поговорить"), KeyboardButton(text="🎧 Медитации")],
+            [KeyboardButton(text="⚙️ Настройки")],
         ],
         resize_keyboard=True
     )
@@ -196,6 +197,12 @@ def kb_goals() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💤 Сон", callback_data="goal:sleep"),
          InlineKeyboardButton(text="🧭 Ясность", callback_data="goal:clarity")],
         [InlineKeyboardButton(text="✅ Готово", callback_data="goal:done")],
+    ])
+
+def kb_settings() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎚️ Тон", callback_data="settings:tone")],
+        [InlineKeyboardButton(text="🔒 Privacy", callback_data="settings:privacy")],
     ])
 
 def kb_tone() -> InlineKeyboardMarkup:
@@ -473,50 +480,33 @@ async def on_ex_click(cb: CallbackQuery):
         await cb.message.answer("Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
         return
 
-# ===== Reflection mini-flow =====
-REFRAMING_STEPS = [
-    ("situation", "Опиши ситуацию в двух-трёх предложениях."),
-    ("thought", "Какая автоматическая мысль возникла?"),
-    ("evidence", "Какие есть факты «за» и «против» этой мысли?"),
-    ("alternate", "Как могла бы звучать более сбалансированная мысль?"),
-]
-_reframe_state: Dict[str, Dict[str, Any]] = {}
-
-@router.callback_query(F.data == "reflect:start")
-async def reflect_start(cb: CallbackQuery):
-    await _silent_ack(cb)
-    chat_id = cb.message.chat.id
-    tg_id = str(cb.from_user.id)
-    CHAT_MODE[chat_id] = "reflection"
-    _reframe_state[tg_id] = {"step_idx": 0, "answers": {}}
-    await cb.message.answer("Запускаю короткую рефлексию (4 шага, ~2 минуты).", reply_markup=stop_keyboard())
-    await cb.message.answer(REFRAMING_STEPS[0][1], reply_markup=stop_keyboard())
-
-@router.callback_query(F.data == "reflect:stop")
-async def reflect_stop(cb: CallbackQuery):
-    await _silent_ack(cb)
-    chat_id = cb.message.chat.id
-    CHAT_MODE[chat_id] = "talk"
-    await cb.message.answer("Окей, остановились. Можем вернуться позже. 💬")
-
-# ===== Tone (/tone, /voice) =====
-@router.message(Command("tone"))
-@router.message(Command("voice"))
-async def on_cmd_tone(m: Message):
-    cur = _get_user_voice(str(m.from_user.id))
-    await m.answer(f"Выбери стиль голоса. Текущий: <b>{cur}</b>.", reply_markup=kb_tone())
-
-@router.callback_query(F.data.startswith("tone:set:"))
-async def on_tone_set(cb: CallbackQuery):
-    await _silent_ack(cb)
-    style = cb.data.split(":", 2)[2]
-    if style not in VOICE_STYLES:
-        await cb.message.answer("Неизвестный стиль. Давай ещё раз: /tone")
-        return
     _set_user_voice(str(cb.from_user.id), style)
     await cb.message.answer(f"Стиль обновлён: <b>{style}</b> ✅")
 
 # ===== Медитации =====
+
+@router.message(F.text == "⚙️ Настройки")
+async def on_settings(m: Message):
+    txt = (
+        "Настройки:\n"
+        "• Выбрать тон ответа — кнопка ниже.\n"
+        "• Политика/правила — открою ссылку.\n"
+        "Позже добавим больше параметров."
+    )
+    await m.answer(txt, reply_markup=kb_settings())
+
+@router.callback_query(F.data == "settings:tone")
+async def on_settings_tone(cb: CallbackQuery):
+    await _silent_ack(cb)
+    cur = _get_user_voice(str(cb.from_user.id))
+    await cb.message.answer(f"Текущий тон: <b>{cur}</b>. Выбери ниже:", reply_markup=kb_tone())
+
+@router.callback_query(F.data == "settings:privacy")
+async def on_settings_privacy(cb: CallbackQuery):
+    await _silent_ack(cb)
+    # Используем ранее добавленный LEGAL_CRAFT_LINK, если есть; иначе просто напомним про /tone
+    link = globals().get("LEGAL_CRAFT_LINK") or "https://s.craft.me/APV7T8gRf3w2Ay"
+    await cb.message.answer(f"Политика и правила: {link}")
 @router.message(F.text == "🎧 Медитации")
 async def on_meditations(m: Message):
     img = ONB_IMAGES.get("meditations") or ""
@@ -548,36 +538,7 @@ async def on_text(m: Message):
     chat_id = m.chat.id
     tg_id = str(m.from_user.id)
     user_text = (m.text or "").strip()
-
-    # Reflection steps
-    if CHAT_MODE.get(chat_id) == "reflection":
-        state = _reframe_state.setdefault(tg_id, {"step_idx": 0, "answers": {}})
-        step_idx: int = int(state.get("step_idx", 0))
-        answers: Dict[str, str] = state.get("answers", {})  # type: ignore
-
-        key, _prompt = REFRAMING_STEPS[step_idx]
-        answers[key] = user_text
-        step_idx += 1
-
-        if step_idx >= len(REFRAMING_STEPS):
-            CHAT_MODE[chat_id] = "talk"
-            _reframe_state.pop(tg_id, None)
-            summary = (
-                f"Ситуация: {answers.get('situation','')}\n"
-                f"Мысль: {answers.get('thought','')}\n"
-                f"Факты: {answers.get('evidence','')}\n"
-                f"Альтернатива: {answers.get('alternate','')}\n\n"
-                "Как это ощущается сейчас?"
-            )
-            await m.answer(summary, reply_markup=stop_keyboard())
-            return
-        else:
-            state["step_idx"] = step_idx
-            state["answers"] = answers
-            await m.answer(REFRAMING_STEPS[step_idx][1], reply_markup=stop_keyboard())
-            return
-
-    # Soft RAG (пытаемся с lang, если сигнатура без него — повторяем без lang)
+# Soft RAG (пытаемся с lang, если сигнатура без него — повторяем без lang)
     rag_ctx = ""
     if rag_search_fn:
         try:
@@ -620,6 +581,13 @@ async def on_text(m: Message):
     await m.answer(answer)
 
 # ===== Service commands =====
+
+@router.message(F.text.regexp(r'(?i)^(стоп|stop)$'))
+async def on_stop_word(m: Message):
+    chat_id = m.chat.id
+    if CHAT_MODE.get(chat_id) == "reflection":
+        CHAT_MODE[chat_id] = "talk"
+        await m.answer("Окей, выходим из режима рефлексии. Можем продолжить обычный разговор 💬")
 @router.message(Command("ping"))
 async def on_ping(m: Message):
     await m.answer("pong ✅")
