@@ -1,11 +1,10 @@
-
 import os
 from fastapi import FastAPI, Request, Header, Response
 from fastapi.responses import PlainTextResponse
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.types import Update
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
-import asyncio
 
 # Import router
 try:
@@ -17,7 +16,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 assert BOT_TOKEN, "BOT_TOKEN must be set"
 
-bot = Bot(BOT_TOKEN, parse_mode="HTML")
+# aiogram 3.7+: parse_mode через DefaultBotProperties
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 dp.include_router(bot_router)
 
