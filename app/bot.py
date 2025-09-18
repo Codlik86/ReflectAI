@@ -276,6 +276,10 @@ def _topic_title(tid: str) -> str:
     t = TOPICS.get(tid, {})
     title = t.get("title", tid)
     emoji = t.get("emoji") or topic_emoji(tid, title)
+    if emoji == EMO_HERB:
+        pool = ["🌈","✨","🫶","🛡️","🧩","📈","🪴","🌊","☀️","🌙","🧠","🫁","🧪","🫧","🧲","🎯","💡","🎈","🪄"]
+        idx = int(hashlib.md5((tid or title).encode("utf-8")).hexdigest(), 16) % len(pool)
+        emoji = pool[idx]
     return f"{emoji} {title}"
 
 def kb_topics() -> InlineKeyboardMarkup:
@@ -594,7 +598,7 @@ async def on_stop_word(m: Message):
         await m.answer("Окей, выходим из режима рефлексии. Можем продолжить обычный разговор 💬")
 
 # ===== LLM chat =====
-@router.message(F.text)
+@router.message(F.text & ~F.text.regexp(r'^/'))
 async def on_text(m: Message):
     chat_id = m.chat.id
     tg_id = str(m.from_user.id)
@@ -629,8 +633,8 @@ async def on_text(m: Message):
         ).strip()
 
     # История
-    history = list(DIALOG_HISTORY[chat_id])
-    messages = [{"role": "system", "content": sys_prompt}] + history + [{"role": "user", "content": user_text}]
+history = list(DIALOG_HISTORY[chat_id])
+messages = history + [{"role": "user", "content": user_text}]
 
     # LLM
     try:
