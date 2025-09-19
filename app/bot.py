@@ -5,6 +5,7 @@ app/bot.py — ReflectAI
 """
 
 from __future__ import annotations
+from .exercises import EXERCISES
 
 import os
 import sqlite3
