@@ -806,14 +806,14 @@ async def on_tone_btn(m: Message):
 
 @router.callback_query(F.data.regexp(r"^ex:"))
 async def on_ex_click(cb: CallbackQuery):
-    # Формат: ex:{topic_id}:{exercise_id}:{idx|finish}
     try:
-        _, tid, eid, action = cb.data.split(":")
+        data = cb.data or ""
+        _, tid, eid, action = (data.split(":", 3) + ["", "", "", ""])[:4]
     except Exception:
         await cb.answer()
         return
 
-    # «Рефлексия» — отдельный режим, здесь игнорируем (на неё отдельный хендлер)
+    # Режим рефлексии — отдельный чат, не листаем шаги
     if eid == "reflection":
         await cb.answer()
         return
@@ -826,69 +826,43 @@ async def on_ex_click(cb: CallbackQuery):
     steps = ex.get("steps") or []
     intro = ex.get("intro") or ""
 
-    # «finish» — завершаем и возвращаемся к списку упражнений темы
+    def step_keyboard(tid, eid, idx, total):
+        back_btn  = InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:{max(idx-1,0)}")
+        next_btn  = InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:{min(idx+1,total-1)}")
+        fin_btn   = InlineKeyboardButton(text="✅ Завершить", callback_data=f"ex:{tid}:{eid}:finish")
+        rows = []
+        if idx <= 0:
+            rows.append([next_btn, fin_btn])
+        elif idx >= total-1:
+            rows.append([back_btn, fin_btn])
+        else:
+            rows.append([back_btn, next_btn, fin_btn])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад к темам", callback_data=f"topic:{tid}")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
     if action == "finish":
-        await cb.answer("Готово 🌿")
-        try:
-            await cb.message.edit_text(
-                "Готово. Вернёмся к теме?",
-                reply_markup=kb_exercises(tid)
-            )
-        except Exception:
-            await cb.message.answer("Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
+        await _safe_edit(cb.message, "Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
+        await cb.answer()
         return
 
-    # Если пришёл индекс шага — рендерим в одном и том же сообщении
+    if not action or action == "start":
+        if intro:
+            await _safe_edit(cb.message, intro, reply_markup=step_keyboard(tid, eid, 0, max(1, len(steps))))
+        else:
+            idx = 0
+            step_text = steps[idx] if steps else "Шагов нет."
+            await _safe_edit(cb.message, step_text, reply_markup=step_keyboard(tid, eid, idx, max(1, len(steps))))
+        await cb.answer()
+        return
+
     try:
         idx = int(action)
     except Exception:
         idx = 0
 
     total = max(1, len(steps))
-    # Первый раз: если есть intro и idx == 0 и у шага нет текста — покажем intro
-    if idx == 0 and intro and not (steps and isinstance(steps[0], str) and steps[0].strip()):
-        step_text = intro.strip()
-    else:
-        # Безопасно возьмём шаг
-        step_text = steps[idx] if idx < len(steps) else steps[-1] if steps else "Шаг"
+    idx = max(0, min(idx, total-1))
+    step_text = steps[idx] if steps else "Шагов нет."
 
-    # Тёплый формат — добавим шапку с прогрессом
-    head = f"<b>Шаг {idx+1} из {total}</b>\n\n" if total > 1 else ""
-    text = head + step_text.strip()
-
-    try:
-        await cb.message.edit_text(text, reply_markup=_step_kb(tid, eid, idx, total))
-    except Exception:
-        # если старое сообщение нельзя редактировать (например, слишком старое) — ответим новым
-        await cb.message.answer(text, reply_markup=_step_kb(tid, eid, idx, total))
+    await _safe_edit(cb.message, step_text, reply_markup=step_keyboard(tid, eid, idx, total))
     await cb.answer()
-
-
-
-@router.message(Command("work"))
-@router.message(F.text == "🌿 Разобраться")
-async def on_work(m: Message):
-    # картинка раздела (если настроена)
-    img = DEFAULT_ONB_IMAGES.get("work", "")
-    caption = "Выбирай тему — и начнём с короткой, тёплой практики."
-    if img:
-        try:
-            await m.answer_photo(img, caption=caption, reply_markup=kb_topics())
-            return
-        except Exception:
-            pass
-    await m.answer(caption, reply_markup=kb_topics())
-
-
-@router.message(Command("talk"))
-@router.message(F.text == "💬 Поговорить")
-async def on_talk(m: Message):
-    img = DEFAULT_ONB_IMAGES.get("talk", "")
-    caption = "Я рядом и слушаю. О чём хочется поговорить?"
-    if img:
-        try:
-            await m.answer_photo(img, caption=caption)
-            return
-        except Exception:
-            pass
-    await m.answer(caption)
