@@ -21,6 +21,28 @@ EXERCISES = {
 основанная осознанность и др.).
 """
 
+# ==== Темы для раздела «Разобраться» ====
+TOPICS = {
+    "__order__": [
+        "sleep",
+        "body",
+        "procrastination",
+        "burnout",
+        "decisions",
+        "social_anxiety",
+        "reflection",
+    ],
+
+    "sleep":            {"title": "Сон",                       "emoji": "😴"},
+    "body":             {"title": "Дыхание и тело",            "emoji": "💡"},
+    "procrastination":  {"title": "Прокрастинация",            "emoji": "🌿"},
+    "burnout":          {"title": "Выгорание и усталость",     "emoji": "☀️"},
+    "decisions":        {"title": "Решения и неопределённость","emoji": "🎯"},
+    "social_anxiety":   {"title": "Социальная тревога",        "emoji": "🫥"},
+    "reflection":       {"title": "Рефлексия",                  "emoji": "✨"},
+}
+
+
 EXERCISES = {
     # ===== Сон =====
     "sleep": {
@@ -225,3 +247,5 @@ EXERCISES = {
         }
     },
 }
+
+__all__ = ["TOPICS", "EXERCISES"]

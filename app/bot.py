@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 
 # ===== Внутренние модули =====
-from .exercises import EXERCISES  # ожидается структура как в твоём exercises.py
+from .exercises import TOPICS, EXERCISES  # ожидается структура как в твоём exercises.py
 from .prompts import SYSTEM_PROMPT as BASE_PROMPT
 from .prompts import TALK_SYSTEM_PROMPT as TALK_PROMPT  # базовый для /talk
 try:
@@ -138,16 +138,46 @@ def kb_privacy() -> InlineKeyboardMarkup:
         ]
     )
 
+EMO_DEFAULTS = {
+    "sleep": "😴", "body": "💡", "procrastination": "🌿",
+    "burnout": "☀️", "decisions": "🎯", "social_anxiety": "🫥",
+    "reflection": "✨",
+}
+
+def topic_button_title(tid: str) -> str:
+    t = TOPICS.get(tid, {})
+    title = (t.get("title") or tid).strip()
+    emoji = (t.get("emoji") or EMO_DEFAULTS.get(tid, "🌱")).strip()
+    return f"{emoji} {title}"
+
 def kb_topics() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    for tid, meta in EXERCISES.items():
-        if tid == "reflection":  # "Рефлексия" внутри тем как отдельный элемент
-            title = meta.get("title", "Рефлексия")
-        else:
-            title = meta.get("title", tid)
-        rows.append([InlineKeyboardButton(text=_topic_title_with_emoji(tid), callback_data=f"work:{tid}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main")])
+    order = TOPICS.get("__order__") or [k for k in TOPICS.keys() if not k.startswith("__")]
+    rows = []
+    for tid in order:
+        if tid.startswith("__"):
+            continue
+        rows.append([InlineKeyboardButton(text=topic_button_title(tid), callback_data=f"t:{tid}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:root")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_exercises(tid: str) -> InlineKeyboardMarkup:
+    """
+    Клавиатура списка упражнений выбранной темы.
+    Берёт названия из EXERCISES[tid][eid]["title"].
+    """
+    rows = []
+    for eid, ex in (EXERCISES.get(tid) or {}).items():
+        title = ex.get("title") or eid
+        rows.append([
+            InlineKeyboardButton(text=title, callback_data=f"ex:{tid}:{eid}:start")
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="work:topics")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+@router.callback_query(F.data == "work:topics")
+async def on_back_to_topics(cb: CallbackQuery):
+    await _safe_edit(cb.message, "Выбирай тему:", reply_markup=kb_topics())
+    await cb.answer()
 
 def step_keyboard(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMarkup:
     prev_idx = max(0, idx - 1)
@@ -345,33 +375,48 @@ async def on_ex_click(cb: CallbackQuery):
     Формат callback_data: ex:<tid>:<eid>:<idx|start|finish>
     """
     try:
-        _, tid, eid, action = cb.data.split(":")
+        # делаем разбор безопасным: если нет 4-й части — считаем, что "start"
+        parts = cb.data.split(":", 3)
+        _, tid, eid = parts[0], parts[1], parts[2]
+        action = parts[3] if len(parts) > 3 else "start"
     except Exception:
         await cb.answer()
         return
 
-    topic = EXERCISES.get(tid, {})
-    ex = topic.get("items", {}).get(eid, {})
+    # спец-режим: свободный чат "Рефлексия"
+    if eid == "reflection":
+        await cb.answer()
+        await _safe_edit(
+            cb.message,
+            "Я рядом и слушаю. О чём хочется поговорить?",
+            reply_markup=None,
+        )
+        return
+
+    # !!! главная правка: никаких .get("items") — структура плоская
+    ex = (EXERCISES.get(tid) or {}).get(eid)
     if not ex:
         await cb.answer("Упражнение не найдено", show_alert=True)
         return
 
-    steps: List[str] = ex.get("steps") or []
-    intro: str = ex.get("intro") or ""
+    steps = ex.get("steps") or []
+    intro = ex.get("intro") or ""
+    total = max(1, len(steps))
 
     if action == "finish":
-        await _safe_edit(cb.message, "Готово. Вернёмся к теме?", InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"work:{tid}")]]
-        ))
+        # по завершению возвращаем список упражнений выбранной темы
+        try:
+            kb = kb_exercises(tid)
+        except NameError:
+            # если kb_exercises нет — уходим к списку тем
+            kb = kb_topics()
+        await _safe_edit(cb.message, "Готово. Вернёмся к теме?", reply_markup=kb)
         await cb.answer()
         return
 
     if action == "start":
-        if intro:
-            await _safe_edit(cb.message, intro, reply_markup=step_keyboard(tid, eid, 0, max(1, len(steps))))
-        else:
-            txt = steps[0] if steps else "Шагов нет."
-            await _safe_edit(cb.message, txt, reply_markup=step_keyboard(tid, eid, 0, max(1, len(steps))))
+        text = intro or (steps[0] if steps else "Шагов нет.")
+        await _safe_edit(cb.message, text, reply_markup=step_keyboard(tid, eid, 0, total))
         await cb.answer()
         return
 
@@ -380,14 +425,12 @@ async def on_ex_click(cb: CallbackQuery):
         idx = int(action)
     except Exception:
         idx = 0
-
-    total = max(1, len(steps))
     idx = max(0, min(idx, total - 1))
-    step_text = steps[idx] if steps else "Шагов нет."
 
-    await _safe_edit(cb.message, step_text, reply_markup=step_keyboard(tid, eid, idx, total))
+    text = steps[idx] if steps else "Шагов нет."
+    await _safe_edit(cb.message, text, reply_markup=step_keyboard(tid, eid, idx, total))
     await cb.answer()
-
+    
 # ===== Рефлексия — свободный чат =====
 @router.callback_query(F.data == "reflect:start")
 async def on_reflect_start(cb: CallbackQuery):
@@ -396,6 +439,18 @@ async def on_reflect_start(cb: CallbackQuery):
                                   "Можешь начать с того, что больше всего откликается сейчас.")
     await cb.answer()
 
+@router.callback_query(F.data.startswith("t:"))
+async def on_topic_click(cb: CallbackQuery):
+    """
+    Пользователь нажал на тему в «Разобраться».
+    Делаем редактирование текущего сообщения:
+    - в тексте — заголовок темы (с эмодзи),
+    - в клавиатуре — список упражнений темы.
+    """
+    tid = cb.data.split(":", 1)[1]
+    await _safe_edit(cb.message, topic_button_title(tid), reply_markup=kb_exercises(tid))
+    await cb.answer()
+    
 # ===== Простые команды / о проекте / помощь / оплата =====
 @router.message(Command("about"))
 async def on_about(m: Message):
@@ -492,3 +547,7 @@ async def on_menu(m: Message):
 @router.message(Command("work"))
 async def on_work_cmd(m: Message):
     await on_work_menu(m)
+
+@router.message(Command("work"))
+async def cmd_work(m: Message):
+    await _safe_edit(m, "Выбирай тему:", reply_markup=kb_topics())
