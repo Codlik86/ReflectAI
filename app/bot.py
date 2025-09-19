@@ -231,16 +231,18 @@ async def on_onb_step2(cb: CallbackQuery):
 
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
-    # шаг 3: «Что дальше?» + сразу открываем правое меню
+    # шаг 3: «Что дальше?» + сразу показываем правое меню как reply-клавиатуру
+    kb = kb_main_menu()
     img = get_onb_image("work")
     if img:
         try:
-            await cb.message.answer_photo(img, caption=WHAT_NEXT_TEXT)
+            await cb.message.answer_photo(img, caption=WHAT_NEXT_TEXT, reply_markup=kb)
+            await cb.answer()
+            return
         except Exception:
-            await cb.message.answer(WHAT_NEXT_TEXT)
-    else:
-        await cb.message.answer(WHAT_NEXT_TEXT)
-    await cb.message.answer("Меню:", reply_markup=kb_onb_step3())
+            pass
+    # если фото не отправилось — отправим просто текст с клавиатурой
+    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb)
     await cb.answer()
 
 # ===== Кнопки меню (reply-клавиатура) =====
