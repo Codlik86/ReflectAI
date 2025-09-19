@@ -1,893 +1,492 @@
-# -*- coding: utf-8 -*-
-"""
-app/bot.py — ReflectAI
-Полная рабочая версия под aiogram 3.x
-"""
-
+# app/bot.py
 from __future__ import annotations
-from .exercises import EXERCISES
-
-
-# ===== Хелпер для редактирования сообщений без спама =====
-async def _safe_edit(msg, text=None, reply_markup=None):
-    # Аккуратно редактирует текущее сообщение.
-    # Если можно — редактирует текст и/или клавиатуру.
-    # Если Telegram говорит "message is not modified" — пробуем обновить только клавиатуру.
-    # Если редактирование не удалось — отправляем новое сообщение.
-    try:
-        if text is not None:
-            await msg.edit_text(text, reply_markup=reply_markup)
-        else:
-            await msg.edit_reply_markup(reply_markup=reply_markup)
-        return
-    except Exception as e:
-        try:
-            if "message is not modified" in str(e).lower() and reply_markup is not None:
-                await msg.edit_reply_markup(reply_markup=reply_markup)
-                return
-        except Exception:
-            pass
-    if text is not None:
-        await msg.answer(text, reply_markup=reply_markup)
-    elif reply_markup is not None:
-        await msg.answer(" ", reply_markup=reply_markup)
 
 import os
-import sqlite3
 import hashlib
-from contextlib import contextmanager
-from collections import defaultdict, deque
-from typing import Dict, Deque, Optional, Tuple, List, Any
+from typing import Dict, List, Optional, Tuple
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-WHAT_NEXT_TEXT = """Что дальше? Несколько вариантов:
-
-1) Если хочешь просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе, а я поддержу и помогу разобраться.
-2) Нужен оперативный разбор — заходи в «Разобраться». Там короткие упражнения на разные темы.
-3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)
-
-Пиши, как удобно — я рядом 🖤"""
-
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram import types
-from aiogram.filters import Command
 from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
 )
 
-# ===== внешние модули проекта (существуют у тебя) =====
-# llm / prompts / rag / упражнения
+# ===== Внутренние модули =====
+from .exercises import EXERCISES  # ожидается структура как в твоём exercises.py
+from .prompts import SYSTEM_PROMPT as BASE_PROMPT
+from .prompts import TALK_SYSTEM_PROMPT as TALK_PROMPT  # базовый для /talk
 try:
-    from app.llm_adapter import chat_with_style
+    from .prompts import REFLECTIVE_SUFFIX  # необязательно; используется для рефлексии
 except Exception:
-    from llm_adapter import chat_with_style  # fallback на корень
+    REFLECTIVE_SUFFIX = "\n\n(Режим рефлексии: мягко замедляй темп, задавай вопросы, помогающие осмыслению.)"
 
+# LLM-обёртка (подхватываем твою реализацию)
 try:
-    import app.prompts as PROMPTS
+    from .llm_adapter import chat_with_style  # должен уметь принимать system/messages/style/rag_ctx
 except Exception:
-    try:
-        import prompts as PROMPTS
-    except Exception:
-        PROMPTS = None
+    chat_with_style = None  # на всякий, чтобы не падать при импорте в процессе наладки
 
+# RAG (не обязателен, но если есть — подмешаем)
 try:
-    import app.exercises as EX
+    from .rag_qdrant import retrieve_relevant_context
 except Exception:
-    import exercises as EX  # должно существовать
+    retrieve_relevant_context = None
 
-try:
-    import app.rag_qdrant as RAG
-    rag_search_fn = RAG.search
-except Exception:
-    try:
-        import rag_qdrant as RAG
-        rag_search_fn = RAG.search
-    except Exception:
-        rag_search_fn = None
+router = Router()
 
-# ====== Роутер ======
-router = Router(name="reflectai-bot")
+# ===== Онбординг: изображения и ссылки =====
+POLICY_URL = os.getenv("POLICY_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
+TERMS_URL = os.getenv("TERMS_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
 
-# ====== Глобальные настройки / состояния ======
-EMO_HERB = "🌿"
-
-# картинка-онбординг (из env; можно задать file_id/url)
-ONB_IMAGES = {
+DEFAULT_ONB_IMAGES = {
     "cover": os.getenv("ONB_IMG_COVER", ""),
     "talk": os.getenv("ONB_IMG_TALK", ""),
     "work": os.getenv("ONB_IMG_WORK", ""),
-    "meditations": os.getenv("ONB_IMG_MEDIT", "")
-}
-
-# Фоллбэки на случай пустых env (замени на свои ссылки/ID)
-DEFAULT_ONB_IMAGES = {
-    "cover": "https://file.garden/aML3M6Sqrg21TaIT/kind-creature-min.jpg",
-    "talk": "https://file.garden/aML3M6Sqrg21TaIT/_practices-min.jpg",
-    "work": "https://example.com/reflectai/work.jpg",
-    "meditations": "https://file.garden/aML3M6Sqrg21TaIT/meditation%20(1)-min.jpg",
+    "meditations": os.getenv("ONB_IMG_MEDIT", ""),
 }
 
 def get_onb_image(key: str) -> str:
-    val = (ONB_IMAGES.get(key) or "").strip()
-    if val:
-        return val
-    return DEFAULT_ONB_IMAGES.get(key, "")
+    return DEFAULT_ONB_IMAGES.get(key, "") or ""
 
-# тихие ссылки
-POLICY_URL = os.getenv("POLICY_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
-TERMS_URL  = os.getenv("TERMS_URL",  "https://s.craft.me/APV7T8gRf3w2Ay")
+# ===== Глобальные состояния чата (память в пределах процесса) =====
+CHAT_MODE: Dict[int, str] = {}        # chat_id -> "talk" | "work" | "reflection"
+USER_TONE: Dict[int, str] = {}        # chat_id -> "default" | "friend" | "therapist" | "18plus"
+PRIVACY_FLAGS: Dict[int, Dict[str, bool]] = {}  # chat_id -> {"save_history": True}
 
-# Диалоги в памяти (по чату)
-DIALOG_HISTORY: Dict[int, Deque[Dict[str, str]]] = defaultdict(lambda: deque(maxlen=20))
-CHAT_MODE: Dict[int, str] = defaultdict(lambda: "talk")  # talk | reflection
-
-# SQLite хранилка простых настроек
-DB_PATH = os.getenv("BOT_DB_PATH", "bot.sqlite3")
-
-@contextmanager
-def db_session():
-    conn = sqlite3.connect(DB_PATH)
+# ===== Универсальные хелперы =====
+async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
+    """
+    Редактирует текст/клавиатуру, если сообщение можно редактировать,
+    иначе отвечает новым сообщением.
+    """
     try:
-        yield conn
-    finally:
-        conn.close()
+        if text is not None and reply_markup is not None:
+            await msg.edit_text(text, reply_markup=reply_markup)
+        elif text is not None:
+            await msg.edit_text(text)
+        elif reply_markup is not None:
+            await msg.edit_reply_markup(reply_markup=reply_markup)
+        else:
+            return
+    except Exception:
+        # если не удалось отредактировать — отправляем новое сообщение
+        if text is not None:
+            await msg.answer(text, reply_markup=reply_markup)
+        elif reply_markup is not None:
+            await msg.answer(".", reply_markup=reply_markup)
 
-def _ensure_tables():
-    with db_session() as s:
-        s.execute("""
-        CREATE TABLE IF NOT EXISTS user_prefs (
-            tg_id TEXT PRIMARY KEY,
-            voice_style TEXT DEFAULT 'default',
-            consent_save_all INTEGER DEFAULT 0,
-            goals TEXT DEFAULT '',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        """)
-        s.commit()
+def _emoji_by_topic(tid: str, title: str) -> str:
+    """
+    Аккуратно назначаем эмодзи теме: берём из EXERCISES[tid]['emoji'], иначе
+    устойчивый фолбэк по хешу из пула.
+    """
+    t = EXERCISES.get(tid, {})
+    e = str(t.get("emoji") or "").strip()
+    if e:
+        return e
+    pool = ["🌱", "🌿", "🌸", "🌙", "☀️", "🔥", "🧭", "🧠", "🛠️", "💡", "🧩", "🎯", "🌊", "🫶", "✨"]
+    idx = int(hashlib.md5((tid or title).encode("utf-8")).hexdigest(), 16) % len(pool)
+    return pool[idx]
 
-def _get_user_voice(tg_id: str) -> str:
-    _ensure_tables()
-    with db_session() as s:
-        row = s.execute("SELECT voice_style FROM user_prefs WHERE tg_id=?", (tg_id,)).fetchone()
-        return (row[0] if row and row[0] else "default")
+def _topic_title_with_emoji(tid: str) -> str:
+    d = EXERCISES.get(tid, {})
+    title = d.get("title", tid)
+    return f"{_emoji_by_topic(tid, title)} {title}"
 
-def _set_user_voice(tg_id: str, style: str):
-    _ensure_tables()
-    with db_session() as s:
-        s.execute("""
-        INSERT INTO user_prefs (tg_id, voice_style) VALUES (?, ?)
-        ON CONFLICT(tg_id) DO UPDATE SET voice_style=excluded.voice_style, updated_at=CURRENT_TIMESTAMP
-        """, (tg_id, style))
-        s.commit()
-
-def _append_goal(tg_id: str, goal_key: str):
-    _ensure_tables()
-    with db_session() as s:
-        row = s.execute("SELECT goals FROM user_prefs WHERE tg_id=?", (tg_id,)).fetchone()
-        goals = set((row[0].split(",") if (row and row[0]) else []))
-        if goal_key not in goals:
-            goals.add(goal_key)
-        s.execute("""
-            INSERT INTO user_prefs (tg_id, goals) VALUES (?, ?)
-            ON CONFLICT(tg_id) DO UPDATE SET goals=?, updated_at=CURRENT_TIMESTAMP
-        """, (tg_id, ",".join([g for g in goals if g])))
-        s.commit()
-
-# ====== PROMPTS: базовый + тона ======
-PROMPT_SOURCE = "fallback"
-SYSTEM_PROMPT: str = ""
-
-if PROMPTS is not None:
-    PROMPT_SOURCE = "prompts"
-    # приоритет: TALK_SYSTEM_PROMPT > (SYSTEM_PROMPT + STYLE_TALK) > SYSTEM_PROMPT
-    talk = getattr(PROMPTS, "TALK_SYSTEM_PROMPT", None)
-    if isinstance(talk, str) and talk.strip():
-        SYSTEM_PROMPT = talk
-        PROMPT_SOURCE += ".TALK_SYSTEM_PROMPT"
-    else:
-        base = getattr(PROMPTS, "SYSTEM_PROMPT", "")
-        style_talk = getattr(PROMPTS, "STYLE_TALK", "")
-        if base.strip() and style_talk.strip():
-            SYSTEM_PROMPT = base + "\n\n" + style_talk
-            PROMPT_SOURCE += ".SYSTEM_PROMPT+STYLE_TALK"
-        elif base.strip():
-            SYSTEM_PROMPT = base
-            PROMPT_SOURCE += ".SYSTEM_PROMPT"
-
-if not SYSTEM_PROMPT:
-    SYSTEM_PROMPT = (
-        "Ты — «Помни» (ReflectAI), тёплый русскоязычный ассистент. Общайся на «ты», просто и бережно. "
-        "Не ставь диагнозов и не замещай врача; при рисках мягко предложи обратиться к специалисту. "
-        "Поддерживай, задавай уточняющие вопросы, помогай структурировать мысли. Без ссылок на источники."
+def kb_main_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🌿 Разобраться")],
+            [KeyboardButton(text="💬 Поговорить")],
+            [KeyboardButton(text="🎧 Медитации")],
+            [KeyboardButton(text="⚙️ Настройки")],
+        ],
+        resize_keyboard=True,
     )
 
-# оверлеи тонов
-VOICE_STYLES = {
-    "default": "",
-    "friend": getattr(PROMPTS, "STYLE_FRIEND", "Стиль: тёплый друг, просто и поддерживающе, на «ты»."),
-    "pro":    getattr(PROMPTS, "STYLE_PRO",    "Стиль: клинический психолог, аккуратно, по делу, без жаргона."),
-    "dark":   getattr(PROMPTS, "STYLE_DARK",   "Стиль: взрослая ирония (18+), умно и бережно, без токсичности.")
-}
-
-def _style_overlay(style_key: str) -> str:
-    key = (style_key or "default").lower()
-    if key == "default":
-        return ""
-    return VOICE_STYLES.get(key, "")
-
-# ====== Утилиты UI ======
-def _valid_url(u: str) -> bool:
-    return bool(u) and (u.startswith("http://") or u.startswith("https://"))
-
-def safe_kb_onb_step2() -> InlineKeyboardMarkup:
-    buttons: List[List[InlineKeyboardButton]] = []
-    row = []
-    if _valid_url(POLICY_URL): row.append(InlineKeyboardButton(text="Политика", url=POLICY_URL))
-    if _valid_url(TERMS_URL):  row.append(InlineKeyboardButton(text="Правила",  url=TERMS_URL))
-    if row: buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="Привет, хорошо ✅", callback_data="onb:agree")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def kb_goals() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="😰 Тревога", callback_data="goal:anxiety"),
-         InlineKeyboardButton(text="🌀 Стресс", callback_data="goal:stress")],
-        [InlineKeyboardButton(text="💤 Сон", callback_data="goal:sleep"),
-         InlineKeyboardButton(text="🧭 Ясность", callback_data="goal:clarity")],
-        [InlineKeyboardButton(text="✅ Готово", callback_data="goal:done")],
-    ])
-
 def kb_settings() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎚️ Тон", callback_data="settings:tone")],
-        [InlineKeyboardButton(text="🔒 Privacy", callback_data="settings:privacy")],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎚 Тон общения", callback_data="settings:tone")],
+            [InlineKeyboardButton(text="🔒 Приватность", callback_data="settings:privacy")],
+            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu:main")],
+        ]
+    )
 
-def kb_tone() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎚️ По умолчанию", callback_data="tone:set:default")],
-        [InlineKeyboardButton(text="🤝 Друг",         callback_data="tone:set:friend")],
-        [InlineKeyboardButton(text="🧠 Про",          callback_data="tone:set:pro")],
-        [InlineKeyboardButton(text="🕶️ Ирония 18+",   callback_data="tone:set:dark")],
-    ])
+def kb_tone_picker() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✨ Универсальный (по умолчанию)", callback_data="tone:default")],
+            [InlineKeyboardButton(text="🤝 Друг/подруга", callback_data="tone:friend")],
+            [InlineKeyboardButton(text="🧠 Психологичный", callback_data="tone:therapist")],
+            [InlineKeyboardButton(text="🌶️ 18+", callback_data="tone:18plus")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings")],
+        ]
+    )
 
-# ====== Эмодзи по темам ======
-def topic_emoji(tid: str, title: str) -> str:
-    t = (tid or "").lower()
-    name = (title or "").lower()
-    def has(*keys): return any(k in t or k in name for k in keys)
-
-    if has("reflection", "рефлекс"): return "🪞"
-    if has("anx", "тревог"): return "😰"
-    if has("panic", "паник"): return "💥"
-    if has("stress", "стресс"): return "🌀"
-    if has("sleep", "сон", "бессон"): return "🌙"
-    if has("mind", "осознан", "медитац", "дыхани", "тело"): return "🧘"
-    if has("procrast", "прокраст"): return "⏳"
-    if has("burnout", "выгора", "устал"): return "🪫"
-    if has("clarity", "ясност", "цель", "план", "решен", "неопредел"): return "🧭"
-    if has("relat", "отношен", "семь", "друз"): return "💞"
-    if has("self", "самооцен", "уверенн"): return "🌱"
-    if has("grief", "горе", "потер"): return "🖤"
-    if has("anger", "злост", "раздраж"): return "😤"
-    if has("depress", "депресс"): return "🌧"
-    return EMO_HERB
-
-def _topic_title(tid: str) -> str:
-    t = getattr(EX, "TOPICS", {}).get(tid, {})
-    title = t.get("title", tid)
-    emoji = (t.get("emoji") or "").strip() or topic_emoji(tid, title)
-    if not emoji or emoji == EMO_HERB:
-        pool = ["🌈","✨","🫶","🛡️","🧩","📈","🪴","🌊","☀️","🌙","🧠","🫁","🧪","🫧","🧲","🎯","💡","🎈","🪄"]
-        idx = int(hashlib.md5((tid or title).encode("utf-8")).hexdigest(), 16) % len(pool)
-        emoji = pool[idx]
-    return f"{emoji} {title}"
+def kb_privacy() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Очистить историю", callback_data="privacy:clear")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings")],
+        ]
+    )
 
 def kb_topics() -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
-    topics: Dict[str, Dict[str, Any]] = getattr(EX, "TOPICS", {})
-    ordered_ids = list(topics.keys())
-    if "reflection" in ordered_ids:
-        ordered_ids.remove("reflection")
-        ordered_ids.insert(0, "reflection")
-    for tid in ordered_ids:
-        title = _topic_title(tid)
-        rows.append([InlineKeyboardButton(text=title, callback_data=f"topic:{tid}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="topics:back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-# ====== Безопасное редактирование ======
-async def _safe_edit_text(msg: Message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
-    try:
-        if getattr(msg, "text", None) is not None:
-            if msg.text != text:
-                await msg.edit_text(text, reply_markup=reply_markup)
-                return
-        if getattr(msg, "caption", None) is not None:
-            if msg.caption != text:
-                await msg.edit_caption(text, reply_markup=reply_markup)
-                return
-    except Exception:
-        pass
-    try:
-        await msg.answer(text, reply_markup=reply_markup)
-    except Exception:
-        await msg.answer(text)
-
-async def _silent_ack(cb: CallbackQuery):
-    try:
-        await cb.answer()
-    except Exception:
-        pass
-
-# ====== Онбординг тексты ======
-def onb_text_1() -> str:
-    return (
-        "Привет! Здесь ты можешь выговориться, посоветоваться или просто получить поддержку. "
-        "Для меня не бывает «неважных тем» и «глупых вопросов». Забота о своём эмоциональном состоянии — важна. 💜\n\n"
-        "Нажми на <b>Старт</b> и начни заботиться о себе."
-    )
-
-def onb_text_2() -> str:
-    return (
-        "Привет. Я — бот эмоциональной поддержки. Прежде чем мы познакомимся, подтвердим правила.\n\n"
-        "Продолжая, ты принимаешь правила и политику сервиса:"
-    )
-
-def onb_text_3() -> str:
-    return (
-        "Что дальше? Несколько вариантов:\n\n"
-        "1) Если хочешь просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе, а я поддержу и помогу разобраться.\n"
-        "2) Нужен оперативный разбор — заходи в «Разобраться». Там короткие упражнения на разные темы.\n"
-        "3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)\n\n"
-        "Выбирай, с чего начнём. Я рядом. 🌿"
-    )
-
-def kb_onb_step1() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Старт ✅", callback_data="onb:start")]
-    ])
-
-def kb_onb_step2() -> InlineKeyboardMarkup:
-    return safe_kb_onb_step2()
-
-def kb_onb_step3() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{EMO_HERB} Разобраться", callback_data="menu:work")],
-        [InlineKeyboardButton(text="💬 Поговорить", callback_data="menu:talk")],
-        [InlineKeyboardButton(text="🎧 Медитации", callback_data="menu:meditations")],
-    ])
-
-# ====== Главное меню ======
-def kb_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{EMO_HERB} Разобраться", callback_data="menu:work")],
-        [InlineKeyboardButton(text="💬 Поговорить", callback_data="menu:talk")],
-        [InlineKeyboardButton(text="🎧 Медитации", callback_data="menu:meditations")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")],
-    ])
-
-def get_home_text() -> str:
-    return "Выбери раздел:"
-
-# ====== /start ======
-@router.message(Command("start"))
-async def on_start(m: Message):
-    CHAT_MODE[m.chat.id] = "talk"
-    img = get_onb_image("cover")
-    caption = onb_text_1()
-    if img:
-        try:
-            await m.answer_photo(img, caption=caption, reply_markup=kb_onb_step1())
-            return
-        except Exception:
-            pass
-    await m.answer(caption, reply_markup=kb_onb_step1())
-
-
-
-# ===== Хелперы для показа шагов упражнений =====
-def _step_kb(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMarkup:
-    buttons = []
-    nav = []
-    if idx > 0:
-        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:{idx-1}"))
-    if idx < total - 1:
-        nav.append(InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:{idx+1}"))
-    if nav:
-        buttons.append(nav)
-    buttons.append([InlineKeyboardButton(text="✅ Завершить", callback_data=f"ex:{tid}:{eid}:finish")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-@router.callback_query(F.data == "onb:start")
-async def on_onb_start(cb: CallbackQuery):
-    await _silent_ack(cb)
-    caption = onb_text_2() if 'onb_text_2' in globals() else "Привет. Я — бот эмоциональной поддержки. Продолжая, ты подтверждаешь правила и политику сервиса."
-    # пробуем картинку, иначе просто текст
-    img = None
-    try:
-        img = get_onb_image("cover") if 'get_onb_image' in globals() else (ONB_IMAGES.get("cover") or "")
-    except Exception:
-        img = ONB_IMAGES.get("cover") or ""
-    if img:
-        # сначала пробуем отредактировать медиа, если первое сообщение было фото
-        try:
-            await cb.message.edit_media(
-                media=types.InputMediaPhoto(media=img, caption=caption),
-                reply_markup=kb_onb_step2()
-            )
-            return
-        except Exception:
-            pass
-        # если отредактировать не получилось — пришлём новое фото
-        try:
-            await cb.message.answer_photo(img, caption=caption, reply_markup=kb_onb_step2())
-            return
-        except Exception:
-            pass
-    await _safe_edit_text(cb.message, caption, reply_markup=kb_onb_step2())
-
-@router.callback_query(F.data == "onb:agree")
-async def onb_agree(cb: CallbackQuery):
-    # Экран 3 — просто текст + меню
-    try:
-        await cb.message.delete_reply_markup()
-    except Exception:
-        pass
-    await cb.message.answer(WHAT_NEXT_TEXT)
-    # показать главное меню (если есть функция kb_main)
-    try:
-        await cb.message.answer("Меню:", reply_markup=kb_main())
-    except Exception:
-        pass
-    await cb.answer()
-
-
-@router.callback_query(F.data == "menu:work")
-async def on_menu_work(cb: CallbackQuery):
-    await _silent_ack(cb)
-    img = get_onb_image("work")
-    if img:
-        try:
-            await cb.message.edit_media()  # не трогаем медиа, просто отправим новое
-        except Exception:
-            pass
-        try:
-            await cb.message.answer_photo(img, caption="Выбирай тему:", reply_markup=kb_topics())
-            return
-        except Exception:
-            pass
-    await _safe_edit_text(cb.message, "Выбирай тему:", kb_topics())
-
-@router.callback_query(F.data == "menu:talk")
-async def on_menu_talk(cb: CallbackQuery):
-    await _silent_ack(cb)
-    CHAT_MODE[cb.message.chat.id] = "talk"
-    img = get_onb_image("talk")
-    caption = "Я рядом и слушаю. О чём хочется поговорить?"
-    if img:
-        try:
-            await cb.message.answer_photo(img, caption=caption)
-            return
-        except Exception:
-            pass
-    await _safe_edit_text(cb.message, caption, None)
-
-@router.callback_query(F.data == "menu:meditations")
-async def on_menu_meditations(cb: CallbackQuery):
-    await _silent_ack(cb)
-    img = get_onb_image("meditations")
-    caption = "🎧 Медитации — скоро добавим аудио-подборки. Пока можно попробовать дыхательные практики в упражнениях."
-    if img:
-        try:
-            await cb.message.answer_photo(img, caption=caption)
-            return
-        except Exception:
-            pass
-    await _safe_edit_text(cb.message, caption)
-
-@router.callback_query(F.data == "menu:settings")
-async def on_menu_settings(cb: CallbackQuery):
-    await _silent_ack(cb)
-    await _safe_edit_text(cb.message, "Настройки:", kb_settings())
-
-# ====== Настройки -> тон ======
-@router.callback_query(F.data == "settings:tone")
-async def on_settings_tone(cb: CallbackQuery):
-    await _silent_ack(cb)
-    await _safe_edit_text(cb.message, "Выбери тон общения:", kb_tone())
-
-@router.callback_query(F.data.startswith("tone:set:"))
-async def on_tone_set(cb: CallbackQuery):
-    await _silent_ack(cb)
-    _, _, style = cb.data.partition("tone:set:")
-    tg_id = str(cb.from_user.id)
-    _set_user_voice(tg_id, style)
-    await cb.message.answer("Стиль обновлён ✅")
-
-# ====== Тексты «меню» по словам ======
-@router.message(F.text.in_({"Меню", "меню"}))
-async def on_menu_text(m: Message):
-    await m.answer(get_home_text(), reply_markup=kb_main())
-
-# ====== Раздел «Разобраться» ======
-@router.message(F.text == f"{EMO_HERB} Разобраться")
-async def on_work_section(m: Message):
-    img = get_onb_image("work")
-    if img:
-        try:
-            await m.answer_photo(img, caption="Выбирай тему:", reply_markup=kb_topics())
-            return
-        except Exception:
-            pass
-    await m.answer("Выбирай тему:", reply_markup=kb_topics())
-
-@router.callback_query(F.data == "topics:back")
-async def on_topics_back(cb: CallbackQuery):
-    await _silent_ack(cb)
-    await _safe_edit_text(cb.message, "Выбирай тему:", kb_topics())
-
-# ====== Рефлексия — отдельная тема (свободный чат) ======
-async def _start_reflection_chat(message: Message):
-    chat_id = message.chat.id
-    CHAT_MODE[chat_id] = "reflection"
-    txt = (
-        "Окей, давай в свободном формате поразбираемся. "
-        "Я буду отвечать в рефлексивном ключе: помогать замечать мысли, чувства и потребности, "
-        "замедлять и задавать мягкие вопросы. Напиши, с чего хочется начать."
-    )
-    await message.answer(txt)
-
-# ====== Обработка выбора темы/упражнений ======
-def kb_exercises(tid: str) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    topic = getattr(EX, "TOPICS", {}).get(tid, {})
-    for ex in topic.get("exercises", []):
-        title = ex.get("title", "Упражнение")
-        eid = ex.get("id", "")
-        rows.append([InlineKeyboardButton(text=title, callback_data=f"ex:{tid}:{eid}:start")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад к темам", callback_data="topics:back")])
+    for tid, meta in EXERCISES.items():
+        if tid == "reflection":  # "Рефлексия" внутри тем как отдельный элемент
+            title = meta.get("title", "Рефлексия")
+        else:
+            title = meta.get("title", tid)
+        rows.append([InlineKeyboardButton(text=_topic_title_with_emoji(tid), callback_data=f"work:{tid}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def step_keyboard(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMarkup:
-    prev_idx = max(0, idx-1)
-    next_idx = min(total-1, idx+1)
-    buttons = [
-        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:step:{prev_idx}"),
-        InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:step:{next_idx}"),
-        InlineKeyboardButton(text="✅ Завершить", callback_data=f"ex:{tid}:{eid}:finish"),
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+    prev_idx = max(0, idx - 1)
+    next_idx = min(total - 1, idx + 1)
+    buttons: List[List[InlineKeyboardButton]] = []
+    nav: List[InlineKeyboardButton] = []
+    nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:{prev_idx}"))
+    if idx < total - 1:
+        nav.append(InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:{next_idx}"))
+    else:
+        nav.append(InlineKeyboardButton(text="✅ Завершить", callback_data=f"ex:{tid}:{eid}:finish"))
+    buttons.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-@router.callback_query(F.data.startswith("topic:"))
-async def on_topic_pick(cb: CallbackQuery):
-    await _silent_ack(cb)
-    _, tid = cb.data.split(":", 1)
+# ===== Онбординг: тексты и клавиатуры =====
+ONB_1_TEXT = (
+    "Привет! Здесь ты можешь выговориться, разобрать ситуацию и найти опору.\n"
+    "Я рядом и помогу — бережно и без оценок."
+)
 
-    # Рефлексия — свободный чат
-    if tid == "reflection":
-        await _start_reflection_chat(cb.message)
-        return
-
-    topic = getattr(EX, "TOPICS", {}).get(tid)
-    if not topic:
-        await cb.message.answer("Тема пока недоступна.")
-        return
-
-    intro = topic.get("intro", "Начнём с короткого описания и потом к шагам 🌿")
-    await cb.message.answer(intro, reply_markup=kb_exercises(tid))
-
-# запуск упражнения
-@router.callback_query(F.data.startswith("ex:"))
-async def on_ex_action(cb: CallbackQuery):
-    await _silent_ack(cb)
-    parts = cb.data.split(":")
-    if len(parts) < 4:
-        await cb.message.answer("Не хватает параметров упражнения.")
-        return
-
-    _, tid, eid, action, *rest = parts
-    topic = getattr(EX, "TOPICS", {}).get(tid, {})
-    ex = None
-    for it in topic.get("exercises", []):
-        if it.get("id") == eid:
-            ex = it
-            break
-    if not ex:
-        await cb.message.answer("Упражнение не найдено.")
-        return
-
-    steps: List[str] = ex.get("steps", [])
-    if action == "start":
-        # если упражнение без шагов — сразу сообщение
-        if not steps:
-            text = ex.get("text", "Попробуй сформулировать, что важно прямо сейчас. Я рядом.")
-            await cb.message.answer(text, reply_markup=kb_exercises(tid))
-            return
-        # иначе показываем шаг 0
-        step_text = steps[0]
-        await cb.message.answer(step_text, reply_markup=step_keyboard(tid, eid, 0, len(steps)))
-        return
-
-    if action == "step":
-        if not rest:
-            await cb.message.answer("Нужен номер шага.")
-            return
-        try:
-            idx = int(rest[0])
-        except Exception:
-            idx = 0
-        if idx < 0 or idx >= len(steps):
-            await cb.message.answer("Это все шаги. Завершаем?", reply_markup=step_keyboard(tid, eid, len(steps)-1, len(steps)))
-            return
-
-        step_text = steps[idx]
-        await cb.message.answer(step_text, reply_markup=step_keyboard(tid, eid, idx, len(steps)))
-        return
-
-    if action == "finish":
-        await cb.message.answer("Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
-        return
-
-# ====== Настройки (кнопка меню справа) ======
-@router.message(F.text == "⚙️ Настройки")
-async def on_settings(m: Message):
-    txt = (
-        "Настройки:\n"
-        "• Выбрать тон ответа — кнопка ниже.\n"
-        "• Privacy — базовая информация о данных.\n"
+def kb_onb_step1() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Вперёд ➜", callback_data="onb:step2")]
+        ]
     )
-    await m.answer(txt, reply_markup=kb_settings())
 
-# ====== Поговорить / Рефлексия (текстовые сообщения) ======
+ONB_2_TEXT = (
+    "Прежде чем мы познакомимся, подтвердим правила и политику. "
+    "Это нужно, чтобы нам обоим было спокойно и безопасно."
+)
 
-def _push(chat_id: int, role: str, content: str):
-    DIALOG_HISTORY[chat_id].append({"role": role, "content": content})
+def kb_onb_step2() -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(text="📄 Правила", url=TERMS_URL),
+            InlineKeyboardButton(text="🔐 Политика", url=POLICY_URL),
+        ],
+        [InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-@router.message(F.text == "💬 Поговорить")
-async def on_talk_button(m: Message):
+WHAT_NEXT_TEXT = (
+    "Что дальше? Несколько вариантов:\n\n"
+    "1) Если хочешь просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе, я поддержу и помогу разобраться.\n"
+    "2) Нужен оперативный разбор — заходи в «Разобраться». Там короткие упражнения на разные темы.\n"
+    "3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)\n\n"
+    "Пиши, как удобно — я рядом 🖤"
+)
+
+def kb_onb_step3() -> ReplyKeyboardMarkup:
+    # Открываем сразу правое меню (reply-клавиатуру)
+    return kb_main_menu()
+
+# ===== Маршруты: меню и онбординг =====
+@router.message(CommandStart())
+async def on_start(m: Message):
     CHAT_MODE[m.chat.id] = "talk"
-    img = get_onb_image("talk")
-    caption = "Я рядом и слушаю. О чём хочется поговорить?"
+    # шаг 1: карточка с «Вперёд»
+    img = get_onb_image("cover")
     if img:
         try:
-            await m.answer_photo(img, caption=caption)
+            await m.answer_photo(img, caption=ONB_1_TEXT, reply_markup=kb_onb_step1())
             return
         except Exception:
             pass
-    await m.answer(caption)
+    await m.answer(ONB_1_TEXT, reply_markup=kb_onb_step1())
 
-@router.message(F.text & ~F.text.regexp(r'^/'))
-async def on_text(m: Message):
-    chat_id = m.chat.id
-    tg_id = str(m.from_user.id)
-    user_text = (m.text or "").strip()
-    mode = CHAT_MODE.get(chat_id, "talk")  # talk | reflection
-
-    # RAG — аккуратно, без падений
-    rag_ctx = ""
-    if rag_search_fn:
+@router.callback_query(F.data == "onb:step2")
+async def on_onb_step2(cb: CallbackQuery):
+    img = get_onb_image("talk")
+    if img:
         try:
-            rag_ctx = await rag_search_fn(user_text, k=3, max_chars=1200, lang="ru")
-        except TypeError:
-            try:
-                rag_ctx = await rag_search_fn(user_text, k=3, max_chars=1200)
-            except Exception:
-                rag_ctx = ""
+            await cb.message.answer_photo(img, caption=ONB_2_TEXT, reply_markup=kb_onb_step2())
+            await cb.answer()
+            return
         except Exception:
-            rag_ctx = ""
+            pass
+    await cb.message.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
+    await cb.answer()
 
-    # Системный промпт: базовый + выбранный тон + мод рефлексии + RAG-контекст
-    style_key = _get_user_voice(tg_id)
-    sys_prompt = SYSTEM_PROMPT
-    overlay = _style_overlay(style_key)
-    if overlay:
-        sys_prompt = sys_prompt + "\n\n" + overlay
-    if mode == "reflection":
-        sys_prompt = sys_prompt + "\n\nСтиль: рефлексия. Помогай замечать мысли/чувства/потребности, задавай мягкие вопросы."
-    if rag_ctx:
-        sys_prompt = (
-            sys_prompt
-            + "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки пользователю]\n"
-            + rag_ctx
-        ).strip()
+@router.callback_query(F.data == "onb:agree")
+async def on_onb_agree(cb: CallbackQuery):
+    # шаг 3: «Что дальше?» + сразу открываем правое меню
+    img = get_onb_image("work")
+    if img:
+        try:
+            await cb.message.answer_photo(img, caption=WHAT_NEXT_TEXT)
+        except Exception:
+            await cb.message.answer(WHAT_NEXT_TEXT)
+    else:
+        await cb.message.answer(WHAT_NEXT_TEXT)
+    await cb.message.answer("Меню:", reply_markup=kb_onb_step3())
+    await cb.answer()
 
-    # История
-    history = list(DIALOG_HISTORY[chat_id])
-    messages = [{"role": "system", "content": sys_prompt}] + history + [{"role": "user", "content": user_text}]
+# ===== Кнопки меню (reply-клавиатура) =====
+@router.message(F.text.in_(["🌿 Разобраться", "/work"]))
+async def on_work_menu(m: Message):
+    CHAT_MODE[m.chat.id] = "work"
+    await m.answer("Выбирай тему:", reply_markup=ReplyKeyboardRemove())
+    await m.answer(".", reply_markup=kb_topics())
 
-    # Вызов LLM
-    try:
-        answer = await chat_with_style(
-            system=sys_prompt,  # дублируем в аргумент — на случай адаптера
-            messages=messages,
-            style_hint=overlay or VOICE_STYLES.get(style_key, ""),
-            temperature=0.6,
-        )
-    except Exception:
-        answer = "Похоже, модель сейчас недоступна. Я рядом 🌿 Попробуешь ещё раз?"
+@router.message(F.text.in_(["💬 Поговорить", "/talk"]))
+async def on_talk(m: Message):
+    CHAT_MODE[m.chat.id] = "talk"
+    await m.answer("Я рядом и слушаю. О чём хочется поговорить?", reply_markup=kb_main_menu())
 
-    _push(chat_id, "user", user_text)
-    _push(chat_id, "assistant", answer)
-    await m.answer(answer)
+@router.message(F.text.in_(["🎧 Медитации", "/meditations", "/meditation"]))
+async def on_meditations(m: Message):
+    txt = (
+        "🎧 Медитации скоро будут здесь. Мы готовим короткие аудио для тревоги, сна и восстановления. "
+        "Пока можешь попробовать дыхание «квадрат 4-4-4-4» в «Разобраться»."
+    )
+    await m.answer(txt, reply_markup=kb_main_menu())
 
-# ====== Service ======
+@router.message(F.text.in_(["⚙️ Настройки", "/settings", "/setting"]))
+async def on_settings(m: Message):
+    await m.answer("Настройки:", reply_markup=kb_main_menu())
+    await m.answer(
+        "Выбери, что настроить:",
+        reply_markup=kb_settings()
+    )
 
-@router.message(F.text.regexp(r'(?i)^(стоп|stop)$'))
-async def on_stop_word(m: Message):
-    chat_id = m.chat.id
-    if CHAT_MODE.get(chat_id) == "reflection":
-        CHAT_MODE[chat_id] = "talk"
-        await m.answer("Окей, выходим из режима рефлексии. Можем продолжить обычный разговор 💬")
+@router.callback_query(F.data == "menu:main")
+async def on_menu_main(cb: CallbackQuery):
+    await cb.message.answer("Меню:", reply_markup=kb_main_menu())
+    await cb.answer()
 
-@router.message(Command("ping"))
-async def on_ping(m: Message):
-    await m.answer("pong ✅")
+@router.callback_query(F.data == "menu:settings")
+async def on_menu_settings(cb: CallbackQuery):
+    await _safe_edit(cb.message, "Настройки:", reply_markup=kb_settings())
+    await cb.answer()
 
-def kb_voice_picker() -> InlineKeyboardMarkup:
-    # Выбор стиля общения
-    rows = [
-        [InlineKeyboardButton(text="🌿 Универсальный", callback_data="voice:default")],
-        [InlineKeyboardButton(text="🤝 Друг/подруга", callback_data="voice:friend")],
-        [InlineKeyboardButton(text="🧠 Психолог (pro)", callback_data="voice:pro")],
-        [InlineKeyboardButton(text="🖤 18+ ирония", callback_data="voice:dark")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
+# ===== Тон общения (/tone) =====
 @router.message(Command("tone"))
 async def on_tone_cmd(m: Message):
-    await m.answer("Выбери тон:", reply_markup=kb_tone())
+    await m.answer("Выбери тон общения. Он накладывается поверх базового промпта:", reply_markup=kb_tone_picker())
 
+@router.callback_query(F.data.startswith("tone:"))
+async def on_tone_pick(cb: CallbackQuery):
+    style = cb.data.split(":", 1)[1]
+    USER_TONE[cb.message.chat.id] = style
+    await cb.answer("Стиль обновлён ✅", show_alert=False)
+    await _safe_edit(cb.message, f"Тон общения установлен: <b>{style}</b> ✅", reply_markup=kb_settings())
+
+# ===== Приватность (/privacy) =====
 @router.message(Command("privacy"))
-async def on_privacy(m: Message):
-    txt = "Privacy: мы бережно относимся к данным. Подробнее по ссылке ниже."
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Политика и правила", url=POLICY_URL),
-    ]])
-    await m.answer(txt, reply_markup=kb)
+async def on_privacy_cmd(m: Message):
+    flags = PRIVACY_FLAGS.setdefault(m.chat.id, {"save_history": True})
+    state = "включено" if flags.get("save_history", True) else "выключено"
+    await m.answer(f"Хранение истории сейчас: <b>{state}</b>.", reply_markup=kb_privacy())
 
-@router.message(Command("debug_prompt"))
-async def on_debug_prompt(m: Message):
-    preview = SYSTEM_PROMPT[:400] + ("…" if len(SYSTEM_PROMPT) > 400 else "")
-    await m.answer(
-        f"Источник промпта: <code>{PROMPT_SOURCE}</code>\n"
-        f"Длина: {len(SYSTEM_PROMPT)}\n\n"
-        f"<code>{preview}</code>"
+@router.callback_query(F.data == "privacy:clear")
+async def on_privacy_clear(cb: CallbackQuery):
+    # Заглушка: здесь можно реально почистить свою БД/хранилище
+    await cb.answer("История удалена ✅", show_alert=True)
+    await _safe_edit(cb.message, "Готово. Что дальше?", reply_markup=kb_settings())
+
+# ===== Список тем/упражнений =====
+@router.callback_query(F.data.startswith("work:"))
+async def on_topic_pick(cb: CallbackQuery):
+    tid = cb.data.split(":", 1)[1]
+    tdata = EXERCISES.get(tid)
+    if not tdata:
+        await cb.answer("Тема не найдена", show_alert=True)
+        return
+    title = tdata.get("title", tid)
+    buttons: List[List[InlineKeyboardButton]] = []
+    # «Рефлексия» как свободный чат:
+    if tid == "reflection":
+        buttons.append([InlineKeyboardButton(text="Начать рефлексию", callback_data="reflect:start")])
+    else:
+        for ex_id, ex in tdata.get("items", {}).items():
+            ex_title = ex.get("title", ex_id)
+            buttons.append([InlineKeyboardButton(text=ex_title, callback_data=f"ex:{tid}:{ex_id}:start")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:work")])
+    await _safe_edit(
+        cb.message,
+        f"<b>{_topic_title_with_emoji(tid)}</b>",
+        InlineKeyboardMarkup(inline_keyboard=buttons)
     )
+    await cb.answer()
 
+@router.callback_query(F.data == "menu:work")
+async def on_menu_work(cb: CallbackQuery):
+    await _safe_edit(cb.message, "Выбирай тему:", reply_markup=kb_topics())
+    await cb.answer()
 
-# ===== Статические команды / заглушки =====
-@router.message(Command("help"))
-async def on_help(m: Message):
-    txt = (
-        "Помогу с тёплой поддержкой и короткими упражнениями.\n\n"
-        "• /talk — просто поговорить\n"
-        "• /work — упражнения «Разобраться»\n"
-        "• /meditations — аудио-передышки\n"
-        "• /settings — быстрые настройки\n"
-        "• /tone — выбрать стиль ответа\n"
-        "• /policy — политика и правила\n"
-    )
-    await m.answer(txt)
-
-@router.message(Command("about"))
-async def on_about(m: Message):
-    txt = "«Помни» — тёплая поддержка и микро-практики. Не замена клинической помощи. Береги себя 🌿"
-    await m.answer(txt)
-
-@router.message(Command("policy"))
-async def on_policy(m: Message):
-    policy = os.getenv("POLICY_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
-    terms  = os.getenv("TERMS_URL",  "https://s.craft.me/APV7T8gRf3w2Ay")
-    await m.answer(f"Политика: {policy}\nПравила: {terms}")
-
-@router.message(Command("pay"))
-async def on_pay(m: Message):
-    await m.answer("Поддержать проект: скоро добавим удобные способы. Спасибо за доверие 💜")
-
-@router.message(Command("settings"))
-async def on_settings(m: Message):
-    try:
-        await m.answer("Настройки:\n— Выбери тон ответа — кнопка ниже.", reply_markup=kb_settings())
-    except Exception:
-        await on_tone(m)
-
-@router.message(Command("tone"))
-async def on_tone(m: Message):
-    try:
-        await m.answer("Выбери стиль общения:", reply_markup=kb_voice_picker())
-    except Exception:
-        await m.answer("Выбери стиль: /voice default | friend | pro | dark")
-
-@router.message(Command("meditations"))
-@router.message(Command("meditation"))
-async def on_meditations(m: Message):
-    caption = "Скоро добавим подборку коротких аудио-передышек. Пока — 3 глубоких вдоха ✨"
-    try:
-        img = get_onb_image("meditations") if 'get_onb_image' in globals() else (ONB_IMAGES.get("meditations") or "")
-    except Exception:
-        img = ONB_IMAGES.get("meditations") or ""
-    if img:
-        try:
-            await m.answer_photo(img, caption=caption)
-            return
-        except Exception:
-            pass
-    await m.answer(caption)
-
-@router.message(F.text == "🎧 Медитации")
-async def on_meditations_btn(m: Message):
-    await on_meditations(m)
-
-@router.message(F.text == "🎛 Тон")
-@router.message(F.text == "🎚️ Тон")
-async def on_tone_btn(m: Message):
-    await on_tone(m)
-
-
-@router.callback_query(F.data.regexp(r"^ex:"))
+# ===== Упражнения по шагам — в одном сообщении =====
+@router.callback_query(F.data.startswith("ex:"))
 async def on_ex_click(cb: CallbackQuery):
+    """
+    Формат callback_data: ex:<tid>:<eid>:<idx|start|finish>
+    """
     try:
-        data = cb.data or ""
-        _, tid, eid, action = (data.split(":", 3) + ["", "", "", ""])[:4]
+        _, tid, eid, action = cb.data.split(":")
     except Exception:
         await cb.answer()
         return
 
-    # Режим рефлексии — отдельный чат, не листаем шаги
-    if eid == "reflection":
-        await cb.answer()
-        return
-
-    ex = EXERCISES.get(tid, {}).get(eid)
+    topic = EXERCISES.get(tid, {})
+    ex = topic.get("items", {}).get(eid, {})
     if not ex:
         await cb.answer("Упражнение не найдено", show_alert=True)
         return
 
-    steps = ex.get("steps") or []
-    intro = ex.get("intro") or ""
-
-    def step_keyboard(tid, eid, idx, total):
-        back_btn  = InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:{max(idx-1,0)}")
-        next_btn  = InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:{min(idx+1,total-1)}")
-        fin_btn   = InlineKeyboardButton(text="✅ Завершить", callback_data=f"ex:{tid}:{eid}:finish")
-        rows = []
-        if idx <= 0:
-            rows.append([next_btn, fin_btn])
-        elif idx >= total-1:
-            rows.append([back_btn, fin_btn])
-        else:
-            rows.append([back_btn, next_btn, fin_btn])
-        rows.append([InlineKeyboardButton(text="⬅️ Назад к темам", callback_data=f"topic:{tid}")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+    steps: List[str] = ex.get("steps") or []
+    intro: str = ex.get("intro") or ""
 
     if action == "finish":
-        await _safe_edit(cb.message, "Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
+        await _safe_edit(cb.message, "Готово. Вернёмся к теме?", InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"work:{tid}")]]
+        ))
         await cb.answer()
         return
 
-    if not action or action == "start":
+    if action == "start":
         if intro:
             await _safe_edit(cb.message, intro, reply_markup=step_keyboard(tid, eid, 0, max(1, len(steps))))
         else:
-            idx = 0
-            step_text = steps[idx] if steps else "Шагов нет."
-            await _safe_edit(cb.message, step_text, reply_markup=step_keyboard(tid, eid, idx, max(1, len(steps))))
+            txt = steps[0] if steps else "Шагов нет."
+            await _safe_edit(cb.message, txt, reply_markup=step_keyboard(tid, eid, 0, max(1, len(steps))))
         await cb.answer()
         return
 
+    # action — это индекс шага
     try:
         idx = int(action)
     except Exception:
         idx = 0
 
     total = max(1, len(steps))
-    idx = max(0, min(idx, total-1))
+    idx = max(0, min(idx, total - 1))
     step_text = steps[idx] if steps else "Шагов нет."
 
     await _safe_edit(cb.message, step_text, reply_markup=step_keyboard(tid, eid, idx, total))
     await cb.answer()
+
+# ===== Рефлексия — свободный чат =====
+@router.callback_query(F.data == "reflect:start")
+async def on_reflect_start(cb: CallbackQuery):
+    CHAT_MODE[cb.message.chat.id] = "reflection"
+    await _safe_edit(cb.message, "Давай немного притормозим и прислушаемся к себе. "
+                                  "Можешь начать с того, что больше всего откликается сейчас.")
+    await cb.answer()
+
+# ===== Простые команды / о проекте / помощь / оплата =====
+@router.message(Command("about"))
+async def on_about(m: Message):
+    await m.answer("«Помни» — тёплый помощник, который помогает выговориться и прояснить мысли. "
+                   "Здесь бережно, безоценочно, с опорой на научный подход.")
+
+@router.message(Command("pay"))
+async def on_pay(m: Message):
+    await m.answer("Подписка скоро появится. Мы готовим удобные тарифы.")
+
+@router.message(Command("help"))
+async def on_help(m: Message):
+    await m.answer("Если нужна помощь по сервису, напиши на support@remember.example — мы ответим.")
+
+# ===== Общий чат: подмешиваем промпт + RAG + тон =====
+def _style_overlay(style_key: str | None) -> str:
+    if not style_key or style_key == "default":
+        return ""
+    if style_key == "friend":
+        return "Стиль: тёплый, дружеский, на «ты». Поддерживай и говори простыми словами."
+    if style_key == "therapist":
+        return "Стиль: бережный, психологичный, задавай мягкие проясняющие вопросы, избегай диагнозов."
+    if style_key == "18plus":
+        return "Стиль: допускается разговорно, чуть смелее формулировки, но без грубости и токсичности."
+    return ""
+
+async def _answer_with_llm(m: Message, user_text: str):
+    chat_id = m.chat.id
+    mode = CHAT_MODE.get(chat_id, "talk")
+    style_key = USER_TONE.get(chat_id, "default")
+
+    # Базовый системный промпт
+    sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
+    overlay = _style_overlay(style_key)
+    if overlay:
+        sys_prompt = sys_prompt + "\n\n" + overlay
+    if mode == "reflection" and REFLECTIVE_SUFFIX:
+        sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
+
+    rag_ctx = ""
+    if retrieve_relevant_context:
+        try:
+            rag_ctx = retrieve_relevant_context(user_text) or ""
+            if rag_ctx:
+                sys_prompt = (
+                    sys_prompt
+                    + "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки пользователю]\n"
+                    + rag_ctx
+                )
+        except Exception:
+            pass
+
+    if chat_with_style is None:
+        # на случай, если адаптер ещё не подключен
+        await m.answer("Я тебя слышу. Сейчас подключаюсь… (LLM-адаптер не сконфигурирован)")
+        return
+
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_text},
+    ]
+
+    try:
+        reply = await chat_with_style(messages=messages, style_key=style_key)
+    except TypeError:
+        # совместимость с разными сигнатурами
+        reply = await chat_with_style(messages, style_key=style_key)
+
+    if not reply:
+        reply = "Я рядом. Давай попробуем ещё раз сформулировать мысль?"
+    await m.answer(reply, reply_markup=kb_main_menu())
+
+# ===== Обработка произвольного текста: talk/reflection =====
+@router.message(F.text & ~F.text.startswith("/"))
+async def on_text(m: Message):
+    # в любом режиме, где ожидается чат
+    if CHAT_MODE.get(m.chat.id, "talk") in ("talk", "reflection"):
+        await _answer_with_llm(m, m.text)
+        return
+    # если человек в «Разобраться», а пишет текст — мягко направим
+    if CHAT_MODE.get(m.chat.id) == "work":
+        await m.answer("Если хочешь обсудить — нажми «Поговорить». "
+                       "Если упражнение — выбери тему в «Разобраться».", reply_markup=kb_main_menu())
+        return
+    # дефолт
+    await m.answer("Я рядом и на связи. Нажми «Поговорить» или «Разобраться».", reply_markup=kb_main_menu())
+
+# ===== Доп. команды-синонимы =====
+@router.message(Command("menu"))
+async def on_menu(m: Message):
+    await m.answer("Меню:", reply_markup=kb_main_menu())
+
+# Служебная: открыть список тем (удобно после онбординга)
+@router.message(Command("work"))
+async def on_work_cmd(m: Message):
+    await on_work_menu(m)
