@@ -15,6 +15,14 @@ from typing import Dict, Deque, Optional, Tuple, List, Any
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
+WHAT_NEXT_TEXT = """Что дальше? Несколько вариантов:
+
+1) Если хочешь просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе, а я поддержу и помогу разобраться.
+2) Нужен оперативный разбор — заходи в «Разобраться». Там короткие упражнения на разные темы.
+3) Хочешь аудио-передышку — «Медитации». (Скоро добавим подборку коротких аудио.)
+
+Пиши, как удобно — я рядом 🖤"""
+
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import types
 from aiogram.filters import Command
@@ -353,6 +361,21 @@ async def on_start(m: Message):
             pass
     await m.answer(caption, reply_markup=kb_onb_step1())
 
+
+
+# ===== Хелперы для показа шагов упражнений =====
+def _step_kb(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMarkup:
+    buttons = []
+    nav = []
+    if idx > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:{idx-1}"))
+    if idx < total - 1:
+        nav.append(InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:{idx+1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="✅ Завершить", callback_data=f"ex:{tid}:{eid}:finish")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 @router.callback_query(F.data == "onb:start")
 async def on_onb_start(cb: CallbackQuery):
     await _silent_ack(cb)
@@ -382,12 +405,21 @@ async def on_onb_start(cb: CallbackQuery):
     await _safe_edit_text(cb.message, caption, reply_markup=kb_onb_step2())
 
 @router.callback_query(F.data == "onb:agree")
-async def on_onb_agree(cb: CallbackQuery):
-    await _silent_ack(cb)
-    caption = onb_text_3()
-    await _safe_edit_text(cb.message, caption, reply_markup=kb_onb_step3())
+async def onb_agree(cb: CallbackQuery):
+    # Экран 3 — просто текст + меню
+    try:
+        await cb.message.delete_reply_markup()
+    except Exception:
+        pass
+    await cb.message.answer(WHAT_NEXT_TEXT)
+    # показать главное меню (если есть функция kb_main)
+    try:
+        await cb.message.answer("Меню:", reply_markup=kb_main())
+    except Exception:
+        pass
+    await cb.answer()
 
-# ====== Меню ======
+
 @router.callback_query(F.data == "menu:work")
 async def on_menu_work(cb: CallbackQuery):
     await _silent_ack(cb)
@@ -769,3 +801,93 @@ async def on_meditations_btn(m: Message):
 @router.message(F.text == "🎚️ Тон")
 async def on_tone_btn(m: Message):
     await on_tone(m)
+
+
+@router.callback_query(F.data.regexp(r"^ex:"))
+async def on_ex_click(cb: CallbackQuery):
+    # Формат: ex:{topic_id}:{exercise_id}:{idx|finish}
+    try:
+        _, tid, eid, action = cb.data.split(":")
+    except Exception:
+        await cb.answer()
+        return
+
+    # «Рефлексия» — отдельный режим, здесь игнорируем (на неё отдельный хендлер)
+    if eid == "reflection":
+        await cb.answer()
+        return
+
+    ex = EXERCISES.get(tid, {}).get(eid)
+    if not ex:
+        await cb.answer("Упражнение не найдено", show_alert=True)
+        return
+
+    steps = ex.get("steps") or []
+    intro = ex.get("intro") or ""
+
+    # «finish» — завершаем и возвращаемся к списку упражнений темы
+    if action == "finish":
+        await cb.answer("Готово 🌿")
+        try:
+            await cb.message.edit_text(
+                "Готово. Вернёмся к теме?",
+                reply_markup=kb_exercises(tid)
+            )
+        except Exception:
+            await cb.message.answer("Готово. Вернёмся к теме?", reply_markup=kb_exercises(tid))
+        return
+
+    # Если пришёл индекс шага — рендерим в одном и том же сообщении
+    try:
+        idx = int(action)
+    except Exception:
+        idx = 0
+
+    total = max(1, len(steps))
+    # Первый раз: если есть intro и idx == 0 и у шага нет текста — покажем intro
+    if idx == 0 and intro and not (steps and isinstance(steps[0], str) and steps[0].strip()):
+        step_text = intro.strip()
+    else:
+        # Безопасно возьмём шаг
+        step_text = steps[idx] if idx < len(steps) else steps[-1] if steps else "Шаг"
+
+    # Тёплый формат — добавим шапку с прогрессом
+    head = f"<b>Шаг {idx+1} из {total}</b>\n\n" if total > 1 else ""
+    text = head + step_text.strip()
+
+    try:
+        await cb.message.edit_text(text, reply_markup=_step_kb(tid, eid, idx, total))
+    except Exception:
+        # если старое сообщение нельзя редактировать (например, слишком старое) — ответим новым
+        await cb.message.answer(text, reply_markup=_step_kb(tid, eid, idx, total))
+    await cb.answer()
+
+
+
+@router.message(Command("work"))
+@router.message(F.text == "🌿 Разобраться")
+async def on_work(m: Message):
+    # картинка раздела (если настроена)
+    img = DEFAULT_ONB_IMAGES.get("work", "")
+    caption = "Выбирай тему — и начнём с короткой, тёплой практики."
+    if img:
+        try:
+            await m.answer_photo(img, caption=caption, reply_markup=kb_topics())
+            return
+        except Exception:
+            pass
+    await m.answer(caption, reply_markup=kb_topics())
+
+
+@router.message(Command("talk"))
+@router.message(F.text == "💬 Поговорить")
+async def on_talk(m: Message):
+    img = DEFAULT_ONB_IMAGES.get("talk", "")
+    caption = "Я рядом и слушаю. О чём хочется поговорить?"
+    if img:
+        try:
+            await m.answer_photo(img, caption=caption)
+            return
+        except Exception:
+            pass
+    await m.answer(caption)
