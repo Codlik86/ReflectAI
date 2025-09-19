@@ -7,6 +7,31 @@ app/bot.py — ReflectAI
 from __future__ import annotations
 from .exercises import EXERCISES
 
+
+# ===== Хелпер для редактирования сообщений без спама =====
+async def _safe_edit(msg, text=None, reply_markup=None):
+    # Аккуратно редактирует текущее сообщение.
+    # Если можно — редактирует текст и/или клавиатуру.
+    # Если Telegram говорит "message is not modified" — пробуем обновить только клавиатуру.
+    # Если редактирование не удалось — отправляем новое сообщение.
+    try:
+        if text is not None:
+            await msg.edit_text(text, reply_markup=reply_markup)
+        else:
+            await msg.edit_reply_markup(reply_markup=reply_markup)
+        return
+    except Exception as e:
+        try:
+            if "message is not modified" in str(e).lower() and reply_markup is not None:
+                await msg.edit_reply_markup(reply_markup=reply_markup)
+                return
+        except Exception:
+            pass
+    if text is not None:
+        await msg.answer(text, reply_markup=reply_markup)
+    elif reply_markup is not None:
+        await msg.answer(" ", reply_markup=reply_markup)
+
 import os
 import sqlite3
 import hashlib
