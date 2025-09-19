@@ -14,6 +14,9 @@ from collections import defaultdict, deque
 from typing import Dict, Deque, Optional, Tuple, List, Any
 
 from aiogram import Router, F
+from aiogram.filters import Command, CommandStart, Text
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import types
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery,
@@ -353,7 +356,29 @@ async def on_start(m: Message):
 @router.callback_query(F.data == "onb:start")
 async def on_onb_start(cb: CallbackQuery):
     await _silent_ack(cb)
-    caption = onb_text_2()
+    caption = onb_text_2() if 'onb_text_2' in globals() else "Привет. Я — бот эмоциональной поддержки. Продолжая, ты подтверждаешь правила и политику сервиса."
+    # пробуем картинку, иначе просто текст
+    img = None
+    try:
+        img = get_onb_image("cover") if 'get_onb_image' in globals() else (ONB_IMAGES.get("cover") or "")
+    except Exception:
+        img = ONB_IMAGES.get("cover") or ""
+    if img:
+        # сначала пробуем отредактировать медиа, если первое сообщение было фото
+        try:
+            await cb.message.edit_media(
+                media=types.InputMediaPhoto(media=img, caption=caption),
+                reply_markup=kb_onb_step2()
+            )
+            return
+        except Exception:
+            pass
+        # если отредактировать не получилось — пришлём новое фото
+        try:
+            await cb.message.answer_photo(img, caption=caption, reply_markup=kb_onb_step2())
+            return
+        except Exception:
+            pass
     await _safe_edit_text(cb.message, caption, reply_markup=kb_onb_step2())
 
 @router.callback_query(F.data == "onb:agree")
@@ -664,3 +689,72 @@ async def on_debug_prompt(m: Message):
         f"Длина: {len(SYSTEM_PROMPT)}\n\n"
         f"<code>{preview}</code>"
     )
+
+
+# ===== Статические команды / заглушки =====
+@router.message(Command("help"))
+async def on_help(m: Message):
+    txt = (
+        "Помогу с тёплой поддержкой и короткими упражнениями.\n\n"
+        "• /talk — просто поговорить\n"
+        "• /work — упражнения «Разобраться»\n"
+        "• /meditations — аудио-передышки\n"
+        "• /settings — быстрые настройки\n"
+        "• /tone — выбрать стиль ответа\n"
+        "• /policy — политика и правила\n"
+    )
+    await m.answer(txt)
+
+@router.message(Command("about"))
+async def on_about(m: Message):
+    txt = "«Помни» — тёплая поддержка и микро-практики. Не замена клинической помощи. Береги себя 🌿"
+    await m.answer(txt)
+
+@router.message(Command("policy"))
+async def on_policy(m: Message):
+    policy = os.getenv("POLICY_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
+    terms  = os.getenv("TERMS_URL",  "https://s.craft.me/APV7T8gRf3w2Ay")
+    await m.answer(f"Политика: {policy}\nПравила: {terms}")
+
+@router.message(Command("pay"))
+async def on_pay(m: Message):
+    await m.answer("Поддержать проект: скоро добавим удобные способы. Спасибо за доверие 💜")
+
+@router.message(Command("settings"))
+async def on_settings(m: Message):
+    try:
+        await m.answer("Настройки:\n— Выбери тон ответа — кнопка ниже.", reply_markup=kb_settings())
+    except Exception:
+        await on_tone(m)
+
+@router.message(Command("tone"))
+async def on_tone(m: Message):
+    try:
+        await m.answer("Выбери стиль общения:", reply_markup=kb_voice_picker())
+    except Exception:
+        await m.answer("Выбери стиль: /voice default | friend | pro | dark")
+
+@router.message(Command("meditations"))
+@router.message(Command("meditation"))
+async def on_meditations(m: Message):
+    caption = "Скоро добавим подборку коротких аудио-передышек. Пока — 3 глубоких вдоха ✨"
+    try:
+        img = get_onb_image("meditations") if 'get_onb_image' in globals() else (ONB_IMAGES.get("meditations") or "")
+    except Exception:
+        img = ONB_IMAGES.get("meditations") or ""
+    if img:
+        try:
+            await m.answer_photo(img, caption=caption)
+            return
+        except Exception:
+            pass
+    await m.answer(caption)
+
+@router.message(F.text == "🎧 Медитации")
+async def on_meditations_btn(m: Message):
+    await on_meditations(m)
+
+@router.message(F.text == "🎛 Тон")
+@router.message(F.text == "🎚️ Тон")
+async def on_tone_btn(m: Message):
+    await on_tone(m)
