@@ -16,7 +16,6 @@ from typing import Dict, Deque, Optional, Tuple, List, Any
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters.text import Text
 from aiogram import types
 from aiogram.filters import Command
 from aiogram.types import (
@@ -669,6 +668,17 @@ async def on_stop_word(m: Message):
 @router.message(Command("ping"))
 async def on_ping(m: Message):
     await m.answer("pong ✅")
+
+def kb_voice_picker() -> InlineKeyboardMarkup:
+    # Выбор стиля общения
+    rows = [
+        [InlineKeyboardButton(text="🌿 Универсальный", callback_data="voice:default")],
+        [InlineKeyboardButton(text="🤝 Друг/подруга", callback_data="voice:friend")],
+        [InlineKeyboardButton(text="🧠 Психолог (pro)", callback_data="voice:pro")],
+        [InlineKeyboardButton(text="🖤 18+ ирония", callback_data="voice:dark")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 @router.message(Command("tone"))
 async def on_tone_cmd(m: Message):
