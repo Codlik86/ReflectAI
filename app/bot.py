@@ -14,8 +14,9 @@ from collections import defaultdict, deque
 from typing import Dict, Deque, Optional, Tuple, List, Any
 
 from aiogram import Router, F
-from aiogram.filters import Command, CommandStart, Text
+from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters.text import Text
 from aiogram import types
 from aiogram.filters import Command
 from aiogram.types import (
