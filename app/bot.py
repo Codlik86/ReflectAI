@@ -531,17 +531,19 @@ async def _answer_with_llm(m: Message, user_text: str):
 
 @router.message(Command("debug_prompt"))
 async def on_debug_prompt(m: Message):
-    chat_id = m.chat.id
-    mode = CHAT_MODE.get(chat_id, "talk")
-    style_key = USER_TONE.get(chat_id, "default")
+    mode = CHAT_MODE.get(m.chat.id, "talk")
+    style_key = USER_TONE.get(m.chat.id, "default")
+
     sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
     overlay = _style_overlay(style_key)
     if overlay:
-        sys_prompt = sys_prompt + "\n\n" + overlay
+        sys_prompt += "\n\n" + overlay
     if mode == "reflection" and REFLECTIVE_SUFFIX:
-        sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
-    preview = sys_prompt[:900]
+        sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
+
+    preview = sys_prompt[:1200]
     await m.answer(f"<b>mode</b>: {mode}\n<b>tone</b>: {style_key}\n\n<code>{preview}</code>")
+
 # ===== Обработка произвольного текста: talk/reflection =====
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
