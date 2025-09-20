@@ -202,15 +202,24 @@ async def on_back_to_topics(cb: CallbackQuery):
     await cb.answer()
 
 def step_keyboard(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMarkup:
-    prev_idx = max(0, idx - 1)
-    next_idx = min(total - 1, idx + 1)
     buttons: List[List[InlineKeyboardButton]] = []
     nav: List[InlineKeyboardButton] = []
-    nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:{prev_idx}"))
+
+    # Назад:
+    if idx == 0:
+        # на интро уводим к списку тем
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="work:topics"))
+    else:
+        prev_idx = max(0, idx - 1)
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:{prev_idx}"))
+
+    # Далее / Завершить:
     if idx < total - 1:
+        next_idx = idx + 1
         nav.append(InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:{next_idx}"))
     else:
         nav.append(InlineKeyboardButton(text="✅ Завершить", callback_data=f"ex:{tid}:{eid}:finish"))
+
     buttons.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -323,11 +332,7 @@ async def on_meditations(m: Message):
 
 @router.message(F.text.in_(["⚙️ Настройки", "/settings", "/setting"]))
 async def on_settings(m: Message):
-    await m.answer("Настройки:", reply_markup=kb_main_menu())
-    await m.answer(
-        "Выбери, что настроить:",
-        reply_markup=kb_settings()
-    )
+    await m.answer("Настройки:", reply_markup=kb_settings())
 
 @router.callback_query(F.data == "menu:main")
 async def on_menu_main(cb: CallbackQuery):
