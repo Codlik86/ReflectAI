@@ -285,3 +285,68 @@ def purge_user_data(tg_id: str) -> int:
 
         s.commit()
     return total
+
+# === ReflectAI: безопасная очистка истории ===
+def purge_user_history(tg_id: int) -> int:
+    """
+    Удаляет записи пользователя из локального хранилища:
+    Diary (или DiaryEntry), Insight, BotEvent. Возвращает кол-во удалённых строк.
+    Безопасно пропускает отсутствующие таблицы/поля.
+    """
+    removed = 0
+    try:
+        from app.db import db_session, User
+    except Exception:
+        return 0
+
+    user = db_session.query(User).filter_by(tg_id=tg_id).one_or_none()
+    if not user:
+        return 0
+    uid = getattr(user, "id", None)
+
+    def _safe_delete(model, by_user_id=True):
+        nonlocal removed
+        if model is None:
+            return
+        try:
+            q = db_session.query(model)
+            if by_user_id and hasattr(model, "user_id") and uid is not None:
+                n = q.filter(model.user_id == uid).delete(synchronize_session=False)
+            elif hasattr(model, "tg_id"):
+                n = q.filter(model.tg_id == tg_id).delete(synchronize_session=False)
+            else:
+                return
+            removed += int(n or 0)
+        except Exception:
+            pass
+
+    Insight = Diary = BotEvent = None
+    try:
+        from app.db import Insight as _Insight
+        Insight = _Insight
+    except Exception:
+        pass
+    try:
+        from app.db import Diary as _Diary
+        Diary = _Diary
+    except Exception:
+        try:
+            from app.db import DiaryEntry as _DiaryEntry
+            Diary = _DiaryEntry
+        except Exception:
+            pass
+    try:
+        from app.db import BotEvent as _BotEvent
+        BotEvent = _BotEvent
+    except Exception:
+        pass
+
+    _safe_delete(Insight)
+    _safe_delete(Diary)
+    _safe_delete(BotEvent)
+    try:
+        db_session.commit()
+    except Exception:
+        db_session.rollback()
+        raise
+    return removed
