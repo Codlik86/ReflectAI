@@ -523,6 +523,21 @@ async def _answer_with_llm(m: Message, user_text: str):
         reply = "Я рядом. Давай попробуем ещё раз сформулировать мысль?"
     await m.answer(reply, reply_markup=kb_main_menu())
 
+
+
+@router.message(Command("debug_prompt"))
+async def on_debug_prompt(m: Message):
+    chat_id = m.chat.id
+    mode = CHAT_MODE.get(chat_id, "talk")
+    style_key = USER_TONE.get(chat_id, "default")
+    sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
+    overlay = _style_overlay(style_key)
+    if overlay:
+        sys_prompt = sys_prompt + "\n\n" + overlay
+    if mode == "reflection" and REFLECTIVE_SUFFIX:
+        sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
+    preview = sys_prompt[:900]
+    await m.answer(f"<b>mode</b>: {mode}\n<b>tone</b>: {style_key}\n\n<code>{preview}</code>")
 # ===== Обработка произвольного текста: talk/reflection =====
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
