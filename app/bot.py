@@ -202,26 +202,38 @@ async def on_back_to_topics(cb: CallbackQuery):
     await cb.answer()
 
 def step_keyboard(tid: str, eid: str, idx: int, total: int) -> InlineKeyboardMarkup:
+    prev_idx = max(0, idx - 1)
+    next_idx = min(total - 1, idx + 1)
     buttons: List[List[InlineKeyboardButton]] = []
     nav: List[InlineKeyboardButton] = []
 
-    # Назад:
+    # На первом шаге «Назад» ведёт в список упражнений темы,
+    # чтобы не уходить в «минус-шаги» и не спамить дублями
     if idx == 0:
-        # на интро уводим к списку тем
-        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data="work:topics"))
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"exlist:{tid}"))
     else:
-        prev_idx = max(0, idx - 1)
         nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex:{tid}:{eid}:{prev_idx}"))
 
-    # Далее / Завершить:
     if idx < total - 1:
-        next_idx = idx + 1
         nav.append(InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:{next_idx}"))
     else:
         nav.append(InlineKeyboardButton(text="✅ Завершить", callback_data=f"ex:{tid}:{eid}:finish"))
 
     buttons.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def step_keyboard_intro(tid: str, eid: str, total: int) -> InlineKeyboardMarkup:
+    """
+    Клавиатура для экрана интро:
+    - «Назад» → список упражнений выбранной темы
+    - «Далее» → на ПЕРВЫЙ шаг (индекс 0)
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"exlist:{tid}"),
+            InlineKeyboardButton(text="➡️ Далее", callback_data=f"ex:{tid}:{eid}:0"),
+        ]]
+    )
 
 # ===== Онбординг: тексты и клавиатуры =====
 ONB_1_TEXT = (
@@ -304,6 +316,12 @@ async def on_work_menu(m: Message):
             pass
 
     await m.answer("Выбирай тему:", reply_markup=kb_topics())
+
+@router.callback_query(F.data.startswith("exlist:"))
+async def on_exlist(cb: CallbackQuery):
+    tid = cb.data.split(":", 1)[1]
+    await _safe_edit(cb.message, topic_button_title(tid), reply_markup=kb_exercises(tid))
+    await cb.answer()
 
 @router.message(F.text.in_(["💬 Поговорить", "/talk"]))
 async def on_talk(m: Message):
@@ -476,7 +494,7 @@ async def on_ex_click(cb: CallbackQuery):
 
     if action == "start":
         text = intro or (steps[0] if steps else "Шагов нет.")
-        await _safe_edit(cb.message, text, reply_markup=step_keyboard(tid, eid, 0, total))
+        await _safe_edit(cb.message, text, reply_markup=step_keyboard_intro(tid, eid, total))
         await cb.answer()
         return
 
