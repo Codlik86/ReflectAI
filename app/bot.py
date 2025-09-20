@@ -279,8 +279,8 @@ async def on_onb_agree(cb: CallbackQuery):
 @router.message(F.text.in_(["🌿 Разобраться", "/work"]))
 async def on_work_menu(m: Message):
     CHAT_MODE[m.chat.id] = "work"
-    await m.answer("Выбирай тему:", reply_markup=ReplyKeyboardRemove())
-    await m.answer(".", reply_markup=kb_topics())
+    # одно сообщение: текст + инлайн-клавиатура тем; reply-меню остаётся видимым
+    await m.answer("Выбирай тему:", reply_markup=kb_topics())
 
 @router.message(F.text.in_(["💬 Поговорить", "/talk"]))
 async def on_talk(m: Message):
