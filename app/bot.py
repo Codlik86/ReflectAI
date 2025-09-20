@@ -375,7 +375,7 @@ async def on_privacy_clear(cb: CallbackQuery):
 async def on_settings_tone(cb: CallbackQuery):
     await _safe_edit(
         cb.message,
-        "Выбери тон общения. Он накладывается поверх базового промпта:",
+        "Выбери тон общения:",
         reply_markup=kb_tone_picker(),
     )
     await cb.answer()
@@ -392,7 +392,7 @@ async def on_settings_privacy(cb: CallbackQuery):
 # ===== Тон общения (/tone) =====
 @router.message(Command("tone"))
 async def on_tone_cmd(m: Message):
-    await m.answer("Выбери тон общения. Он накладывается поверх базового промпта:", reply_markup=kb_tone_picker())
+    await m.answer("Выбери тон общения:", reply_markup=kb_tone_picker())
 
 @router.callback_query(F.data.startswith("tone:"))
 async def on_tone_pick(cb: CallbackQuery):
@@ -548,9 +548,9 @@ def _style_overlay(style_key: str | None) -> str:
     if style_key == "friend":
         return "Стиль: тёплый, дружеский, на «ты». Поддерживай и говори простыми словами."
     if style_key == "therapist":
-        return "Стиль: бережный, психологичный, задавай мягкие проясняющие вопросы, избегай диагнозов."
+        return "Стиль: бережный, психологичный, задавай мягкие проясняющие вопросы, добавляй научные факты и избегай диагнозов."
     if style_key == "18plus":
-        return "Стиль: допускается разговорно, чуть смелее формулировки, но без грубости и токсичности."
+        return "Стиль: допускается разговорный, допускается не тяжелые ругательства, любые темы для обсуждения, смелее формулировки, без грубости, но иногда можно добавить немного ироничной токсичности."
     return ""
 
 async def _answer_with_llm(m: Message, user_text: str):
