@@ -261,3 +261,27 @@ def is_help_intent(text: str) -> bool:
         if re.search(pat, t):
             return True
     return False
+
+def purge_user_data(tg_id: str) -> int:
+    """
+    Полная очистка истории для пользователя:
+    - DiaryEntry (если есть),
+    - Insight,
+    - BotEvent, привязанные к user.id.
+    Возвращает суммарное кол-во удалённых записей (best effort).
+    """
+    total = 0
+    with db_session() as s:
+        # найдём пользователя (для BotEvent.user_id)
+        user = s.query(User).filter_by(tg_id=str(tg_id)).first()
+
+        if DiaryEntry is not None:
+            total += s.query(DiaryEntry).filter_by(tg_id=str(tg_id)).delete()  # type: ignore
+
+        total += s.query(Insight).filter_by(tg_id=str(tg_id)).delete()
+
+        if user is not None and BotEvent is not None:
+            total += s.query(BotEvent).filter(BotEvent.user_id == user.id).delete()  # type: ignore
+
+        s.commit()
+    return total
