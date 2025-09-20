@@ -158,7 +158,7 @@ def _inject_style_into_system(system_text: Optional[str], style_hint: Optional[s
             base = base + "\n\n" + style_hint.strip()
         else:
             base = style_hint.strip()
-    return base or "Вы — бережный русскоязычный ассистент без диагнозов и без медицинских рекомендаций."
+    return base or "Ты — тёплый русскоязычный собеседник и друг. Общайся на «ты», без диагнозов и медицинских рекомендаций."
 
 async def chat_with_style(
     *,
