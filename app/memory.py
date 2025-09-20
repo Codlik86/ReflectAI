@@ -286,67 +286,62 @@ def purge_user_data(tg_id: str) -> int:
         s.commit()
     return total
 
-# === ReflectAI: безопасная очистка истории ===
+# === ReflectAI: универсальная очистка истории через отражение схемы ===
 def purge_user_history(tg_id: int) -> int:
     """
-    Удаляет записи пользователя из локального хранилища:
-    Diary (или DiaryEntry), Insight, BotEvent. Возвращает кол-во удалённых строк.
-    Безопасно пропускает отсутствующие таблицы/поля.
+    Удаляет все записи пользователя из всех таблиц, где есть колонка user_id (ссылается на users.id)
+    или tg_id. Работает через отражение схемы, порядок — от детей к родителям.
+    Никогда не кидает исключения наружу. Возвращает количество удалённых строк.
     """
     removed = 0
     try:
-        from app.db import db_session, User
+        from sqlalchemy import MetaData, text
+        from app.db import db_session
     except Exception:
         return 0
 
-    user = db_session.query(User).filter_by(tg_id=tg_id).one_or_none()
-    if not user:
-        return 0
-    uid = getattr(user, "id", None)
-
-    def _safe_delete(model, by_user_id=True):
-        nonlocal removed
-        if model is None:
-            return
-        try:
-            q = db_session.query(model)
-            if by_user_id and hasattr(model, "user_id") and uid is not None:
-                n = q.filter(model.user_id == uid).delete(synchronize_session=False)
-            elif hasattr(model, "tg_id"):
-                n = q.filter(model.tg_id == tg_id).delete(synchronize_session=False)
-            else:
-                return
-            removed += int(n or 0)
-        except Exception:
-            pass
-
-    Insight = Diary = BotEvent = None
     try:
-        from app.db import Insight as _Insight
-        Insight = _Insight
+        with db_session() as s:
+            # Получаем user.id по tg_id (без ORM-классов)
+            uid = None
+            try:
+                uid = s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": tg_id}).scalar()
+            except Exception:
+                uid = None
+
+            engine = s.get_bind()
+            md = MetaData()
+            try:
+                md.reflect(bind=engine)
+            except Exception:
+                return 0
+
+            # таблицы в порядке зависимостей; для удаления идём в обратном
+            for table in reversed(list(md.sorted_tables)):
+                name = table.name.lower()
+
+                # не трогаем саму users и служебные таблицы
+                if name in {"users", "alembic_version"}:
+                    continue
+
+                cols = set(c.name for c in table.columns)
+                # приоритет — по user_id (если знаем uid), иначе по tg_id
+                try:
+                    if "user_id" in cols and uid is not None:
+                        res = s.execute(text(f"DELETE FROM {name} WHERE user_id = :uid"), {"uid": uid})
+                        removed += int(res.rowcount or 0)
+                    elif "tg_id" in cols:
+                        res = s.execute(text(f"DELETE FROM {name} WHERE tg_id = :tg"), {"tg": tg_id})
+                        removed += int(res.rowcount or 0)
+                except Exception:
+                    # глотаем любые ошибки по отдельным таблицам
+                    pass
+
+            try:
+                s.commit()
+            except Exception:
+                s.rollback()
     except Exception:
         pass
-    try:
-        from app.db import Diary as _Diary
-        Diary = _Diary
-    except Exception:
-        try:
-            from app.db import DiaryEntry as _DiaryEntry
-            Diary = _DiaryEntry
-        except Exception:
-            pass
-    try:
-        from app.db import BotEvent as _BotEvent
-        BotEvent = _BotEvent
-    except Exception:
-        pass
 
-    _safe_delete(Insight)
-    _safe_delete(Diary)
-    _safe_delete(BotEvent)
-    try:
-        db_session.commit()
-    except Exception:
-        db_session.rollback()
-        raise
     return removed
