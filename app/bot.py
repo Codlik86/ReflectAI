@@ -360,16 +360,6 @@ async def on_privacy_toggle(cb: CallbackQuery):
     )
     await cb.answer("Настройка применена")
 
-@router.callback_query(F.data == "privacy:clear")
-async def on_privacy_clear(cb: CallbackQuery):
-    # TODO: добавить реальную очистку из БД при готовности
-    await cb.answer("История удалена ✅", show_alert=True)
-    await _safe_edit(
-        cb.message,
-        "Готово. Что дальше?",
-        reply_markup=kb_privacy_for(cb.message.chat.id),
-    )
-
 # === Settings menu actions ===
 @router.callback_query(F.data == "settings:tone")
 async def on_settings_tone(cb: CallbackQuery):
@@ -407,12 +397,6 @@ async def on_privacy_cmd(m: Message):
     flags = PRIVACY_FLAGS.setdefault(m.chat.id, {"save_history": True})
     state = "включено" if flags.get("save_history", True) else "выключено"
     await m.answer(f"Хранение истории сейчас: <b>{state}</b>.", reply_markup=kb_privacy())
-
-@router.callback_query(F.data == "privacy:clear")
-async def on_privacy_clear(cb: CallbackQuery):
-    # Заглушка: здесь можно реально почистить свою БД/хранилище
-    await cb.answer("История удалена ✅", show_alert=True)
-    await _safe_edit(cb.message, "Готово. Что дальше?", reply_markup=kb_settings())
 
 # ===== Список тем/упражнений =====
 @router.callback_query(F.data.startswith("work:"))
@@ -644,3 +628,106 @@ async def on_work_cmd(m: Message):
 @router.message(Command("work"))
 async def cmd_work(m: Message):
     await _safe_edit(m, "Выбирай тему:", reply_markup=kb_topics())
+
+    # === ReflectAI: Медитации UI ===
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+
+def _kb_meditations_categories() -> InlineKeyboardMarkup:
+    from app.meditations import get_categories
+    rows = []
+    for cid, label in get_categories():
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"med:cat:{cid}")])
+    # Кнопка «Назад» возвращает этот же список, чтобы не проваливаться в минус-состояния
+    return InlineKeyboardMarkup(inline_keyboard=rows + [[
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="med:list")
+    ]])
+
+def _kb_meditations_items(cat_id: str) -> InlineKeyboardMarkup:
+    from app.meditations import get_items
+    rows = []
+    for iid, label, _ in get_items(cat_id):
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"med:play:{cat_id}:{iid}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="med:list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def _send_meditations_home(message: Message):
+    text = (
+        "🎧 Медитации\n\n"
+        "Короткие аудио, чтобы выдохнуть, заземлиться и помочь телу переключиться.\n"
+        "Выбери категорию:"
+    )
+    await message.answer(text, reply_markup=_kb_meditations_categories())
+
+@router.message(Command("meditations"))
+async def cmd_meditations(message: Message):
+    await _send_meditations_home(message)
+
+@router.callback_query(F.data == "med:list")
+async def cb_med_list(cb: CallbackQuery):
+    await cb.message.edit_text("🎧 Медитации\n\nВыбери категорию:", reply_markup=_kb_meditations_categories())
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("med:cat:"))
+async def cb_med_cat(cb: CallbackQuery):
+    _, _, cat_id = cb.data.split(":")
+    title = {"sleep":"😴 Сон", "anxiety":"😟 Тревога", "recovery":"🌿 Восстановление"}.get(cat_id, "Категория")
+    await cb.message.edit_text(f"{title}\n\nВыбери трек:", reply_markup=_kb_meditations_items(cat_id))
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("med:play:"))
+async def cb_med_play(cb: CallbackQuery):
+    _, _, cat_id, item_id = cb.data.split(":")
+    from app.meditations import get_item
+    meta = get_item(cat_id, item_id)
+    if not meta:
+        await cb.answer("Не нашёл трек 🤔", show_alert=True)
+        return
+    url = meta.get("url")
+    if not url:
+        await cb.answer("Трек скоро появится ✨", show_alert=True)
+        return
+    # логирование необязательно; пропустим, если нет функции
+    try:
+        from app.memory import log_event
+        await log_event(cb.from_user.id, "meditation_play", {"cat": cat_id, "item": item_id})
+    except Exception:
+        pass
+    caption = f"▶️ {meta['title']} • {meta['duration']}\n\nХорошей практики 🌿"
+    await cb.message.answer_audio(audio=url, caption=caption)
+    await cb.answer()
+
+# === ReflectAI: очистка истории (privacy:clear) — единый хендлер ===
+from aiogram.types import CallbackQuery
+from aiogram import F
+
+@router.callback_query(F.data == "privacy:clear")
+async def on_privacy_clear(cb: CallbackQuery):
+    # реальная очистка
+    from app.memory import purge_user_history
+    try:
+        count = purge_user_history(cb.from_user.id)
+    except Exception:
+        await cb.answer("Не получилось очистить историю", show_alert=True)
+        return
+
+    # всплывашка + возврат в подходящее меню
+    await cb.answer("История удалена ✅", show_alert=True)
+
+    # подбираем подходящую клавиатуру: сначала приватность, если есть; иначе общие настройки
+    kb = None
+    try:
+        kb = kb_privacy_for(cb.message.chat.id)  # если у тебя есть эта функция
+    except Exception:
+        try:
+            kb = kb_settings()  # fallback: корневые настройки
+        except Exception:
+            kb = None
+
+    text = f"Готово. Что дальше?\n\nУдалено записей: {count}."
+    try:
+        # если у тебя есть вспомогалка _safe_edit — используем её
+        await _safe_edit(cb.message, text, reply_markup=kb)  # type: ignore[name-defined]
+    except Exception:
+        # иначе просто новое сообщение
+        await cb.message.answer(text, reply_markup=kb)
