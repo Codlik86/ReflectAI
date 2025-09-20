@@ -248,30 +248,14 @@ async def on_start(m: Message):
 
 @router.callback_query(F.data == "onb:step2")
 async def on_onb_step2(cb: CallbackQuery):
-    img = get_onb_image("talk")
-    if img:
-        try:
-            await cb.message.answer_photo(img, caption=ONB_2_TEXT, reply_markup=kb_onb_step2())
-            await cb.answer()
-            return
-        except Exception:
-            pass
+    # текст-только, без фото
     await cb.message.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
     await cb.answer()
 
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
-    # шаг 3: «Что дальше?» + сразу показываем правое меню как reply-клавиатуру
+    # сразу показываем правое меню (reply-клавиатуру), без фото
     kb = kb_main_menu()
-    img = get_onb_image("work")
-    if img:
-        try:
-            await cb.message.answer_photo(img, caption=WHAT_NEXT_TEXT, reply_markup=kb)
-            await cb.answer()
-            return
-        except Exception:
-            pass
-    # если фото не отправилось — отправим просто текст с клавиатурой
     await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb)
     await cb.answer()
 
