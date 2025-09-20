@@ -45,10 +45,10 @@ POLICY_URL = os.getenv("POLICY_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
 TERMS_URL = os.getenv("TERMS_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
 
 DEFAULT_ONB_IMAGES = {
-    "cover": os.getenv("ONB_IMG_COVER", ""),
-    "talk": os.getenv("ONB_IMG_TALK", ""),
-    "work": os.getenv("ONB_IMG_WORK", ""),
-    "meditations": os.getenv("ONB_IMG_MEDIT", ""),
+    "cover": os.getenv("ONB_IMG_COVER", "https://file.garden/aML3M6Sqrg21TaIT/kind-creature-min.jpg"),
+    "talk": os.getenv("ONB_IMG_TALK", "https://file.garden/aML3M6Sqrg21TaIT/warm-conversation-min.jpg"),
+    "work": os.getenv("ONB_IMG_WORK", "https://file.garden/aML3M6Sqrg21TaIT/_practices-min.jpg"),
+    "meditations": os.getenv("ONB_IMG_MEDIT", "https://file.garden/aML3M6Sqrg21TaIT/meditation%20(1)-min.jpg"),
 }
 
 def get_onb_image(key: str) -> str:
@@ -279,7 +279,15 @@ async def on_onb_agree(cb: CallbackQuery):
 @router.message(F.text.in_(["🌿 Разобраться", "/work"]))
 async def on_work_menu(m: Message):
     CHAT_MODE[m.chat.id] = "work"
-    # одно сообщение: текст + инлайн-клавиатура тем; reply-меню остаётся видимым
+
+    img = get_onb_image("work")  # можно сделать отдельную картинку, если захочешь: "work_topics"
+    if img:
+        try:
+            await m.answer_photo(img, caption="Выбирай тему:", reply_markup=kb_topics())
+            return
+        except Exception:
+            pass
+
     await m.answer("Выбирай тему:", reply_markup=kb_topics())
 
 @router.message(F.text.in_(["💬 Поговорить", "/talk"]))
@@ -293,6 +301,18 @@ async def on_meditations(m: Message):
         "🎧 Медитации скоро будут здесь. Мы готовим короткие аудио для тревоги, сна и восстановления. "
         "Пока можешь попробовать дыхание «квадрат 4-4-4-4» в «Разобраться»."
     )
+
+    # сначала пробуем отправить картинку, если ссылка задана
+    img = get_onb_image("meditations")
+    if img:
+        try:
+            await m.answer_photo(img, caption=txt, reply_markup=kb_main_menu())
+            return
+        except Exception:
+            # если по какой-то причине картинка не ушла — падаем в текстовый вариант
+            pass
+
+    # fallback: просто текст + правое меню
     await m.answer(txt, reply_markup=kb_main_menu())
 
 @router.message(F.text.in_(["⚙️ Настройки", "/settings", "/setting"]))
