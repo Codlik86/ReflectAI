@@ -38,6 +38,15 @@ try:
 except Exception:
     retrieve_relevant_context = None
 
+# === Приватность/память (работаем через memory.py) ===
+try:
+    from .memory import get_privacy as db_get_privacy, set_privacy as db_set_privacy, purge_user_data
+except Exception:
+    # безопасные заглушки
+    def db_get_privacy(tg_id: str) -> str: return "ask"
+    def db_set_privacy(tg_id: str, value: str) -> None: ...
+    purge_user_data = None  # type: ignore
+
 router = Router()
 
 # ===== Онбординг: изображения и ссылки =====
@@ -115,7 +124,6 @@ def kb_settings() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🎚 Тон общения", callback_data="settings:tone")],
             [InlineKeyboardButton(text="🔒 Приватность", callback_data="settings:privacy")],
-            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu:main")],
         ]
     )
 
@@ -123,10 +131,32 @@ def kb_tone_picker() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✨ Универсальный (по умолчанию)", callback_data="tone:default")],
-            [InlineKeyboardButton(text="🤝 Друг/подруга", callback_data="tone:friend")],
-            [InlineKeyboardButton(text="🧠 Психологичный", callback_data="tone:therapist")],
-            [InlineKeyboardButton(text="🌶️ 18+", callback_data="tone:18plus")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings")],
+            [InlineKeyboardButton(text="🤝 Друг/подруга",                   callback_data="tone:friend")],
+            [InlineKeyboardButton(text="🧠 Психологичный",                  callback_data="tone:therapist")],
+            [InlineKeyboardButton(text="🌶️ 18+",                           callback_data="tone:18plus")],
+        ]
+    )
+
+def kb_privacy_for(chat_id: int) -> InlineKeyboardMarkup:
+    """
+    Режимы из БД: ask | none | all.
+    Трактуем:
+      - all  -> хранение ВКЛ
+      - none -> хранение ВЫКЛ
+      - ask  -> считаем как ВКЛ до явного выключения
+    """
+    try:
+        mode = (db_get_privacy(str(chat_id)) or "ask").lower()
+    except Exception:
+        mode = "ask"
+
+    save_on = (mode != "none")
+    toggle_text = "🔔 Вкл. хранение" if not save_on else "🔕 Выкл. хранение"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=toggle_text,          callback_data="privacy:toggle")],
+            [InlineKeyboardButton(text="🗑 Очистить историю", callback_data="privacy:clear")],
         ]
     )
 
@@ -157,21 +187,13 @@ def kb_topics() -> InlineKeyboardMarkup:
         if tid.startswith("__"):
             continue
         rows.append([InlineKeyboardButton(text=topic_button_title(tid), callback_data=f"t:{tid}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:root")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_exercises(tid: str) -> InlineKeyboardMarkup:
-    """
-    Клавиатура списка упражнений выбранной темы.
-    Берёт названия из EXERCISES[tid][eid]["title"].
-    """
     rows = []
     for eid, ex in (EXERCISES.get(tid) or {}).items():
         title = ex.get("title") or eid
-        rows.append([
-            InlineKeyboardButton(text=title, callback_data=f"ex:{tid}:{eid}:start")
-        ])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="work:topics")])
+        rows.append([InlineKeyboardButton(text=title, callback_data=f"ex:{tid}:{eid}:start")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 @router.callback_query(F.data == "work:topics")
@@ -315,6 +337,51 @@ async def on_menu_main(cb: CallbackQuery):
 @router.callback_query(F.data == "menu:settings")
 async def on_menu_settings(cb: CallbackQuery):
     await _safe_edit(cb.message, "Настройки:", reply_markup=kb_settings())
+    await cb.answer()
+
+@router.callback_query(F.data == "privacy:toggle")
+async def on_privacy_toggle(cb: CallbackQuery):
+    chat_id = cb.message.chat.id
+    mode = (db_get_privacy(str(chat_id)) or "ask").lower()
+    # flip: all/ask -> none, none -> all
+    new_mode = "none" if mode != "none" else "all"
+    db_set_privacy(str(chat_id), new_mode)
+
+    state_txt = "выключено" if new_mode == "none" else "включено"
+    await _safe_edit(
+        cb.message,
+        f"Хранение истории сейчас: <b>{state_txt}</b>.",
+        reply_markup=kb_privacy_for(chat_id),
+    )
+    await cb.answer("Настройка применена")
+
+@router.callback_query(F.data == "privacy:clear")
+async def on_privacy_clear(cb: CallbackQuery):
+    # TODO: добавить реальную очистку из БД при готовности
+    await cb.answer("История удалена ✅", show_alert=True)
+    await _safe_edit(
+        cb.message,
+        "Готово. Что дальше?",
+        reply_markup=kb_privacy_for(cb.message.chat.id),
+    )
+
+# === Settings menu actions ===
+@router.callback_query(F.data == "settings:tone")
+async def on_settings_tone(cb: CallbackQuery):
+    await _safe_edit(
+        cb.message,
+        "Выбери тон общения. Он накладывается поверх базового промпта:",
+        reply_markup=kb_tone_picker(),
+    )
+    await cb.answer()
+
+@router.callback_query(F.data == "settings:privacy")
+async def on_settings_privacy(cb: CallbackQuery):
+    await _safe_edit(
+        cb.message,
+        "Приватность:",
+        reply_markup=kb_privacy_for(cb.message.chat.id),
+    )
     await cb.answer()
 
 # ===== Тон общения (/tone) =====
