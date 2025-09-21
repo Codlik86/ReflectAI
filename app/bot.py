@@ -16,6 +16,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardRemove,
 )
+from app.meditations import get_categories, get_items, get_item
 
 # ===== Внутренние модули =====
 from .exercises import TOPICS, EXERCISES  # ожидается структура как в твоём exercises.py
@@ -704,70 +705,6 @@ async def on_work_cmd(m: Message):
 async def cmd_work(m: Message):
     await _safe_edit(m, "Выбирай тему:", reply_markup=kb_topics())
 
-def _kb_meditations_categories() -> InlineKeyboardMarkup:
-    from app.meditations import get_categories
-    rows = []
-    for cid, label in get_categories():
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"med:cat:{cid}")])
-    # Кнопка «Назад» возвращает этот же список, чтобы не проваливаться в минус-состояния
-    return InlineKeyboardMarkup(inline_keyboard=rows + [[
-        InlineKeyboardButton(text="⬅️ Назад", callback_data="med:list")
-    ]])
-
-def _kb_meditations_items(cat_id: str) -> InlineKeyboardMarkup:
-    from app.meditations import get_items
-    rows = []
-    for iid, label, _ in get_items(cat_id):
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"med:play:{cat_id}:{iid}")])
-    rows.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="med:list")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-async def _send_meditations_home(message: Message):
-    text = (
-        "🎧 Медитации\n\n"
-        "Короткие аудио, чтобы выдохнуть, заземлиться и помочь телу переключиться.\n"
-        "Выбери категорию:"
-    )
-    await message.answer(text, reply_markup=_kb_meditations_categories())
-
-@router.message(Command("meditations"))
-async def cmd_meditations(message: Message):
-    await _send_meditations_home(message)
-
-@router.callback_query(F.data == "med:list")
-async def cb_med_list(cb: CallbackQuery):
-    await cb.message.edit_text("🎧 Медитации\n\nВыбери категорию:", reply_markup=_kb_meditations_categories())
-    await cb.answer()
-
-@router.callback_query(F.data.startswith("med:cat:"))
-async def cb_med_cat(cb: CallbackQuery):
-    _, _, cat_id = cb.data.split(":")
-    title = {"sleep":"😴 Сон", "anxiety":"😟 Тревога", "recovery":"🌿 Восстановление"}.get(cat_id, "Категория")
-    await cb.message.edit_text(f"{title}\n\nВыбери трек:", reply_markup=_kb_meditations_items(cat_id))
-    await cb.answer()
-
-@router.callback_query(F.data.startswith("med:play:"))
-async def cb_med_play(cb: CallbackQuery):
-    _, _, cat_id, item_id = cb.data.split(":")
-    from app.meditations import get_item
-    meta = get_item(cat_id, item_id)
-    if not meta:
-        await cb.answer("Не нашёл трек 🤔", show_alert=True)
-        return
-    url = meta.get("url")
-    if not url:
-        await cb.answer("Трек скоро появится ✨", show_alert=True)
-        return
-    # логирование необязательно; пропустим, если нет функции
-    try:
-        from app.memory import log_event
-        await log_event(cb.from_user.id, "meditation_play", {"cat": cat_id, "item": item_id})
-    except Exception:
-        pass
-    caption = f"▶️ {meta['title']} • {meta['duration']}\n\nХорошей практики 🌿"
-    await cb.message.answer_audio(audio=url, caption=caption)
-    await cb.answer()
-
 @router.callback_query(F.data == "privacy:clear")
 async def on_privacy_clear(cb: CallbackQuery):
     # реальная очистка
@@ -798,3 +735,73 @@ async def on_privacy_clear(cb: CallbackQuery):
     except Exception:
         # иначе просто новое сообщение
         await cb.message.answer(text, reply_markup=kb)
+
+# === ReflectAI: Медитации UI ===
+# Клавиатура: список категорий
+def kb_meditations_categories() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for cid, label in get_categories():
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"med:cat:{cid}")])
+    # назад к главному меню (правое reply-меню остаётся, но даём явную кнопку)
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings")])  # можно поменять на другой экран, если хочешь
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# Клавиатура: список аудио в категории
+def kb_meditations_list(cid: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in get_items(cid):
+        rows.append([InlineKeyboardButton(
+            text=f"{item['title']} · {item.get('duration','')}".strip(),
+            callback_data=f"med:play:{cid}:{item['id']}"
+        )])
+    rows.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="med:cats")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+MEDITATIONS_TEXT = (
+    "🎧 Медитации.\n"
+    "Выбери тему — пришлю короткую практику.\n"
+    "Начинай с того, что откликается."
+)
+
+# /meditations и кнопка «🎧 Медитации»
+@router.message(Command("meditations"))
+async def cmd_meditations(m: Message):
+    await _safe_edit(m, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
+
+from aiogram import F
+@router.message(F.text == "🎧 Медитации")
+async def on_meditations_btn(m: Message):
+    await _safe_edit(m, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
+
+# Коллбэки
+@router.callback_query(F.data == "med:cats")
+async def on_med_cats(cb: CallbackQuery):
+    await _safe_edit(cb.message, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("med:cat:"))
+async def on_med_cat(cb: CallbackQuery):
+    cid = cb.data.split(":", 2)[2]
+    # заголовок категории для текста
+    cats = dict(get_categories())
+    title = cats.get(cid, "Медитации")
+    await _safe_edit(cb.message, f"🎧 {title}", reply_markup=kb_meditations_list(cid))
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("med:play:"))
+async def on_med_play(cb: CallbackQuery):
+    _, _, cid, mid = cb.data.split(":", 3)
+    item = get_item(cid, mid)
+    if not item:
+        await cb.answer("Не нашёл аудио", show_alert=True)
+        return
+    url = item.get("url")
+    caption = f"🎧 {item.get('title','Медитация')} · {item.get('duration','')}".strip()
+    try:
+        # если это прямой URL на аудио — Telegram сам его подтянет
+        await cb.message.answer_audio(url, caption=caption)
+    except Exception:
+        # fallback: просто ссылка (если это, например, YouTube)
+        await cb.message.answer(f"{caption}\n{url}")
+    # остаёмся на списке текущей категории
+    await cb.answer("Запускай, я рядом 💛")
