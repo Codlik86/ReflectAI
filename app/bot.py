@@ -790,3 +790,21 @@ async def on_privacy_clear(cb: CallbackQuery):
     except Exception:
         # иначе просто новое сообщение
         await cb.message.answer(text, reply_markup=kb)
+
+# === Launcher: запустить бота из командной строки ===
+if __name__ == "__main__":
+    import asyncio, os
+    from aiogram import Bot, Dispatcher
+
+    async def _main():
+        token = os.getenv("BOT_TOKEN")
+        if not token:
+            raise RuntimeError("Не задан BOT_TOKEN в окружении")
+        bot = Bot(token)
+        dp = Dispatcher()
+        dp.include_router(router)  # router у тебя уже объявлен выше
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("ReflectAI: polling started")
+        await dp.start_polling(bot)
+
+    asyncio.run(_main())
