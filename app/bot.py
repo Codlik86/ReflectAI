@@ -49,13 +49,6 @@ except Exception:
 
 router = Router()
 
-from aiogram.filters import Command
-from aiogram.types import Message
-
-@router.message(Command("ping"))
-async def ping(m: Message):
-    await m.answer("pong")
-
 # ===== Онбординг: изображения и ссылки =====
 POLICY_URL = os.getenv("POLICY_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
 TERMS_URL = os.getenv("TERMS_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
@@ -197,11 +190,23 @@ def kb_topics() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_exercises(tid: str) -> InlineKeyboardMarkup:
-    rows = []
-    for eid, ex in (EXERCISES.get(tid) or {}).items():
-        title = ex.get("title") or eid
-        rows.append([InlineKeyboardButton(text=title, callback_data=f"ex:{tid}:{eid}:start")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    for eid, ex in EXERCISES.get(tid, {}).items():
+        title = ex.get("title", eid)
+        buttons.append([
+            InlineKeyboardButton(
+                text=title,
+                callback_data=f"ex:{tid}:{eid}:start"
+            )
+        ])
+
+    # Назад к списку тем
+    buttons.append([
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="work:topics")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @router.callback_query(F.data == "work:topics")
 async def on_back_to_topics(cb: CallbackQuery):
@@ -698,10 +703,6 @@ async def on_work_cmd(m: Message):
 @router.message(Command("work"))
 async def cmd_work(m: Message):
     await _safe_edit(m, "Выбирай тему:", reply_markup=kb_topics())
-
-    # === ReflectAI: Медитации UI ===
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 
 def _kb_meditations_categories() -> InlineKeyboardMarkup:
     from app.meditations import get_categories
