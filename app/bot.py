@@ -297,10 +297,55 @@ async def on_onb_step2(cb: CallbackQuery):
 
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
-    # сразу показываем правое меню (reply-клавиатуру), без фото
-    kb = kb_main_menu()
+    # логируем согласие → bot_events
+    try:
+        from sqlalchemy import text
+        from app.db import db_session
+
+        with db_session() as s:
+            # получаем users.id по tg_id (у тебя tg_id — строка)
+            uid = s.execute(
+                text("SELECT id FROM users WHERE tg_id = :tg"),
+                {"tg": str(cb.from_user.id)}
+            ).scalar()
+
+            # на всякий случай — если записи о пользователе ещё нет, создадим
+            if uid is None:
+                s.execute(
+                    text("INSERT INTO users (tg_id, privacy_level) VALUES (:tg, 'insights')"),
+                    {"tg": str(cb.from_user.id)}
+                )
+                uid = s.execute(
+                    text("SELECT id FROM users WHERE tg_id = :tg"),
+                    {"tg": str(cb.from_user.id)}
+                ).scalar()
+
+            # сам лог согласия
+            s.execute(
+                text("""
+                    INSERT INTO bot_events (user_id, event_type, payload, created_at)
+                    VALUES (:uid, :event, :payload, CURRENT_TIMESTAMP)
+                """),
+                {"uid": uid, "event": "policy_accept", "payload": '{"via":"onboarding_step2"}'}
+            )
+            s.commit()
+    except Exception:
+        # не мешаем онбордингу, если что-то с БД
+        pass
+
+    # твой текущий UX остаётся: показываем правое меню и шаг «Что дальше?»
+    try:
+        await cb.answer("Спасибо! Принял ✅", show_alert=False)
+    except Exception:
+        pass
+
+    kb = None
+    try:
+        kb = kb_main_menu()   # как у тебя в текущем коде
+    except Exception:
+        kb = None
+
     await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb)
-    await cb.answer()
 
 # ===== Кнопки меню (reply-клавиатура) =====
 @router.message(F.text.in_(["🌿 Разобраться", "/work"]))
@@ -714,10 +759,6 @@ async def cb_med_play(cb: CallbackQuery):
     caption = f"▶️ {meta['title']} • {meta['duration']}\n\nХорошей практики 🌿"
     await cb.message.answer_audio(audio=url, caption=caption)
     await cb.answer()
-
-# === ReflectAI: очистка истории (privacy:clear) — единый хендлер ===
-from aiogram.types import CallbackQuery
-from aiogram import F
 
 @router.callback_query(F.data == "privacy:clear")
 async def on_privacy_clear(cb: CallbackQuery):
