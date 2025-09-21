@@ -490,15 +490,72 @@ async def on_med_play(cb: CallbackQuery):
     caption = f"🎧 {tr.get('title','Медитация')} · {tr.get('duration','')}".strip(" ·")
     url = tr.get("url")
 
+    # UX: показываем, что «загружаю аудио»
+    try:
+        await cb.bot.send_chat_action(cb.message.chat.id, "upload_audio")
+    except Exception:
+        pass
+
+    # Отправка аудио / запасной вариант — просто ссылка / caption-текст
+    sent_ok = False
     if url:
         try:
             # прямой .mp3/.m4a — Telegram сам проиграет
             await cb.message.answer_audio(url, caption=caption)
+            sent_ok = True
         except Exception:
             # если это не прямое аудио (YouTube/страница) — даём ссылку
-            await cb.message.answer(f"{caption}\n{url}")
-    else:
+            try:
+                await cb.message.answer(f"{caption}\n{url}")
+                sent_ok = True
+            except Exception:
+                pass
+
+    if not sent_ok:
         await cb.message.answer(caption)
+
+    # Метрика: логируем прослушивание (не роняем UX при ошибке)
+    try:
+        import json
+        from sqlalchemy import text
+        from app.db import db_session
+
+        with db_session() as s:
+            uid = s.execute(
+                text("SELECT id FROM users WHERE tg_id = :tg"),
+                {"tg": str(cb.from_user.id)},
+            ).scalar()
+
+            if uid is None:
+                s.execute(text("INSERT INTO users (tg_id) VALUES (:tg)"), {"tg": str(cb.from_user.id)})
+                uid = s.execute(
+                    text("SELECT id FROM users WHERE tg_id = :tg"),
+                    {"tg": str(cb.from_user.id)},
+                ).scalar()
+
+            s.execute(
+                text("""
+                    INSERT INTO bot_events (user_id, event_type, payload, created_at)
+                    VALUES (:uid, :etype, :payload, CURRENT_TIMESTAMP)
+                """),
+                {
+                    "uid": uid,
+                    "etype": "audio_play",
+                    "payload": json.dumps(
+                        {
+                            "cid": cid,
+                            "mid": mid,
+                            "title": tr.get("title"),
+                            "duration": tr.get("duration"),
+                            "url": tr.get("url"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+            s.commit()
+    except Exception:
+        pass
 
     await cb.answer("Запускай, я рядом 💛")
 
