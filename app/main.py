@@ -52,18 +52,33 @@ async def on_startup():
 async def on_shutdown():
     await bot.delete_webhook(drop_pending_updates=False)
 
-# === сам вебхук ===
+# === сам вебхук (безопасный) ===
 @app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str = Header(default="")):
-    # проверяем секрет из заголовка только если он задан
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str = Header(default="")
+):
+    # 1) секрет из заголовка (если задан)
     if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
         return Response(status_code=403)
 
-    try:
-        data = await request.json()
-        update = Update.model_validate(data)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"bad update: {e}")
+    # 2) читаем JSON
+    data = await request.json()
 
-    await dp.feed_update(bot, update)
+    # 3) пробуем обработать; любые сбои логируем и всё равно возвращаем 200
+    try:
+        update = Update.model_validate(data)
+        await dp.feed_update(bot=bot, update=update)
+    except Exception as e:
+        import json, traceback
+        msg = str(e)
+        if "chat not found" in msg.lower():
+            # фейковые/чужие chat_id — не роняем сервер
+            print("[webhook] ignore: chat not found; payload:", json.dumps(data, ensure_ascii=False))
+        else:
+            print("[webhook] ERROR:", msg)
+            print("payload:", json.dumps(data, ensure_ascii=False))
+            traceback.print_exc()
+
+    # важно: всегда 200, чтобы Телега не спамила ретраями
     return PlainTextResponse("ok")
