@@ -9,13 +9,13 @@ from aiogram.types import Update
 # твои хендлеры
 from .bot import router as bot_router
 
-# === Env: читаем как на Render ===
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN", "")
+# --- env (строго единые имена) ---
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # используется как secret header
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN (или BOT_TOKEN) не задан")
+    raise RuntimeError("TELEGRAM_BOT_TOKEN не задан")
 if not WEBHOOK_BASE_URL:
     raise RuntimeError("WEBHOOK_BASE_URL не задан (например, https://<app>.onrender.com)")
 
