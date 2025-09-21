@@ -11,12 +11,12 @@ MEDITATIONS: Dict[str, dict] = {
             "soft_sleep": {
                 "title": "Мягкое засыпание",
                 "duration": "12:00",
-                "url": os.getenv("MEDIT_SLEEP_SOFT_URL"),  # mp3
+                "url": "https://reflectai-audio.storage.yandexcloud.net/sleep_soft_sleep.mp3",
             },
             "478_breath": {
                 "title": "Дыхание 4–7–8",
                 "duration": "03:30",
-                "url": os.getenv("MEDIT_SLEEP_478_URL"),
+                "url": "https://reflectai-audio.storage.yandexcloud.net/sleep_breath_4_7_8.mp3",
             },
         },
     },
@@ -27,12 +27,12 @@ MEDITATIONS: Dict[str, dict] = {
             "ground_54321": {
                 "title": "Заземление 5-4-3-2-1",
                 "duration": "04:00",
-                "url": os.getenv("MEDIT_ANX_GROUND_URL"),
+                "url": "https://storage.yandexcloud.net/reflectai-audio/1)%20trevoga54321.mp3",
             },
             "box_breath": {
                 "title": "Квадратное дыхание",
                 "duration": "05:00",
-                "url": os.getenv("MEDIT_ANX_BOX_URL"),
+                "url": "https://storage.yandexcloud.net/reflectai-audio/2)%20dyhanie4444.mp3",
             },
         },
     },
@@ -43,12 +43,12 @@ MEDITATIONS: Dict[str, dict] = {
             "body_scan": {
                 "title": "Скан тела",
                 "duration": "08:00",
-                "url": os.getenv("MEDIT_RECOVERY_BODYSCAN_URL"),
+                "url": "https://reflectai-audio.storage.yandexcloud.net/recovery_body_scan.mp3",
             },
             "mini_pause": {
                 "title": "Микро-пауза",
                 "duration": "02:00",
-                "url": os.getenv("MEDIT_RECOVERY_MINIPAUSE_URL"),
+                "url": "https://reflectai-audio.storage.yandexcloud.net/recovery_mini_pause.mp3",
             },
         },
     },
