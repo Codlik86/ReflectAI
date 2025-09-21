@@ -388,6 +388,39 @@ async def on_talk(m: Message):
 
 # === ReflectAI: Медитации (категории → список треков → play) ===
 
+def _as_track(item: object) -> dict:
+    # dict-форма
+    if isinstance(item, dict):
+        return {
+            "id": item.get("id") or item.get("key") or item.get("uid") or "",
+            "title": item.get("title", "Медитация"),
+            "duration": item.get("duration", ""),
+            "url": item.get("url"),
+        }
+    # tuple/list-формы
+    if isinstance(item, (tuple, list)):
+        # (id, {title, duration, url})
+        if len(item) == 2 and isinstance(item[1], dict):
+            meta = item[1]
+            return {
+                "id": meta.get("id") or item[0],
+                "title": meta.get("title", "Медитация"),
+                "duration": meta.get("duration", ""),
+                "url": meta.get("url"),
+            }
+        # (id, title, url[, duration])
+        if len(item) >= 3:
+            return {
+                "id": item[0],
+                "title": item[1] or "Медитация",
+                "url": item[2],
+                "duration": item[3] if len(item) > 3 else "",
+            }
+        # fallback
+        return {"id": str(item[0]), "title": str(item[-1]), "duration": "", "url": None}
+    # совсем непонятный случай
+    return {"id": "", "title": str(item), "duration": "", "url": None}
+
 # Клавиатура: список категорий (без кнопки "назад")
 def kb_meditations_categories() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -395,15 +428,16 @@ def kb_meditations_categories() -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=label, callback_data=f"med:cat:{cid}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# Клавиатура: список аудио внутри категории
+# Клавиатура: список аудио внутри категории (устойчиво к форматам)
 def kb_meditations_list(cid: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for item in get_items(cid):
+    for raw in get_items(cid):
+        tr = _as_track(raw)
+        label = f"{tr['title']} · {tr.get('duration','')}".strip(" ·")
         rows.append([InlineKeyboardButton(
-            text=f"{item['title']} · {item.get('duration','')}".strip(),
-            callback_data=f"med:play:{cid}:{item['id']}"
+            text=label,
+            callback_data=f"med:play:{cid}:{tr['id']}"
         )])
-    # назад только к списку категорий
     rows.append([InlineKeyboardButton(text="⬅️ Категории", callback_data="med:cats")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -447,18 +481,25 @@ async def on_med_cat(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("med:play:"))
 async def on_med_play(cb: CallbackQuery):
     _, _, cid, mid = cb.data.split(":", 3)
-    item = get_item(cid, mid)
-    if not item:
+    raw = get_item(cid, mid)
+    tr = _as_track(raw) if raw is not None else None
+    if not tr:
         await cb.answer("Не нашёл аудио", show_alert=True)
         return
-    url = item.get("url")
-    caption = f"🎧 {item.get('title','Медитация')} · {item.get('duration','')}".strip()
-    try:
-        # прямой .mp3/.m4a — Telegram сам проиграет
-        await cb.message.answer_audio(url, caption=caption)
-    except Exception:
-        # если это не прямое аудио (YouTube и т.п.) — даём ссылку
-        await cb.message.answer(f"{caption}\n{url}")
+
+    caption = f"🎧 {tr.get('title','Медитация')} · {tr.get('duration','')}".strip(" ·")
+    url = tr.get("url")
+
+    if url:
+        try:
+            # прямой .mp3/.m4a — Telegram сам проиграет
+            await cb.message.answer_audio(url, caption=caption)
+        except Exception:
+            # если это не прямое аудио (YouTube/страница) — даём ссылку
+            await cb.message.answer(f"{caption}\n{url}")
+    else:
+        await cb.message.answer(caption)
+
     await cb.answer("Запускай, я рядом 💛")
 
 @router.message(F.text.in_(["⚙️ Настройки", "/settings", "/setting"]))
