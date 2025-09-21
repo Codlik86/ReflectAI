@@ -6,4 +6,4 @@ httpx
 pydantic
 sqlalchemy
 qdrant-client
-printf "SQLAlchemy>=2.0,<3\n" >> requirements.txt
+SQLAlchemy>=2.0,<3
