@@ -1,35 +1,31 @@
-venv/
+# venv & env
 .venv/
+venv/
 .env
+
+# Python артефакты
 __pycache__/
 *.pyc
-*.db
-.DS_Store
-# local backups
-app/*.bak.*
+*.pyo
+*.pyd
+.mypy_cache/
+.pytest_cache/
+*.coverage
+coverage.xml
+htmlcov/
 
-# local patches & backups
-app/bot.py.bak.*
+# ОС/IDE
+.DS_Store
+.vscode/
+.idea/
+
+# БД/локальные файлы
+*.db
+insights.db
+
+# Локальные бэкапы/патчи
+backups/
+app/*.bak.*
 patch_*.py
 patch-pomni*.py
 patch_pomni*.py
-
-# local patches & backups
-app/bot.py.bak.*
-patch_*.py
-
-# local patches & backups
-app/bot.py.bak.*
-patch_*.py
-
-# local patches & backups
-app/bot.py.bak.*
-patch_*.py
-
-# local patches & backups
-app/bot.py.bak.*
-patch_*.py
-
-# local db
-insights.db
-
