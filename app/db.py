@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 from typing import List, Optional
+from pathlib import Path  # ← добавили
 
 from sqlalchemy import (
     create_engine,
@@ -10,9 +11,9 @@ from sqlalchemy.orm import (
     DeclarativeBase, Mapped, mapped_column, Session, relationship
 )
 
-# Можно переключить на Postgres позже; сейчас — локальный файл insights.db
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./insights.db")
-
+# Можно переключить на Postgres позже; по умолчанию — абсолютный путь к insights.db в корне проекта
+DEFAULT_SQLITE_PATH = Path(__file__).resolve().parent.parent / "insights.db"
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DEFAULT_SQLITE_PATH}")
 
 class Base(DeclarativeBase):
     pass
