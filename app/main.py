@@ -1,3 +1,4 @@
+import asyncio
 import os
 from fastapi import FastAPI, Request, Header, Response, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -21,6 +22,20 @@ if not WEBHOOK_BASE_URL:
 
 WEBHOOK_PATH = "/telegram/webhook"  # путь остаётся прежний
 WEBHOOK_URL = f"{WEBHOOK_BASE_URL}{WEBHOOK_PATH}"
+# === Watchdog: авто-восстановление вебхука, если он пуст/чужой ===
+WATCHDOG_INTERVAL_SEC = int(os.getenv("WEBHOOK_WATCHDOG_SEC", "60"))
+
+async def _webhook_watchdog():
+    while True:
+        try:
+            info = await bot.get_webhook_info()
+            if info.url != WEBHOOK_URL:
+                print(f"[watchdog] webhook mismatch ('{info.url}') -> set '{WEBHOOK_URL}'")
+                await bot.set_webhook(url=WEBHOOK_URL, secret_token=WEBHOOK_SECRET, allowed_updates=[])
+        except Exception as e:
+            print("[watchdog] error:", e)
+        await asyncio.sleep(WATCHDOG_INTERVAL_SEC)
+
 
 # aiogram 3.x
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -50,10 +65,15 @@ async def on_startup():
         allowed_updates=[],
     )
     print(f"set_webhook: {ok} -> {WEBHOOK_URL}")
+    # стартуем watchdog
+    app.state.webhook_watchdog = asyncio.create_task(_webhook_watchdog())
 
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.delete_webhook(drop_pending_updates=False)
+    task = getattr(app.state, "webhook_watchdog", None)
+    if task:
+        task.cancel()
 
 # === сам вебхук (безопасный) ===
 @app.post(WEBHOOK_PATH)
