@@ -41,13 +41,15 @@ async def health_get():
 async def health_head():
     return Response(status_code=200)
 
-# === на старте сбрасываем и ставим вебхук с секретом ===
 @app.on_event("startup")
 async def on_startup():
     await bot.delete_webhook(drop_pending_updates=True)
-    # secret_token -> Telegram начнёт присылать заголовок X-Telegram-Bot-Api-Secret-Token
-    await bot.set_webhook(url=WEBHOOK_URL, secret_token=WEBHOOK_SECRET, allowed_updates=[])
-    print("set_webhook:", ok, "->", WEBHOOK_URL)  # лог для контроля в Render
+    ok = await bot.set_webhook(  # ← присваиваем результат в ok
+        url=WEBHOOK_URL,
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=[],
+    )
+    print(f"set_webhook: {ok} -> {WEBHOOK_URL}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
