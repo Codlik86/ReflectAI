@@ -414,7 +414,7 @@ MEDITATIONS_TEXT = (
 )
 
 # /meditations (и опечатки) — вход в раздел
-@router.message(Command(("meditations", "meditions", "meditation")))
+@router.message(Command(commands=["meditations", "meditions", "meditation"]))
 async def cmd_meditations(m: Message):
     img = get_onb_image("meditations")  # если есть обложка, отправим как фото
     if img:
