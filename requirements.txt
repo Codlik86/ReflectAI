@@ -1,9 +1,8 @@
-aiogram>=3.4.0
-fastapi
-uvicorn[standard]
-python-dotenv
-httpx
-pydantic
-sqlalchemy
-qdrant-client
+aiogram>=3.4,<4
 SQLAlchemy>=2.0,<3
+fastapi>=0.115,<1
+uvicorn[standard]>=0.23,<1
+python-dotenv>=1.0,<2
+httpx>=0.24,<1
+pydantic>=2.5,<3
+qdrant-client>=1.8,<2
