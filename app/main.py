@@ -71,6 +71,7 @@ async def telegram_webhook(
     # 3) пробуем обработать; любые сбои логируем и всё равно возвращаем 200
     try:
         update = Update.model_validate(data)
+        print("[webhook] incoming:", data.get("message", {}).get("text"), "cb:", data.get("callback_query", {}).get("data"))
         await dp.feed_update(bot=bot, update=update)
     except Exception as e:
         import json, traceback
