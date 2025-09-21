@@ -386,25 +386,80 @@ async def on_talk(m: Message):
     CHAT_MODE[m.chat.id] = "talk"
     await m.answer("Я рядом и слушаю. О чём хочется поговорить?", reply_markup=kb_main_menu())
 
-@router.message(F.text.in_(["🎧 Медитации", "/meditations", "/meditation"]))
-async def on_meditations(m: Message):
-    txt = (
-        "🎧 Медитации скоро будут здесь. Мы готовим короткие аудио для тревоги, сна и восстановления. "
-        "Пока можешь попробовать дыхание «квадрат 4-4-4-4» в «Разобраться»."
-    )
+# === ReflectAI: Медитации (категории → список треков → play) ===
 
-    # сначала пробуем отправить картинку, если ссылка задана
-    img = get_onb_image("meditations")
+# Клавиатура: список категорий (без кнопки "назад")
+def kb_meditations_categories() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for cid, label in get_categories():
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"med:cat:{cid}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# Клавиатура: список аудио внутри категории
+def kb_meditations_list(cid: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in get_items(cid):
+        rows.append([InlineKeyboardButton(
+            text=f"{item['title']} · {item.get('duration','')}".strip(),
+            callback_data=f"med:play:{cid}:{item['id']}"
+        )])
+    # назад только к списку категорий
+    rows.append([InlineKeyboardButton(text="⬅️ Категории", callback_data="med:cats")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+MEDITATIONS_TEXT = (
+    "🎧 Медитации.\n"
+    "Выбери тему — пришлю короткую практику.\n"
+    "Начинай с того, что откликается."
+)
+
+# /meditations (и опечатки) — вход в раздел
+@router.message(Command(("meditations", "meditions", "meditation")))
+async def cmd_meditations(m: Message):
+    img = get_onb_image("meditations")  # если есть обложка, отправим как фото
     if img:
         try:
-            await m.answer_photo(img, caption=txt, reply_markup=kb_main_menu())
+            await m.answer_photo(img, caption=MEDITATIONS_TEXT,
+                                 reply_markup=kb_meditations_categories())
             return
         except Exception:
-            # если по какой-то причине картинка не ушла — падаем в текстовый вариант
             pass
+    await _safe_edit(m, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
 
-    # fallback: просто текст + правое меню
-    await m.answer(txt, reply_markup=kb_main_menu())
+# Кнопка правого меню «🎧 Медитации»
+@router.message(F.text == "🎧 Медитации")
+async def on_meditations_btn(m: Message):
+    await _safe_edit(m, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
+
+# Коллбэки навигации
+@router.callback_query(F.data == "med:cats")
+async def on_med_cats(cb: CallbackQuery):
+    await _safe_edit(cb.message, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("med:cat:"))
+async def on_med_cat(cb: CallbackQuery):
+    cid = cb.data.split(":", 2)[2]
+    title = dict(get_categories()).get(cid, "Медитации")
+    await _safe_edit(cb.message, f"🎧 {title}", reply_markup=kb_meditations_list(cid))
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("med:play:"))
+async def on_med_play(cb: CallbackQuery):
+    _, _, cid, mid = cb.data.split(":", 3)
+    item = get_item(cid, mid)
+    if not item:
+        await cb.answer("Не нашёл аудио", show_alert=True)
+        return
+    url = item.get("url")
+    caption = f"🎧 {item.get('title','Медитация')} · {item.get('duration','')}".strip()
+    try:
+        # прямой .mp3/.m4a — Telegram сам проиграет
+        await cb.message.answer_audio(url, caption=caption)
+    except Exception:
+        # если это не прямое аудио (YouTube и т.п.) — даём ссылку
+        await cb.message.answer(f"{caption}\n{url}")
+    await cb.answer("Запускай, я рядом 💛")
 
 @router.message(F.text.in_(["⚙️ Настройки", "/settings", "/setting"]))
 async def on_settings(m: Message):
