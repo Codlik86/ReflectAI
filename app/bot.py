@@ -49,6 +49,13 @@ except Exception:
 
 router = Router()
 
+from aiogram.filters import Command
+from aiogram.types import Message
+
+@router.message(Command("ping"))
+async def ping(m: Message):
+    await m.answer("pong")
+
 # ===== Онбординг: изображения и ссылки =====
 POLICY_URL = os.getenv("POLICY_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
 TERMS_URL = os.getenv("TERMS_URL", "https://s.craft.me/APV7T8gRf3w2Ay")
