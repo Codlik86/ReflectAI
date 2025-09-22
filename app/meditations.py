@@ -24,14 +24,19 @@ MEDITATIONS: Dict[str, dict] = {
         "title": "Тревога",
         "emoji": "😟",
         "items": {
+            "panic_support": {
+                "title": "Кризисная поддержка",
+                "duration": "02:43",   # поставь свою фактическую длительность
+                "url": "https://storage.yandexcloud.net/reflectai-audio/4)%20panicattack.mp3",
+            },
             "ground_54321": {
                 "title": "Заземление 5-4-3-2-1",
-                "duration": "04:00",
+                "duration": "03:31",
                 "url": "https://storage.yandexcloud.net/reflectai-audio/1)%20trevoga54321.mp3",
             },
             "box_breath": {
                 "title": "Квадратное дыхание",
-                "duration": "05:00",
+                "duration": "03:16",
                 "url": "https://storage.yandexcloud.net/reflectai-audio/2)%20dyhanie4444.mp3",
             },
         },
