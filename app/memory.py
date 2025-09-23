@@ -164,3 +164,71 @@ def build_memory_context(tg_id: int | str) -> Dict[str, str]:
         pieces.append("Недавний диалог:\n" + "\n".join(dialog_lines))
 
     return {"memory_context": "\n\n".join(pieces).strip()}
+
+# === ReflectAI: простое API для bot.py ===
+# Лог входящих/исходящих реплик и выборка последних сообщений диалога.
+
+from typing import List, Dict
+from sqlalchemy import text
+from app.db import db_session
+
+def _ensure_user_and_get_id(tg_id: str) -> int:
+    """Возвращает users.id по tg_id; создаёт запись, если её ещё нет."""
+    with db_session() as s:
+        uid = s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": str(tg_id)}).scalar()
+        if uid is None:
+            s.execute(
+                text("INSERT INTO users (tg_id, privacy_level) VALUES (:tg, 'insights')"),
+                {"tg": str(tg_id)}
+            )
+            uid = s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": str(tg_id)}).scalar()
+        s.commit()
+        return int(uid)
+
+def save_user_message(tg_id: str, text_value: str) -> None:
+    """Сохраняет реплику пользователя в bot_messages."""
+    uid = _ensure_user_and_get_id(tg_id)
+    with db_session() as s:
+        s.execute(
+            text("""
+                INSERT INTO bot_messages (user_id, role, text, created_at)
+                VALUES (:uid, 'user', :txt, CURRENT_TIMESTAMP)
+            """),
+            {"uid": uid, "txt": text_value}
+        )
+        s.commit()
+
+def save_bot_message(tg_id: str, text_value: str) -> None:
+    """Сохраняет реплику бота в bot_messages."""
+    uid = _ensure_user_and_get_id(tg_id)
+    with db_session() as s:
+        s.execute(
+            text("""
+                INSERT INTO bot_messages (user_id, role, text, created_at)
+                VALUES (:uid, 'bot', :txt, CURRENT_TIMESTAMP)
+            """),
+            {"uid": uid, "txt": text_value}
+        )
+        s.commit()
+
+def get_recent_messages(tg_id: str, limit: int = 12) -> List[Dict[str, str]]:
+    """
+    Возвращает последние N сообщений диалога в формате:
+    [{"role":"user"|"bot","text":"..."}]
+    """
+    uid = _ensure_user_and_get_id(tg_id)
+    with db_session() as s:
+        rows = s.execute(
+            text("""
+                SELECT role, text
+                FROM bot_messages
+                WHERE user_id = :uid
+                ORDER BY created_at DESC, id DESC
+                LIMIT :lim
+            """),
+            {"uid": uid, "lim": int(limit)}
+        ).all()
+
+    # Возвращаем в хронологическом порядке (от старых к новым)
+    out = [{"role": r[0], "text": r[1]} for r in rows][::-1]
+    return out
