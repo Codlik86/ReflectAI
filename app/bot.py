@@ -209,6 +209,31 @@ def kb_exercises(tid: str) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# === /policy: Политика и правила ===
+import os
+from aiogram.filters import Command
+from aiogram.types import Message
+
+# если эти переменные уже есть выше (из онбординга) — удалите строки ниже
+POLICY_URL = os.getenv("POLICY_URL", "").strip()
+TERMS_URL  = os.getenv("TERMS_URL", "").strip()
+
+@router.message(Command("policy"))
+async def cmd_policy(m: Message):
+    parts = [
+        "🔒 <b>Политика и правила</b>",
+        "Мы бережно относимся к приватности: сохраняется только то, что ты разрешаешь в настройках. Историю можно очистить в любой момент.",
+    ]
+    if TERMS_URL:
+        parts.append(f"• <a href='{TERMS_URL}'>Правила сервиса</a>")
+    if POLICY_URL:
+        parts.append(f"• <a href='{POLICY_URL}'>Политика конфиденциальности</a>")
+    if not TERMS_URL and not POLICY_URL:
+        parts.append("Ссылки не настроены. Добавь переменные окружения POLICY_URL и TERMS_URL.")
+
+    await m.answer("\n\n".join(parts), disable_web_page_preview=True)
+
+
 @router.callback_query(F.data == "work:topics")
 async def on_back_to_topics(cb: CallbackQuery):
     await _safe_edit(cb.message, "Выбирай тему:", reply_markup=kb_topics())
