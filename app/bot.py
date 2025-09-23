@@ -17,7 +17,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from app.meditations import get_categories, get_items, get_item
-from app.memory import save_user_message, save_bot_message
+from app.memory import save_user_message, save_bot_message, get_recent_messages
 
 # ===== Внутренние модули =====
 from .exercises import TOPICS, EXERCISES  # ожидается структура как в твоём exercises.py
