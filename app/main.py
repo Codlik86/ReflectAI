@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import Update, BotCommand
+from .memory_schema import ensure_memory_schema
 
 # твои хендлеры
 from .bot import router as bot_router
@@ -60,6 +61,9 @@ async def health_head():
 
 @app.on_event("startup")
 async def on_startup():
+    # 1) гарантируем схему памяти (таблицы создадутся сами, если их нет)
+    ensure_memory_schema()
+
     # чистим вебхук и ставим заново
     await bot.delete_webhook(drop_pending_updates=True)
     ok = await bot.set_webhook(

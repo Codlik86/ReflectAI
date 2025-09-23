@@ -1,347 +1,166 @@
+# app/memory.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict
+from datetime import datetime, timedelta, date
 
-from typing import Optional, List, Dict
-from datetime import datetime
-import json
-import re
+from sqlalchemy import text
+from app.db import db_session
 
-try:
-    from .db import db_session, User, Insight
-except Exception as e:
-    raise RuntimeError("Не найден app/db.py с db_session/User/Insight") from e
+# ===== Константы «окна памяти» =====
+MAX_RECENT_MSGS = 24         # сколько последних реплик подмешиваем в контекст
+MEMORY_BACK_DAYS = 21        # за сколько дней смотрим сообщения/саммари
 
-# Опциональные таблицы — могут отсутствовать в твоей схеме
-try:
-    from .db import DiaryEntry  # type: ignore
-except Exception:
-    DiaryEntry = None  # type: ignore
+# Внутренний анти-дубль (в пределах одного процесса)
+_seen_message_ids: set[int] = set()
 
-try:
-    from .db import BotEvent  # type: ignore
-except Exception:
-    BotEvent = None  # type: ignore
+@dataclass
+class MemoryChunk:
+    role: str   # "user" | "bot"
+    text: str
+    ts: datetime
 
+# --- вспомогалки -------------------------------------------------------------
 
-class MemoryManager:
-    """Память Помни: пользователь, приватность, записи (дневник/инсайты), события."""
-
-    # ---------- Пользователь и приватность ----------
-    def ensure_user(self, tg_id: str) -> User:
-        with db_session() as s:
-            u = s.query(User).filter_by(tg_id=str(tg_id)).first()
-            if not u:
-                kwargs = {"tg_id": str(tg_id)}
-                # поддержим разные схемы БД
-                if hasattr(User, "privacy_mode"):
-                    kwargs["privacy_mode"] = "ask"
-                elif hasattr(User, "privacy_level"):
-                    kwargs["privacy_level"] = "insights"
-                u = User(**kwargs)  # type: ignore
-                s.add(u)
-                s.commit()
-                s.refresh(u)
-            return u
-
-    def get_privacy(self, tg_id: str) -> str:
-        """Возвращает режим приватности: ask|none|all (insights трактуем как ask)."""
-        with db_session() as s:
-            u = s.query(User).filter_by(tg_id=str(tg_id)).first()
-            if not u:
-                return "ask"
-            if hasattr(u, "privacy_mode"):
-                return getattr(u, "privacy_mode") or "ask"
-            if hasattr(u, "privacy_level"):
-                v = (getattr(u, "privacy_level") or "insights").lower()
-                return "ask" if v == "insights" else v
-            return "ask"
-
-    def set_privacy(self, tg_id: str, value: str) -> None:
-        """Устанавливает режим приватности: ask|none|all (insights = ask)."""
-        mode = (value or "").lower().strip()
-        if mode == "insights":
-            mode = "ask"
-        self.ensure_user(tg_id)
-        with db_session() as s:
-            u = s.query(User).filter_by(tg_id=str(tg_id)).first()
-            if hasattr(u, "privacy_mode"):
-                setattr(u, "privacy_mode", mode)
-            elif hasattr(u, "privacy_level"):
-                setattr(u, "privacy_level", "insights" if mode == "ask" else mode)
-            s.commit()
-
-    # ---------- Дневник / Инсайты ----------
-    def save_diary_entry(self, tg_id: str, text: str) -> int:
-        """Сохраняет запись; возвращает ID."""
-        self.ensure_user(tg_id)
-        with db_session() as s:
-            if DiaryEntry is not None:
-                rec = DiaryEntry(tg_id=str(tg_id), text=text, created_at=datetime.utcnow())  # type: ignore
-            else:
-                rec = Insight(tg_id=str(tg_id), text=text, created_at=datetime.utcnow())
-            s.add(rec)
-            s.commit()
-            s.refresh(rec)
-            return int(rec.id)
-
-    def list_diary(self, tg_id: str, limit: int = 20) -> List[Dict]:
-        with db_session() as s:
-            if DiaryEntry is not None:
-                rows = (
-                    s.query(DiaryEntry)
-                    .filter_by(tg_id=str(tg_id))
-                    .order_by(DiaryEntry.created_at.desc())  # type: ignore
-                    .limit(limit)
-                    .all()
-                )
-            else:
-                rows = (
-                    s.query(Insight)
-                    .filter_by(tg_id=str(tg_id))
-                    .order_by(Insight.created_at.desc())
-                    .limit(limit)
-                    .all()
-                )
-            out: List[Dict] = []
-            for r in rows:
-                created = getattr(r, "created_at", None)
-                out.append(
-                    {
-                        "id": int(r.id),
-                        "text": r.text,
-                        "created_at": created.isoformat() if created else None,
-                    }
-                )
-            return out
-
-    # ---------- События/метрики ----------
-    def log_event(self, tg_id: str, event_type: str, payload: Optional[str] = None) -> None:
-        """Пишем событие, если есть таблица; иначе игнорируем молча."""
-        if BotEvent is None:
-            return
-        with db_session() as s:
-            ev = BotEvent(  # type: ignore
-                user_id=None,
-                event_type=event_type,
-                payload=payload,
-                created_at=datetime.utcnow(),
-            )
-            s.add(ev)
-            s.commit()
-
-
-# ---------- Backward-compatible wrappers (для старых импортов из bot.py) ----------
-def add_journal_entry(tg_id, text):
-    return MemoryManager().save_diary_entry(str(tg_id), text)
-
-
-def list_journal_entries(tg_id, limit: int = 20):
-    return MemoryManager().list_diary(str(tg_id), limit=limit)
-
-
-def save_insight(tg_id, text):
-    return add_journal_entry(tg_id, text)
-
-
-def get_privacy(tg_id):
-    return MemoryManager().get_privacy(str(tg_id))
-
-
-def set_privacy(tg_id, value):
-    return MemoryManager().set_privacy(str(tg_id), value)
-
-
-def get_privacy_mode(tg_id):
-    return get_privacy(tg_id)
-
-
-def set_privacy_mode(tg_id, value):
-    return set_privacy(tg_id, value)
-
-
-
-def log_event(tg_id, event_type, payload=None):
-    """Надёжная запись события: гарантируем user.id, пишем BotEvent, не падаем."""
-    try:
-        from app.db import db_session, User, BotEvent
-        tid = str(tg_id)
-        with db_session() as s:
-            user = s.query(User).filter(User.tg_id == tid).first()
-            if user is None:
-                user = User(tg_id=tid)
-                s.add(user)
-                s.flush()     # присваивает user.id
-            ev = BotEvent(
-                user_id=user.id,
-                event_type=str(event_type or ""),
-                payload="" if payload is None else str(payload),
-            )
-            s.add(ev)
-            s.commit()
-        return True
-    except Exception as e:
-        print(f"[memory.log_event wrapper] error: {e}")
-        return False
-
-def update_user_memory(tg_id, key=None, value=None, **data):
-    """
-    Универсальная запись «настроек/памяти».
-    Пишем как событие mem_update (payload=JSON). Если таблицы событий нет — создаём текстовую заметку.
-    """
-    mm = MemoryManager()
-    if key is not None:
-        payload = {"key": str(key), "value": value}
-    else:
-        payload = dict(data) if data else {}
-    try:
-        mm.log_event(str(tg_id), "mem_update", json.dumps(payload, ensure_ascii=False))
-        return True
-    except Exception:
-        try:
-            text = "[mem] " + json.dumps(payload, ensure_ascii=False)
-            mm.save_diary_entry(str(tg_id), text)
-        except Exception:
-            pass
-        return True
-
-
-def get_user_memory(tg_id):
-    """
-    Возврат «словаря настроек». Сейчас — заглушка (пустой словарь), чтобы код не падал.
-    Можно расширить под реальное хранилище позже.
-    """
-    return {}
-
-
-def get_user_settings(tg_id):
-    """Совместимый алиас поверх get_user_memory."""
-    return get_user_memory(tg_id)
-
-
-def set_user_settings(tg_id, **data):
-    """Совместимый алиас поверх update_user_memory."""
-    return update_user_memory(tg_id, **data)
-
-
-def set_user_tone(tg_id, tone: str):
-    """Сохранить предпочитаемый тон (friend|coach|plain...)."""
-    return update_user_memory(tg_id, tone=tone)
-
-
-def set_user_method(tg_id, method: str):
-    """Сохранить предпочитаемую методологию (cbt|gestalt|mix...)."""
-    return update_user_memory(tg_id, method=method)
-
-
-# Простейшая эвристика для детекции «запроса на помощь»
-_HELP_PATTERNS = [
-    r"\bчто\s+делать\b",
-    r"\bкак\s+справ(ить|ля)сь?\b",
-    r"\bпомог(и|ите)\b",
-    r"\bсовет(ы)?\b",
-    r"\bкак\s+быть\b",
-    r"\bплан\b",
-    r"\bпрактик\w*\b",
-    r"\bупражнен\w*\b",
-    r"\bразобра(ть|ться)\b",
-    r"\bразложи(ть)?\b",
-    r"\bтревог\w*\b",
-    r"\bпаник\w*\b",
-    r"\bвыгор\w*\b",
-    r"\bне\s+сплю\b",
-    r"\bплохо\s+сплю\b",
-    r"\bкпт\b|\bcbt\b",
-]
-
-
-def is_help_intent(text: str) -> bool:
-    if not text:
-        return False
-    t = text.lower()
-    for pat in _HELP_PATTERNS:
-        if re.search(pat, t):
-            return True
-    return False
-
-def purge_user_data(tg_id: str) -> int:
-    """
-    Полная очистка истории для пользователя:
-    - DiaryEntry (если есть),
-    - Insight,
-    - BotEvent, привязанные к user.id.
-    Возвращает суммарное кол-во удалённых записей (best effort).
-    """
-    total = 0
+def _get_user_id_by_tg(tg_id: int | str) -> Optional[int]:
     with db_session() as s:
-        # найдём пользователя (для BotEvent.user_id)
-        user = s.query(User).filter_by(tg_id=str(tg_id)).first()
+        return s.execute(
+            text("SELECT id FROM users WHERE tg_id = :tg"),
+            {"tg": str(tg_id)}
+        ).scalar()
 
-        if DiaryEntry is not None:
-            total += s.query(DiaryEntry).filter_by(tg_id=str(tg_id)).delete()  # type: ignore
-
-        total += s.query(Insight).filter_by(tg_id=str(tg_id)).delete()
-
-        if user is not None and BotEvent is not None:
-            total += s.query(BotEvent).filter(BotEvent.user_id == user.id).delete()  # type: ignore
-
+def _ensure_user(tg_id: int | str) -> int:
+    uid = _get_user_id_by_tg(tg_id)
+    if uid:
+        return uid
+    with db_session() as s:
+        s.execute(
+            text("INSERT INTO users (tg_id) VALUES (:tg) ON CONFLICT DO NOTHING"),
+            {"tg": str(tg_id)}
+        )
+        uid = s.execute(
+            text("SELECT id FROM users WHERE tg_id = :tg"),
+            {"tg": str(tg_id)}
+        ).scalar()
         s.commit()
-    return total
+        return uid
 
-# === ReflectAI: универсальная очистка истории через отражение схемы ===
-def purge_user_history(tg_id: int) -> int:
+# --- запись сообщений --------------------------------------------------------
+
+def remember_user_message(tg_id: int | str, text_msg: str, *, message_id: Optional[int] = None) -> None:
     """
-    Удаляет все записи пользователя из всех таблиц, где есть колонка user_id (ссылается на users.id)
-    или tg_id. Работает через отражение схемы, порядок — от детей к родителям.
-    Никогда не кидает исключения наружу. Возвращает количество удалённых строк.
+    Записать входящее сообщение пользователя в журнал.
+    Анти-дубль по message_id (если передали).
     """
-    removed = 0
-    try:
-        from sqlalchemy import MetaData, text
-        from app.db import db_session
-    except Exception:
-        return 0
+    if not text_msg:
+        return
+    if message_id is not None and message_id in _seen_message_ids:
+        return
+    uid = _ensure_user(tg_id)
+    with db_session() as s:
+        s.execute(
+            text("""
+                INSERT INTO bot_messages (user_id, role, text)
+                VALUES (:uid, 'user', :txt)
+            """),
+            {"uid": uid, "txt": text_msg}
+        )
+        s.commit()
+    if message_id is not None:
+        _seen_message_ids.add(message_id)
 
-    try:
-        with db_session() as s:
-            # Получаем user.id по tg_id (без ORM-классов)
-            uid = None
-            try:
-                uid = s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": tg_id}).scalar()
-            except Exception:
-                uid = None
+def remember_bot_message(tg_id: int | str, text_msg: str) -> None:
+    """Записать исходящее сообщение бота."""
+    if not text_msg:
+        return
+    uid = _ensure_user(tg_id)
+    with db_session() as s:
+        s.execute(
+            text("""
+                INSERT INTO bot_messages (user_id, role, text)
+                VALUES (:uid, 'bot', :txt)
+            """),
+            {"uid": uid, "txt": text_msg}
+        )
+        s.commit()
 
-            engine = s.get_bind()
-            md = MetaData()
-            try:
-                md.reflect(bind=engine)
-            except Exception:
-                return 0
+# --- получение контекста -----------------------------------------------------
 
-            # таблицы в порядке зависимостей; для удаления идём в обратном
-            for table in reversed(list(md.sorted_tables)):
-                name = table.name.lower()
+def get_recent_dialog(tg_id: int | str,
+                      max_messages: int = MAX_RECENT_MSGS,
+                      back_days: int = MEMORY_BACK_DAYS) -> List[MemoryChunk]:
+    """Последние реплики диалога за back_days (user+bot), максимум max_messages."""
+    uid = _get_user_id_by_tg(tg_id)
+    if not uid:
+        return []
+    since = datetime.utcnow() - timedelta(days=back_days)
+    with db_session() as s:
+        rows = s.execute(
+            text("""
+                SELECT role, text, created_at
+                FROM bot_messages
+                WHERE user_id = :uid AND created_at >= :since
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """),
+            {"uid": uid, "since": since, "lim": max_messages}
+        ).fetchall()
+    # возвращаем в хронологическом порядке (старые → новые)
+    result = [MemoryChunk(role=r[0], text=r[1], ts=r[2]) for r in rows][::-1]
+    return result
 
-                # не трогаем саму users и служебные таблицы
-                if name in {"users", "alembic_version"}:
-                    continue
+def get_latest_summary(tg_id: int | str) -> Optional[str]:
+    """Последний дневной саммари (если есть) за back_days."""
+    uid = _get_user_id_by_tg(tg_id)
+    if not uid:
+        return None
+    since_day = date.today() - timedelta(days=MEMORY_BACK_DAYS)
+    with db_session() as s:
+        row = s.execute(
+            text("""
+                SELECT summary
+                FROM bot_daily_summaries
+                WHERE user_id = :uid AND day >= :since
+                ORDER BY day DESC
+                LIMIT 1
+            """),
+            {"uid": uid, "since": since_day}
+        ).fetchone()
+    return row[0] if row else None
 
-                cols = set(c.name for c in table.columns)
-                # приоритет — по user_id (если знаем uid), иначе по tg_id
-                try:
-                    if "user_id" in cols and uid is not None:
-                        res = s.execute(text(f"DELETE FROM {name} WHERE user_id = :uid"), {"uid": uid})
-                        removed += int(res.rowcount or 0)
-                    elif "tg_id" in cols:
-                        res = s.execute(text(f"DELETE FROM {name} WHERE tg_id = :tg"), {"tg": tg_id})
-                        removed += int(res.rowcount or 0)
-                except Exception:
-                    # глотаем любые ошибки по отдельным таблицам
-                    pass
+def upsert_daily_summary(tg_id: int | str, day: date, summary_text: str) -> None:
+    """Создать/обновить саммари дня (например, по кнопке «итоги дня»)."""
+    uid = _ensure_user(tg_id)
+    with db_session() as s:
+        s.execute(
+            text("""
+                INSERT INTO bot_daily_summaries (user_id, day, summary)
+                VALUES (:uid, :day, :txt)
+                ON CONFLICT (user_id, day)
+                DO UPDATE SET summary = EXCLUDED.summary,
+                              created_at = now()
+            """),
+            {"uid": uid, "day": day, "txt": summary_text}
+        )
+        s.commit()
 
-            try:
-                s.commit()
-            except Exception:
-                s.rollback()
-    except Exception:
-        pass
+def build_memory_context(tg_id: int | str) -> Dict[str, str]:
+    """
+    Собирает строку контекста: последний саммари + последние реплики.
+    Возвращай как dict, чтобы удобно подмешивать в промпт.
+    """
+    pieces: List[str] = []
+    last_sum = get_latest_summary(tg_id)
+    if last_sum:
+        pieces.append(f"Последний дневной итог:\n{last_sum.strip()}")
 
-    return removed
+    recent = get_recent_dialog(tg_id)
+    if recent:
+        dialog_lines = []
+        for ch in recent:
+            role = "Ты" if ch.role == "user" else "Помни"
+            dialog_lines.append(f"{role}: {ch.text.strip()}")
+        pieces.append("Недавний диалог:\n" + "\n".join(dialog_lines))
+
+    return {"memory_context": "\n\n".join(pieces).strip()}
