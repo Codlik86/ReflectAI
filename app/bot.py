@@ -215,8 +215,8 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 # если эти переменные уже есть выше (из онбординга) — удалите строки ниже
-POLICY_URL = os.getenv("POLICY_URL", "").strip()
 TERMS_URL  = os.getenv("TERMS_URL", "").strip()
+POLICY_URL = os.getenv("POLICY_URL", "").strip()
 
 @router.message(Command("policy"))
 async def cmd_policy(m: Message):
@@ -292,14 +292,20 @@ ONB_2_TEXT = (
 )
 
 def kb_onb_step2() -> InlineKeyboardMarkup:
-    buttons = [
-        [
-            InlineKeyboardButton(text="📄 Правила", url=TERMS_URL),
-            InlineKeyboardButton(text="🔐 Политика", url=POLICY_URL),
-        ],
-        [InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    rows: list[list[InlineKeyboardButton]] = []
+
+    link_row: list[InlineKeyboardButton] = []
+    if TERMS_URL:
+        link_row.append(InlineKeyboardButton(text="📄 Правила", url=TERMS_URL))
+    if POLICY_URL:
+        link_row.append(InlineKeyboardButton(text="🔐 Политика", url=POLICY_URL))
+    if link_row:
+        rows.append(link_row)
+
+    # кнопку согласия даём всегда
+    rows.append([InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 WHAT_NEXT_TEXT = (
     "Что дальше? Несколько вариантов:\n\n"
@@ -868,6 +874,11 @@ async def on_text(m: Message):
         return
     # дефолт
     await m.answer("Я рядом и на связи. Нажми «Поговорить» или «Разобраться».", reply_markup=kb_main_menu())
+
+# ===== Доп. команды-синонимы =====
+@router.message(Command("menu"))
+async def on_menu(m: Message):
+    await m.answer("Меню:", reply_markup=kb_main_menu())
 
 # Служебная: открыть список тем (удобно после онбординга)
 @router.message(Command("work"))
