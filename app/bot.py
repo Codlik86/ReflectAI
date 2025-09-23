@@ -812,19 +812,40 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
 
-    rag_ctx = ""
+    # === краткая история диалога из памяти (последние 12 сообщений) ===
+    try:
+        from app.memory import get_recent_messages  # ожидаем: List[{"role":"user"|"bot","text":str}]
+        history = get_recent_messages(str(chat_id), limit=12) or []
+        if history:
+            lines = []
+            for r in history:
+                speaker = "Пользователь" if r.get("role") == "user" else "Ты"
+                text = r.get("text", "").strip()
+                if text:
+                    # коротко, без лишних переносов
+                    lines.append(f"{speaker}: {text}")
+            if lines:
+                convo_snippet = "\n".join(lines)
+                sys_prompt += (
+                    "\n\n[Короткий контекст последних сообщений — используй аккуратно, "
+                    "не цитируй дословно и не раскрывай это как память]:\n" + convo_snippet
+                )
+    except Exception:
+        pass
+
+    # === RAG (если доступен) ===
     if retrieve_relevant_context:
         try:
             rag_ctx = retrieve_relevant_context(user_text) or ""
             if rag_ctx:
-                sys_prompt = (
-                    sys_prompt
-                    + "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки пользователю]\n"
+                sys_prompt += (
+                    "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки]:\n"
                     + rag_ctx
                 )
         except Exception:
             pass
 
+    # === вызов LLM ===
     if chat_with_style is None:
         text = "Я тебя слышу. Сейчас подключаюсь… (LLM-адаптер не сконфигурирован)"
         await m.answer(text)
@@ -876,41 +897,35 @@ async def on_debug_prompt(m: Message):
 # ===== Обработка произвольного текста: talk/reflection =====
 from app.memory import save_user_message, save_bot_message  # ← импорт (держи рядом с другими импортами)
 
+# ===== Обработка произвольного текста: talk/reflection =====
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
-    # 1) логируем входящее сообщение пользователя
+    # сохраняем реплику пользователя в память
     try:
-        save_user_message(str(m.from_user.id), m.text or "")
+        from app.memory import save_user_message
+        save_user_message(str(m.chat.id), m.text)
     except Exception:
         pass
 
-    mode = CHAT_MODE.get(m.chat.id, "talk")
-
-    # 2) режим "Поговорить" / "Рефлексия" — отвечает LLM
-    if mode in ("talk", "reflection"):
+    # в любом режиме, где ожидается чат
+    if CHAT_MODE.get(m.chat.id, "talk") in ("talk", "reflection"):
         await _answer_with_llm(m, m.text)
         return
 
-    # 3) пользователь в "Разобраться", но прислал текст — мягко направляем
-    if mode == "work":
-        text = ("Если хочешь обсудить — нажми «Поговорить». "
-                "Если упражнение — выбери тему в «Разобраться».")
-        await m.answer(text, reply_markup=kb_main_menu())
-        # логируем ответ бота
-        try:
-            save_bot_message(str(m.chat.id), text)
-        except Exception:
-            pass
+    # если человек в «Разобраться», а пишет текст — мягко направим
+    if CHAT_MODE.get(m.chat.id) == "work":
+        await m.answer(
+            "Если хочешь обсудить — нажми «Поговорить». "
+            "Если упражнение — выбери тему в «Разобраться».",
+            reply_markup=kb_main_menu()
+        )
         return
 
-    # 4) дефолтный ответ
-    text = "Я рядом и на связи. Нажми «Поговорить» или «Разобраться»."
-    await m.answer(text, reply_markup=kb_main_menu())
-    # логируем ответ бота
-    try:
-        save_bot_message(str(m.chat.id), text)
-    except Exception:
-        pass
+    # дефолт
+    await m.answer(
+        "Я рядом и на связи. Нажми «Поговорить» или «Разобраться».",
+        reply_markup=kb_main_menu()
+    )
 
 
 # ===== Доп. команды-синонимы =====
