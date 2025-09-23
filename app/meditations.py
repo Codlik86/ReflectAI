@@ -10,13 +10,13 @@ MEDITATIONS: Dict[str, dict] = {
         "items": {
             "soft_sleep": {
                 "title": "Мягкое засыпание",
-                "duration": "12:00",
-                "url": "https://reflectai-audio.storage.yandexcloud.net/sleep_soft_sleep.mp3",
+                "duration": "04:00",
+                "url": "https://storage.yandexcloud.net/reflectai-audio/sleep.soft_sleep.mp3",
             },
             "478_breath": {
                 "title": "Дыхание 4–7–8",
-                "duration": "03:30",
-                "url": "https://reflectai-audio.storage.yandexcloud.net/sleep_breath_4_7_8.mp3",
+                "duration": "03:59",
+                "url": "https://storage.yandexcloud.net/reflectai-audio/sleep.478_breath.mp3",
             },
         },
     },
@@ -25,19 +25,19 @@ MEDITATIONS: Dict[str, dict] = {
         "emoji": "😟",
         "items": {
             "panic_support": {
-                "title": "Кризисная поддержка",
+                "title": "Кризисная поддержка (Паническая атака)",
                 "duration": "02:43",   # поставь свою фактическую длительность
-                "url": "https://storage.yandexcloud.net/reflectai-audio/4)%20panicattack.mp3",
+                "url": "https://storage.yandexcloud.net/reflectai-audio/panic.attack.mp3",
             },
             "ground_54321": {
                 "title": "Заземление 5-4-3-2-1",
-                "duration": "03:31",
-                "url": "https://storage.yandexcloud.net/reflectai-audio/1)%20trevoga54321.mp3",
+                "duration": "03:30",
+                "url": "https://storage.yandexcloud.net/reflectai-audio/breath54321.mp3",
             },
             "box_breath": {
                 "title": "Квадратное дыхание",
                 "duration": "03:16",
-                "url": "https://storage.yandexcloud.net/reflectai-audio/2)%20dyhanie4444.mp3",
+                "url": "https://storage.yandexcloud.net/reflectai-audio/breath4444.mp3",
             },
         },
     },
@@ -47,13 +47,13 @@ MEDITATIONS: Dict[str, dict] = {
         "items": {
             "body_scan": {
                 "title": "Скан тела",
-                "duration": "08:00",
-                "url": "https://reflectai-audio.storage.yandexcloud.net/recovery_body_scan.mp3",
+                "duration": "03:01",
+                "url": "https://storage.yandexcloud.net/reflectai-audio/recovery.body_scan.mp3",
             },
             "mini_pause": {
                 "title": "Микро-пауза",
-                "duration": "02:00",
-                "url": "https://reflectai-audio.storage.yandexcloud.net/recovery_mini_pause.mp3",
+                "duration": "02:31",
+                "url": "https://storage.yandexcloud.net/reflectai-audio/recovery.mini_pause.mp3",
             },
         },
     },
