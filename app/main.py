@@ -71,17 +71,16 @@ async def on_startup():
 
     # выставляем список команд (левая панель / меню команд)
     await bot.set_my_commands([
-        BotCommand(command="start",        description="Старт"),
-        BotCommand(command="menu",         description="Меню"),
-        BotCommand(command="talk",         description="Поговорить"),
-        BotCommand(command="work",         description="Разобраться"),
-        BotCommand(command="meditations",  description="Медитации"),
-        BotCommand(command="settings",     description="Настройки"),
-        BotCommand(command="privacy",      description="Приватность (панель)"),
-        BotCommand(command="policy",       description="Политика и правила"),
-        BotCommand(command="about",        description="О проекте"),
-        BotCommand(command="help",         description="Помощь"),
-        BotCommand(command="pay",          description="Подписка (скоро)"),
+    BotCommand(command="start",        description="▶️ Старт"),
+    BotCommand(command="talk",         description="💬 Поговорить"),
+    BotCommand(command="work",         description="🌿 Разобраться"),
+    BotCommand(command="meditations",  description="🎧 Медитации"),
+    BotCommand(command="settings",     description="⚙️ Настройки"),
+    BotCommand(command="privacy",      description="🔒 Приватность (панель)"),
+    BotCommand(command="policy",       description="📜 Политика и правила"),
+    BotCommand(command="about",        description="ℹ️ О проекте"),
+    BotCommand(command="help",         description="🆘 Помощь"),
+    BotCommand(command="pay",          description="💳 Подписка (скоро)"),
     ])
 
     # стартуем watchdog

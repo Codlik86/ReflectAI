@@ -225,9 +225,9 @@ async def cmd_policy(m: Message):
         "Мы бережно относимся к приватности: сохраняется только то, что ты разрешаешь в настройках. Историю можно очистить в любой момент.",
     ]
     if TERMS_URL:
-        parts.append(f"• <a href='{TERMS_URL}'>Правила сервиса</a>")
+        parts.append(f"• <a href='https://s.craft.me/APV7T8gRf3w2Ay'>Правила сервиса</a>")
     if POLICY_URL:
-        parts.append(f"• <a href='{POLICY_URL}'>Политика конфиденциальности</a>")
+        parts.append(f"• <a href='https://s.craft.me/APV7T8gRf3w2Ay'>Политика конфиденциальности</a>")
     if not TERMS_URL and not POLICY_URL:
         parts.append("Ссылки не настроены. Добавь переменные окружения POLICY_URL и TERMS_URL.")
 
@@ -777,7 +777,7 @@ async def on_pay(m: Message):
 
 @router.message(Command("help"))
 async def on_help(m: Message):
-    await m.answer("Если нужна помощь по сервису, напиши на support@remember.example — мы ответим.")
+    await m.answer("Если нужна помощь по сервису, напиши на selflect@proton.me — мы ответим.")
 
 # ===== Общий чат: подмешиваем промпт + RAG + тон =====
 def _style_overlay(style_key: str | None) -> str:
@@ -868,11 +868,6 @@ async def on_text(m: Message):
         return
     # дефолт
     await m.answer("Я рядом и на связи. Нажми «Поговорить» или «Разобраться».", reply_markup=kb_main_menu())
-
-# ===== Доп. команды-синонимы =====
-@router.message(Command("menu"))
-async def on_menu(m: Message):
-    await m.answer("Меню:", reply_markup=kb_main_menu())
 
 # Служебная: открыть список тем (удобно после онбординга)
 @router.message(Command("work"))
