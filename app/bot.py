@@ -17,6 +17,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from app.meditations import get_categories, get_items, get_item
+from app.memory import save_user_message, save_bot_message
 
 # ===== Внутренние модули =====
 from .exercises import TOPICS, EXERCISES  # ожидается структура как в твоём exercises.py
@@ -825,8 +826,13 @@ async def _answer_with_llm(m: Message, user_text: str):
             pass
 
     if chat_with_style is None:
-        # на случай, если адаптер ещё не подключен
-        await m.answer("Я тебя слышу. Сейчас подключаюсь… (LLM-адаптер не сконфигурирован)")
+        text = "Я тебя слышу. Сейчас подключаюсь… (LLM-адаптер не сконфигурирован)"
+        await m.answer(text)
+        try:
+            from app.memory import save_bot_message
+            save_bot_message(str(chat_id), text)
+        except Exception:
+            pass
         return
 
     messages = [
@@ -842,9 +848,15 @@ async def _answer_with_llm(m: Message, user_text: str):
 
     if not reply:
         reply = "Я рядом. Давай попробуем ещё раз сформулировать мысль?"
+
     await m.answer(reply, reply_markup=kb_main_menu())
 
-
+    # === логируем реплику бота в память ===
+    try:
+        from app.memory import save_bot_message
+        save_bot_message(str(chat_id), reply)
+    except Exception:
+        pass
 
 @router.message(Command("debug_prompt"))
 async def on_debug_prompt(m: Message):
@@ -862,19 +874,44 @@ async def on_debug_prompt(m: Message):
     await m.answer(f"<b>mode</b>: {mode}\n<b>tone</b>: {style_key}\n\n<code>{preview}</code>")
 
 # ===== Обработка произвольного текста: talk/reflection =====
+from app.memory import save_user_message, save_bot_message  # ← импорт (держи рядом с другими импортами)
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
-    # в любом режиме, где ожидается чат
-    if CHAT_MODE.get(m.chat.id, "talk") in ("talk", "reflection"):
+    # 1) логируем входящее сообщение пользователя
+    try:
+        save_user_message(str(m.from_user.id), m.text or "")
+    except Exception:
+        pass
+
+    mode = CHAT_MODE.get(m.chat.id, "talk")
+
+    # 2) режим "Поговорить" / "Рефлексия" — отвечает LLM
+    if mode in ("talk", "reflection"):
         await _answer_with_llm(m, m.text)
         return
-    # если человек в «Разобраться», а пишет текст — мягко направим
-    if CHAT_MODE.get(m.chat.id) == "work":
-        await m.answer("Если хочешь обсудить — нажми «Поговорить». "
-                       "Если упражнение — выбери тему в «Разобраться».", reply_markup=kb_main_menu())
+
+    # 3) пользователь в "Разобраться", но прислал текст — мягко направляем
+    if mode == "work":
+        text = ("Если хочешь обсудить — нажми «Поговорить». "
+                "Если упражнение — выбери тему в «Разобраться».")
+        await m.answer(text, reply_markup=kb_main_menu())
+        # логируем ответ бота
+        try:
+            save_bot_message(str(m.chat.id), text)
+        except Exception:
+            pass
         return
-    # дефолт
-    await m.answer("Я рядом и на связи. Нажми «Поговорить» или «Разобраться».", reply_markup=kb_main_menu())
+
+    # 4) дефолтный ответ
+    text = "Я рядом и на связи. Нажми «Поговорить» или «Разобраться»."
+    await m.answer(text, reply_markup=kb_main_menu())
+    # логируем ответ бота
+    try:
+        save_bot_message(str(m.chat.id), text)
+    except Exception:
+        pass
+
 
 # ===== Доп. команды-синонимы =====
 @router.message(Command("menu"))
