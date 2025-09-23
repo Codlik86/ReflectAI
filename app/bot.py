@@ -341,6 +341,13 @@ async def on_onb_step2(cb: CallbackQuery):
 
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
+
+    # твой текущий UX остаётся: показываем правое меню и шаг «Что дальше?»
+    try:
+        await cb.answer("Спасибо! Принял ✅", show_alert=False)
+    except Exception:
+        pass
+    
     # логируем согласие → bot_events
     try:
         from sqlalchemy import text
@@ -375,12 +382,6 @@ async def on_onb_agree(cb: CallbackQuery):
             s.commit()
     except Exception:
         # не мешаем онбордингу, если что-то с БД
-        pass
-
-    # твой текущий UX остаётся: показываем правое меню и шаг «Что дальше?»
-    try:
-        await cb.answer("Спасибо! Принял ✅", show_alert=False)
-    except Exception:
         pass
 
     kb = None
