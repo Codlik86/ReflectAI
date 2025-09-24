@@ -12,6 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import Update, BotCommand
 
 from .memory_schema import ensure_memory_schema, ensure_users_policy_column
+from .memory_schema import ensure_users_created_at_column
 from .bot import router as bot_router
 
 # --- env (строго единые имена) ---
@@ -75,6 +76,7 @@ async def on_startup():
     # 1) гарантируем схему памяти (таблицы создадутся сами, если их нет)
     ensure_memory_schema()
     ensure_users_policy_column()
+    ensure_users_created_at_column()
 
     # 2) чистим вебхук и ставим заново
     try:
