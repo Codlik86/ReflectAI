@@ -39,22 +39,33 @@ dp.include_router(bot_router)
 app = FastAPI(title="ReflectAI webhook")
 
 
-async def _webhook_watchdog():
-    """Периодически проверяем и чиним вебхук, если он слетел/переклеен."""
-    while True:
-        try:
-            info = await bot.get_webhook_info()
-            if info.url != WEBHOOK_URL:
-                print(f"[watchdog] webhook mismatch ('{info.url}') -> set '{WEBHOOK_URL}'")
-                await bot.set_webhook(
-                    url=WEBHOOK_URL,
-                    secret_token=WEBHOOK_SECRET or None,
-                    allowed_updates=[],  # default набор
-                )
-        except Exception as e:
-            print("[watchdog] error:", repr(e))
-        await asyncio.sleep(max(5, WATCHDOG_INTERVAL_SEC))  # не давим API
+from aiogram.exceptions import TelegramRetryAfter
+import asyncio
 
+async def _webhook_watchdog():
+    backoff = 5
+    try:
+        while True:
+            try:
+                info = await bot.get_webhook_info()
+                if info.url != WEBHOOK_URL:
+                    print(f"[watchdog] webhook mismatch ('{info.url}') -> set '{WEBHOOK_URL}'")
+                    await bot.set_webhook(url=WEBHOOK_URL, secret_token=WEBHOOK_SECRET, allowed_updates=[])
+                    backoff = 5  # сброс бэкоффа
+            except TelegramRetryAfter as e:
+                wait = int(getattr(e, "retry_after", 1)) + 1
+                print(f"[watchdog] retry_after {wait}s")
+                await asyncio.sleep(wait)
+            except Exception as e:
+                print("[watchdog] error:", e)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+
+            # не давим API — спим фиксированный интервал
+            await asyncio.sleep(max(5, WATCHDOG_INTERVAL_SEC))
+    except asyncio.CancelledError:
+        # тихо выходим на остановке приложения
+        pass
 
 @app.get("/")
 async def root():
@@ -116,21 +127,16 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    # 1) аккуратно отменяем watchdog
+    # не трогаем webhook на shutdown (Телеге всё равно),
+    # если хотите — оставьте как было: await bot.delete_webhook(drop_pending_updates=False)
+
     task = getattr(app.state, "webhook_watchdog", None)
     if task:
         task.cancel()
-        with suppress(Exception):
+        try:
             await task
-        app.state.webhook_watchdog = None
-
-    # 2) вебхук можно не удалять (Телега продолжит слать), но ты явно просил чистить:
-    try:
-        await bot.delete_webhook(drop_pending_updates=False)
-        print("[shutdown] webhook deleted")
-    except Exception as e:
-        print("[shutdown] delete_webhook ERROR:", repr(e))
-
+        except asyncio.CancelledError:
+            pass
 
 # === сам вебхук (безопасный) ===
 @app.post(WEBHOOK_PATH)
