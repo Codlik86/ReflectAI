@@ -1,9 +1,8 @@
-
+# app/llm_adapter.py
 import os
 import json
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
-import asyncio
 import httpx
 
 """
@@ -14,7 +13,8 @@ llm_adapter.py
 Ключевые возможности:
 - Класс LLMAdapter с методом complete_chat(...)
 - Модульные функции chat(...) / complete_chat(...) на синглтоне
-- Обёртка chat_with_style(...), аккуратно подмешивающая style_hint в system
+- Обёртка chat_with_style(...), аккуратно подмешивающая style/style_hint в system
+- Поддержка подмешивания RAG-контекста (rag_ctx) отдельным system-сообщением
 - Безопасные дефолты: модель и базовый URL берутся из окружения:
     OPENAI_API_KEY
     OPENAI_BASE_URL (например, https://api.proxyapi.ru/openai/v1)
@@ -24,6 +24,7 @@ llm_adapter.py
 DEFAULT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.proxyapi.ru/openai/v1").rstrip("/")
+
 
 # --------- Core adapter ---------
 
@@ -87,21 +88,20 @@ class LLMAdapter:
         payload: Dict[str, Any] = {
             "model": model or self.model,
             "messages": msg_list,
-            "temperature": temperature,
+            "temperature": float(temperature),
         }
         if top_p is not None:
             payload["top_p"] = top_p
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
 
-        # Pass-through other opts (e.g., response_format, stop)
+        # Pass-through other opts (e.g., response_format, stop, n, penalties)
         for k, v in kwargs.items():
             if k in ("stop", "presence_penalty", "frequency_penalty", "response_format", "n"):
                 payload[k] = v
 
         client = await self._get_client()
-        # OpenAI-compatible path
-        url = "/chat/completions"
+        url = "/chat/completions"  # OpenAI-compatible path
 
         try:
             r = await client.post(url, json=payload)
@@ -120,6 +120,7 @@ class LLMAdapter:
             # Fallback to raw text for debugging
             return json.dumps(data, ensure_ascii=False)
 
+
 # --- Module-level singleton & helpers (so chat_with_style can call them) ---
 _ADAPTER: Optional[LLMAdapter] = None
 
@@ -128,6 +129,7 @@ def _get_adapter() -> LLMAdapter:
     if _ADAPTER is None:
         _ADAPTER = LLMAdapter()
     return _ADAPTER
+
 
 async def chat(
     *,
@@ -145,13 +147,16 @@ async def chat(
         messages=messages, system=system, user=user, temperature=temperature, **opts
     )
 
+
 async def complete_chat(*args, **kwargs) -> str:
     # Совместимость с поиском имени в chat_with_style
     return await chat(*args, **kwargs)
 
-# --- Style wrapper ---
+
+# --- Helpers ---
 
 def _inject_style_into_system(system_text: Optional[str], style_hint: Optional[str]) -> str:
+    """Склеиваем system + style (если задан)."""
     base = (system_text or "").strip()
     if style_hint:
         if base:
@@ -160,23 +165,43 @@ def _inject_style_into_system(system_text: Optional[str], style_hint: Optional[s
             base = style_hint.strip()
     return base or "Ты — тёплый русскоязычный собеседник и друг. Общайся на «ты», без диагнозов и медицинских рекомендаций."
 
+
+def _append_rag_context(msgs: List[Dict[str, str]], rag_ctx: Optional[str]) -> List[Dict[str, str]]:
+    """Подмешиваем RAG-контекст отдельным system-сообщением (если есть)."""
+    if rag_ctx and isinstance(rag_ctx, str) and rag_ctx.strip():
+        msgs = msgs + [{"role": "system", "content": f"Контекст:\n{rag_ctx.strip()}"}]
+    return msgs
+
+
+# --- Style wrapper (с поддержкой rag_ctx и обратной совместимостью по style_hint) ---
+
 async def chat_with_style(
     *,
-    messages: Optional[List[Dict[str, str]]] = None,
+    # основной путь: system + messages
     system: Optional[str] = None,
+    messages: Optional[List[Dict[str, str]]] = None,
+    # альтернативный путь: system + user (если messages не задан)
     user: Optional[str] = None,
-    style_hint: Optional[str] = None,
+    # стилизация
+    style: Optional[str] = None,
+    style_hint: Optional[str] = None,  # алиас для обратной совместимости
+    # контекст поиска/базы (опционально)
+    rag_ctx: Optional[str] = None,
+    # сэмплинг
     temperature: float = 0.6,
     **kwargs: Any
 ) -> str:
     """
-    Обёртка, которая добавляет style_hint в system и делегирует базовой chat(...).
+    Обёртка, которая добавляет style/style_hint в system и опционально подмешивает rag_ctx.
+    Затем делегирует базовой chat(...).
     """
-    sys = _inject_style_into_system(system, style_hint)
+    # 1) Склеиваем system + style (или style_hint)
+    style_text = style if style is not None else style_hint
+    sys = _inject_style_into_system(system, style_text)
 
-    # Если нам передали messages, аккуратно добавим/заменим system
+    # 2) Если нам передали messages, аккуратно добавим/заменим system
     if messages is not None:
-        msgs = []
+        msgs: List[Dict[str, str]] = []
         system_found = False
         for m in messages:
             if m.get("role") == "system" and not system_found:
@@ -186,7 +211,14 @@ async def chat_with_style(
                 msgs.append(m)
         if not system_found:
             msgs.insert(0, {"role": "system", "content": sys})
+
+        # Подмешиваем RAG-контекст отдельным system-сообщением в хвост
+        msgs = _append_rag_context(msgs, rag_ctx)
         return await chat(messages=msgs, temperature=temperature, **kwargs)
 
-    # Иначе — путь system+user
-    return await chat(system=sys, user=user, temperature=temperature, **kwargs)
+    # 3) Если messages не задан — путь system+user
+    msgs = [{"role": "system", "content": sys}]
+    msgs = _append_rag_context(msgs, rag_ctx)
+    if user:
+        msgs.append({"role": "user", "content": user})
+    return await chat(messages=msgs, temperature=temperature, **kwargs)

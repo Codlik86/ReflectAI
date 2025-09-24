@@ -72,8 +72,6 @@ CREATE TABLE IF NOT EXISTS bot_daily_summaries (
 
 def _exec_postgres_multistmt(sql: str) -> None:
     """Бьём скрипт на одиночные выражения и выполняем по одному (Postgres)."""
-    # Грубо, но надёжно: делим по ';' и исполняем непустые куски.
-    # (Если у тебя когда-то появятся ';' внутри функций/процедур — лучше перейти на Alembic.)
     statements = [s.strip() for s in sql.split(";") if s.strip()]
     with db_session() as s:
         for stmt in statements:
@@ -83,7 +81,6 @@ def _exec_postgres_multistmt(sql: str) -> None:
 
 def _exec_sqlite_script(sql: str) -> None:
     """Выполняем весь скрипт одним вызовом executescript (SQLite)."""
-    # Берём сырой коннектор sqlite3 из движка SQLAlchemy и шлём executescript
     raw_conn = _engine.raw_connection()
     try:
         raw_conn.executescript(sql)
@@ -93,8 +90,71 @@ def _exec_sqlite_script(sql: str) -> None:
 
 
 def ensure_memory_schema() -> None:
+    """Создаёт (если нет) таблицы bot_messages и bot_daily_summaries."""
     if _is_sqlite(_engine):
         _exec_sqlite_script(SQL_SQLITE)
     else:
         _exec_postgres_multistmt(SQL_POSTGRES)
     print("[memory] schema ensured (bot_messages, bot_daily_summaries)")
+
+
+def _users_has_column_sqlite(column: str) -> bool:
+    with db_session() as s:
+        cols = s.execute(text("PRAGMA table_info(users)")).fetchall()
+    colnames = {c[1] for c in cols}  # c[1] = name
+    return column in colnames
+
+
+def _users_has_column_postgres(column: str) -> bool:
+    q = text("""
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'users' AND column_name = :col
+        LIMIT 1
+    """)
+    with db_session() as s:
+        return s.execute(q, {"col": column}).scalar() is not None
+
+
+def ensure_users_policy_column() -> None:
+    """
+    Гарантируем наличие столбцов в users:
+      - policy_accepted_at (DATETIME/timestamptz)
+      - privacy_level (TEXT, default 'insights')
+    Совместимо и с SQLite, и с Postgres. Любые ошибки — мягко логируем.
+    """
+    try:
+        if _is_sqlite(_engine):
+            # SQLite
+            need_alter = False
+            if not _users_has_column_sqlite("policy_accepted_at"):
+                with db_session() as s:
+                    s.execute(text("ALTER TABLE users ADD COLUMN policy_accepted_at DATETIME"))
+                    s.commit()
+                print("[memory] users.policy_accepted_at added (sqlite)")
+                need_alter = True
+
+            if not _users_has_column_sqlite("privacy_level"):
+                with db_session() as s:
+                    s.execute(text("ALTER TABLE users ADD COLUMN privacy_level TEXT DEFAULT 'insights'"))
+                    s.commit()
+                print("[memory] users.privacy_level added (sqlite)")
+
+        else:
+            # Postgres
+            # Проверяем и добавляем по отдельности
+            if not _users_has_column_postgres("policy_accepted_at"):
+                with db_session() as s:
+                    s.execute(text("ALTER TABLE public.users ADD COLUMN IF NOT EXISTS policy_accepted_at timestamptz"))
+                    s.commit()
+                print("[memory] users.policy_accepted_at added (postgres)")
+
+            if not _users_has_column_postgres("privacy_level"):
+                with db_session() as s:
+                    s.execute(text("ALTER TABLE public.users ADD COLUMN IF NOT EXISTS privacy_level text DEFAULT 'insights'"))
+                    s.commit()
+                print("[memory] users.privacy_level added (postgres)")
+
+    except Exception as e:
+        # Важно не ронять процесс из-за миграции в рантайме
+        print("[memory] ensure_users_policy_column WARNING:", repr(e))

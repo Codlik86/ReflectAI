@@ -1,7 +1,8 @@
 # app/tools.py
 import asyncio
 import time
-from typing import Dict, Optional
+import json
+from typing import Dict, Optional, Any
 from aiogram.types import Message
 
 # ====== РЕФРЕЙМИНГ (тексты шагов) ======
@@ -136,3 +137,75 @@ def start_breathing_task(message: Message, user_id: str) -> asyncio.Task:
     t = asyncio.create_task(_breathing_loop(message, ev))
     _running_tasks[user_id] = t
     return t
+
+# ====== UX-утилиты для бота ======
+
+# Безопасное редактирование сообщения с фолбэком на отправку нового
+async def safe_edit(msg: Message, text: str, reply_markup: Optional[Any] = None):
+    """
+    Пытается отредактировать текст сообщения.
+    Если редактирование невозможно (message is not modified / слишком старое / другое),
+    отправляет новое сообщение тем же чатом.
+    """
+    try:
+        await msg.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=True)
+    except Exception:
+        try:
+            await msg.answer(text, reply_markup=reply_markup, disable_web_page_preview=True)
+        except Exception:
+            # Последний шанс — молча проглатываем, чтобы не ронять вебхук
+            pass
+
+# Анти-дубль для callback_query: хранение последних id в памяти процесса (TTL)
+_CALLBACK_TTL_SEC = 600  # 10 минут
+_processed_cb: Dict[str, float] = {}  # cbq.id -> timestamp
+
+def is_duplicate_callback(cbq_id: str) -> bool:
+    """
+    Возвращает True, если этот callback уже обрабатывался недавно.
+    Хранение в памяти процесса; при множестве воркеров можно вынести в БД/кэш.
+    """
+    now = time.monotonic()
+    # Очистка старых записей (ленивая)
+    stale = [k for k, ts in _processed_cb.items() if (now - ts) > _CALLBACK_TTL_SEC]
+    for k in stale:
+        _processed_cb.pop(k, None)
+
+    if cbq_id in _processed_cb:
+        return True
+    _processed_cb[cbq_id] = now
+    return False
+
+# Лёгкое логирование событий в БД (для метрик)
+def log_event(user_id: Optional[int], event_type: str, payload: Optional[dict] = None):
+    """
+    Пишет событие в таблицу bot_events (если она есть по ORM).
+    Безопасно: ошибки проглатываются.
+    """
+    try:
+        from app.db import db_session, BotEvent
+        with db_session() as s:
+            be = BotEvent(
+                user_id=int(user_id) if user_id is not None else None,
+                event_type=str(event_type),
+                payload=json.dumps(payload, ensure_ascii=False) if payload else None,
+            )
+            s.add(be)
+            s.commit()
+    except Exception:
+        # Логирование не должно валить обработку апдейта
+        pass
+
+__all__ = [
+    "REFRAMING_STEPS",
+    "BREATHING_SCRIPT",
+    "BODY_SCAN_TEXT",
+    "debounce_ok",
+    "has_running_task",
+    "stop_user_task",
+    "wait_task_finish",
+    "start_breathing_task",
+    "safe_edit",
+    "is_duplicate_callback",
+    "log_event",
+]

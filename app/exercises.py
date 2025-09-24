@@ -21,6 +21,8 @@ EXERCISES = {
 основанная осознанность и др.).
 """
 
+from typing import List, Dict, Optional
+
 # ==== Темы для раздела «Разобраться» ====
 TOPICS = {
     "__order__": [
@@ -43,7 +45,7 @@ TOPICS = {
     "anxiety":          {"title": "Тревога",                   "emoji": "😟"},   # ← добавлено
     "panic_attack":     {"title": "Паническая атака",          "emoji": "🌀"},   # ← добавлено
     "social_anxiety":   {"title": "Социальная тревога",        "emoji": "🫥"},
-    "reflection":       {"title": "Рефлексия",                  "emoji": "✨"},
+    "reflection":       {"title": "Рефлексия",                 "emoji": "✨"},
 }
 
 
@@ -332,4 +334,56 @@ EXERCISES = {
     },
 }
 
-__all__ = ["TOPICS", "EXERCISES"]
+# ===== Сервисные функции для бота (ничего не ломают в структуре) =====
+
+def get_topics() -> List[Dict[str, str]]:
+    """
+    Возвращает список тем в порядке TOPICS['__order__'] (если задан), иначе — по ключам.
+    Формат: [{"id","title","emoji"}]
+    """
+    order = [t for t in TOPICS.get("__order__", []) if t in TOPICS]
+    if not order:
+        order = [k for k in TOPICS.keys() if k != "__order__"]
+
+    items: List[Dict[str, str]] = []
+    for tid in order:
+        meta = TOPICS.get(tid) or {}
+        items.append({
+            "id": tid,
+            "title": meta.get("title", tid),
+            "emoji": meta.get("emoji", ""),
+        })
+    return items
+
+
+def get_exercises(topic_id: str) -> List[Dict[str, str]]:
+    """
+    Возвращает список упражнений темы.
+    Формат: [{"id","title"}]
+    """
+    topic = EXERCISES.get(topic_id, {})
+    items: List[Dict[str, str]] = []
+    for ex_id, ex in topic.items():
+        title = (ex or {}).get("title", ex_id)
+        items.append({"id": ex_id, "title": title})
+    return items
+
+
+def get_exercise(topic_id: str, ex_id: str) -> Optional[Dict[str, object]]:
+    """
+    Возвращает полное описание упражнения: {"id","title","intro","steps"} или None.
+    """
+    ex = (EXERCISES.get(topic_id) or {}).get(ex_id)
+    if not ex:
+        return None
+    steps = ex.get("steps") or []
+    # Гарантируем тип списка строк
+    steps_norm = [str(s) for s in steps]
+    return {
+        "id": ex_id,
+        "title": ex.get("title", ex_id),
+        "intro": ex.get("intro", ""),
+        "steps": steps_norm,
+    }
+
+__all__ = ["TOPICS", "EXERCISES", "get_topics", "get_exercises", "get_exercise"]

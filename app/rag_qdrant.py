@@ -1,3 +1,4 @@
+# app/rag_qdrant.py
 # -*- coding: utf-8 -*-
 """
 RAG via Qdrant: тихое подмешивание контекста.
@@ -42,9 +43,11 @@ def _get_embedder():
             from openai import OpenAI  # type: ignore
             client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL or None)
             model = EMBED_MODEL
+
             def _emb(texts: List[str]) -> List[List[float]]:
                 res = client.embeddings.create(model=model, input=texts)
                 return [d.embedding for d in res.data]
+
             return _emb
         except Exception:
             pass
@@ -52,16 +55,22 @@ def _get_embedder():
     try:
         from sentence_transformers import SentenceTransformer  # type: ignore
         m = SentenceTransformer(SBERT_MODEL)
+
         def _emb(texts: List[str]) -> List[List[float]]:
             return m.encode(texts, normalize_embeddings=False).tolist()
+
         return _emb
     except Exception:
-        raise RuntimeError("No embedding provider available. Set OPENAI_API_KEY (and OPENAI_BASE_URL если прокси) или установи sentence-transformers.")
+        raise RuntimeError(
+            "No embedding provider available. "
+            "Укажи OPENAI_API_KEY (и OPENAI_BASE_URL если прокси) или установи sentence-transformers."
+        )
 
 _EMBED = _get_embedder()
 
 async def embed(text: str) -> List[float]:
-    return _EMBED([text])[0]
+    # На случай тяжёлых провайдеров выполняем в пуле потоков
+    return (await asyncio.to_thread(_EMBED, [text]))[0]
 
 # --- Утилиты
 def _title(payload: Dict[str, Any]) -> str:
@@ -89,6 +98,10 @@ def _dot(a, b): return sum(x*y for x, y in zip(a, b))
 def _norm(a): return math.sqrt(sum(x*x for x in a)) or 1.0
 def _cos(a, b): return _dot(a,b) / (_norm(a)*_norm(b))
 
+# --- Вспомогательные обёртки над синхронным Qdrant-клиентом
+async def _qdrant_search_async(client, **kwargs):
+    return await asyncio.to_thread(client.search, **kwargs)
+
 # --- MMR контекст
 async def build_context_mmr(
     query: str,
@@ -104,6 +117,9 @@ async def build_context_mmr(
     3) забираем select штук MMR-логикой
     4) собираем до max_chars с обрезкой по предложениям
     """
+    if not (query or "").strip():
+        return "", []
+
     from qdrant_client.http import models as qm  # type: ignore
 
     client = get_client()
@@ -115,7 +131,8 @@ async def build_context_mmr(
 
     # допускаем старый search (он проще), но можно заменить на query_points
     try:
-        hits = client.search(
+        hits = await _qdrant_search_async(
+            client,
             collection_name=QDRANT_COLLECTION,
             query_vector=qvec,  # type: ignore[arg-type]
             limit=initial_limit,
@@ -124,7 +141,8 @@ async def build_context_mmr(
         )
     except Exception:
         # если что — без фильтра (на случай отсутствия индекса по lang)
-        hits = client.search(
+        hits = await _qdrant_search_async(
+            client,
             collection_name=QDRANT_COLLECTION,
             query_vector=qvec,  # type: ignore[arg-type]
             limit=initial_limit,
@@ -150,10 +168,10 @@ async def build_context_mmr(
     if not cand:
         return "", []
 
-    # Локальные эмбеддинги кандидатов (для диверсификации)
-    vecs = _EMBED(texts)
+    # Локальные эмбеддинги кандидатов (для диверсификации) — в пуле потоков
+    vecs = await asyncio.to_thread(_EMBED, texts)
 
-    # Похожесть запроса к каждому кандидату (по счёту Qdrant тоже сойдёт, но пересчёт устойчивее)
+    # Похожесть запроса к каждому кандидату (пересчёт устойчивее)
     sims_q = [_cos(qvec, v) for v in vecs]
 
     selected_idx: List[int] = []
@@ -217,6 +235,9 @@ async def build_context_mmr(
     ctx = "\n\n---\n\n".join(pieces).strip()
     meta = [{"source": cand[i]["src"], "title": cand[i]["title"], "score": sims_q[i], "payload": cand[i]["payload"]} for i in selected_idx]
 
+    if RAG_TRACE:
+        print(f"[RAG] query='{query[:80]}', pieces={len(pieces)}, chars={len(ctx)}")
+
     return ctx, meta
 
 # --- Сжатие контекста (опционально)
@@ -228,7 +249,7 @@ async def compress_context(ctx: str, query: str, *, max_chars: int) -> str:
         cli = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL or None)
         sys = "Ты лаконично сжимаешь русские выдержки по психологии и КПТ, сохраняя факты и практические шаги."
         usr = (
-            "Запрос пользователя:\n"
+            "Запрос пользователя:\н"
             f"{query}\n\n"
             "Ниже выдержки из статей/руководств (может быть несколько фрагментов):\n"
             f"{ctx}\n\n"
