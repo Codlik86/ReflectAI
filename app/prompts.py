@@ -152,5 +152,13 @@ STYLE_TALK = """\
    • чаще предлагай выбор («Что берёшь сейчас: А или Б?») или маленький шаг («Хочешь попробовать 10 минут…?»).
 """
 
-# Подмешиваем в TALK системный промпт расширение стиля
-TALK_SYSTEM_PROMPT = TALK_SYSTEM_PROMPT + "\n\n" + STYLE_TALK
+# Подмешиваем в TALK системный промпт расширение стиля (идемпотентно)
+if STYLE_TALK not in TALK_SYSTEM_PROMPT:
+    TALK_SYSTEM_PROMPT = TALK_SYSTEM_PROMPT + "\n\n" + STYLE_TALK
+
+__all__ = [
+    "SYSTEM_PROMPT",
+    "ASSISTANT_PROMPT",
+    "TALK_SYSTEM_PROMPT",
+    "STYLE_TALK",
+]

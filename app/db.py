@@ -1,3 +1,4 @@
+# app/db.py
 import os
 from datetime import datetime
 from typing import List, Optional
@@ -24,11 +25,17 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tg_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    # старое поле приватности (оставляем для совместимости):
-    # none | insights | all
+
+    # старое поле приватности (оставляем для совместимости): none | insights | all
     privacy_level: Mapped[str] = mapped_column(String(16), default="insights")
+
+    # согласие с правилами/политикой (онбординг)
+    policy_accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # служебное
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # удобные связи (не обязательны к использованию)
     journal_entries: Mapped[List["JournalEntry"]] = relationship(
@@ -48,7 +55,7 @@ class User(Base):
 class Insight(Base):
     __tablename__ = "insights"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tg_id: Mapped[str] = mapped_column(String(64), index=True)
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -60,7 +67,7 @@ class JournalEntry(Base):
     """Сырые записи дневника"""
     __tablename__ = "journal_entries"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     tags: Mapped[Optional[str]] = mapped_column(Text, default=None)  # произвольные пометки "mood:..., topic:..."
@@ -112,7 +119,7 @@ class BotEvent(Base):
     """Событийные логи (для метрик/аналитики)"""
     __tablename__ = "bot_events"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, index=True)  # FK опционален (упрощаем для SQLite)
     event_type: Mapped[str] = mapped_column(String(64), index=True)  # diary_message|assist_reply|audio_play|...
     payload: Mapped[Optional[str]] = mapped_column(Text, default=None)
@@ -128,4 +135,4 @@ def db_session() -> Session:
     """Возвращает сессию SQLAlchemy. Можно использовать как контекст-менеджер:
        with db_session() as s: ...
     """
-    return Session(_engine)
+    return Session(_engine, expire_on_commit=False)
