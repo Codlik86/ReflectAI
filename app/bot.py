@@ -97,6 +97,47 @@ def _purge_user_history(tg_id: int) -> int:
         s.commit()
         return int(cnt)
 
+# --- Анти-штампы и эвристики «шаблонности»
+BANNED_PHRASES = [
+    "это, безусловно, очень трудная ситуация",
+    "я понимаю, как ты себя чувствуешь",
+    "важно дать себе время и пространство",
+    "не забывай заботиться о себе",
+    "если тебе нужно, можешь обратиться к друзьям"
+]
+
+def _has_banned_phrases(text: str) -> bool:
+    t = (text or "").lower()
+    return any(p in t for p in BANNED_PHRASES)
+
+def _jaccard(a: str, b: str) -> float:
+    sa = set(a.lower().split())
+    sb = set(b.lower().split())
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+def _too_similar_to_recent(chat_id: int, candidate: str, *, lookback: int = 8, thr: float = 0.62) -> bool:
+    try:
+        recent = get_recent_messages(chat_id, limit=lookback*2)
+        prev_bot = [m["text"] for m in recent if m["role"] == "bot"][-lookback:]
+    except Exception:
+        prev_bot = []
+    return any(_jaccard(candidate, old) >= thr for old in prev_bot)
+
+def _looks_templatey(text: str) -> bool:
+    return _has_banned_phrases(text)
+
+# --- «дневничковая» длина: когда можно расписать подробнее
+STRUCTURE_KEYWORDS = [
+    "что делать", "как поступить", "план", "шаги", "структур",
+    "объясни", "разложи", "почему", "как справиться", "помоги разобраться",
+]
+
+def _wants_structure(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    return (len(t) >= 240) or any(k in t for k in STRUCTURE_KEYWORDS)
+
 # ===== Универсальный safe_edit (не роняет UX) =====
 async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
     try:
@@ -614,13 +655,18 @@ async def on_tone_pick(cb: CallbackQuery):
 # ===== LLM-помощник =====
 def _style_overlay(style_key: str | None) -> str:
     if not style_key or style_key == "default":
-        return ""
+        return ("Начинай с наблюдения или уточнения, без клише. "
+                "Если уместно — мини-план 2–5 пунктов или 2–4 абзаца пояснения. "
+                "Всегда 1 вопрос/вилка в конце.")
     if style_key == "friend":
-        return "Стиль: тёплый, дружеский, на «ты». Поддерживай и говори простыми словами."
+        return ("Разговорно и по-простому. Без клише «понимаю/держись». "
+                "Можно мини-план, если человеку нужна структура. В конце — вопрос/вилка.")
     if style_key == "therapist":
-        return "Стиль: бережный, психологичный, задавай мягкие проясняющие вопросы, добавляй осторожные факты и избегай диагнозов."
+        return ("Психологичный, но конкретный: проясняй фокус, объясняй кратко, "
+                "давай 1 небольшой шаг или мини-план. Без лекций и штампов.")
     if style_key == "18plus":
-        return "Стиль: допускается разговорный, чуть смелее формулировки без грубости."
+        return ("Можно смелее формулировки (без грубости). Конкретика, при необходимости мини-план. "
+                "Финал — вопрос/вилка.")
     return ""
 
 async def _answer_with_llm(m: Message, user_text: str):
@@ -635,6 +681,14 @@ async def _answer_with_llm(m: Message, user_text: str):
         sys_prompt = sys_prompt + "\n\n" + overlay
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
+
+    # 1.5) Подсказка по длине/форме (как у «Дневничка»)
+    length_hint = (
+        "Если запрос комплексный или человек просит структуру — допускай развёрнутый ответ: "
+        "2–4 коротких абзаца ИЛИ список из 2–5 пунктов (мини-план). "
+        "Всегда заверши 1 вопросом или вилкой."
+    )
+    sys_prompt = sys_prompt + "\n\n" + length_hint
 
     # 2) История (старые → новые)
     history_msgs: List[dict] = []
@@ -656,25 +710,71 @@ async def _answer_with_llm(m: Message, user_text: str):
 
     messages = [{"role": "system", "content": sys_prompt}]
     if rag_ctx:
-        messages.append({"role": "system", "content": f"Фактический контекст по теме (используй по необходимости):\n{rag_ctx}"})
+        messages.append({
+            "role": "system",
+            "content": f"Фактический контекст по теме (используй по необходимости):\n{rag_ctx}"
+        })
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
-    # 4) Вызов LLM
+    # 4) Вызов LLM (две попытки: базовая + анти-штамповая), с запасом токенов
     if chat_with_style is None:
-        await m.answer("Я тебя слышу. Сейчас подключаюсь…"); return
+        await m.answer("Я тебя слышу. Сейчас подключаюсь…")
+        return
 
+    wants_struct = _wants_structure(user_text)
+
+    def _needs_regen(text: str) -> bool:
+        return not text or _looks_templatey(text) or _too_similar_to_recent(chat_id, text)
+
+    # Первая попытка
     try:
-        reply = await chat_with_style(messages=messages, style_hint=None)
+        reply = await chat_with_style(
+            messages=messages,
+            temperature=0.7 if not wants_struct else 0.8,
+            top_p=0.95,
+            max_tokens=500,
+        )
     except TypeError:
-        # на всякий случай поддержим старую сигнатуру
-        reply = await chat_with_style(messages)
+        # на случай старой сигнатуры адаптера
+        reply = await chat_with_style(messages, temperature=0.8, max_tokens=500)
     except Exception:
-        reply = "Кажется, соединение подвисло. Давай попробуем ещё раз?"
+        reply = ""
+
+    # Если клишировано/похоже на прошлые — просим переписать живее, не ужимая специально
+    if _needs_regen(reply):
+        fixer_system = (
+            "Перепиши ответ живее, без штампов и общих фраз. "
+            "Начни с наблюдения/уточнения или микро-вывода (не с «понимаю/это сложно»). "
+            "Допускается развёрнутый ответ: 2–4 коротких абзаца ИЛИ список из 2–5 пунктов (мини-план), "
+            "когда есть что структурировать. Заверши 1 вопросом или вилкой. "
+            "Избегай фраз из чёрного списка: " + "; ".join(BANNED_PHRASES) + "."
+        )
+        refine_msgs = [
+            {"role": "system", "content": fixer_system},
+            {"role": "user", "content": f"Черновик ответа (перепиши в духе требований):\n\n{reply or '(пусто)'}"},
+        ]
+        try:
+            better = await chat_with_style(
+                messages=refine_msgs,
+                temperature=0.85,
+                top_p=0.95,
+                max_tokens=520,
+            )
+        except TypeError:
+            better = await chat_with_style(refine_msgs, temperature=0.85, max_tokens=520)
+        except Exception:
+            better = ""
+        if better and not _needs_regen(better):
+            reply = better
 
     if not reply:
-        reply = "Я рядом. Давай попробуем ещё раз сформулировать мысль?"
+        reply = (
+            "Если сузить до самого важного — какой момент тут тянет больше всего? "
+            "Хочешь, накину 2–4 шага мини-плана?"
+        )
 
+    # 5) Отправляем и логируем исходящую реплику
     await m.answer(reply, reply_markup=kb_main_menu())
     try:
         save_bot_message(chat_id, reply)
