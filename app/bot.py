@@ -682,18 +682,10 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
 
-    # 1.5) Подсказка по длине/форме (как у «Дневничка»)
-    length_hint = (
-        "Если запрос комплексный или человек просит структуру — допускай развёрнутый ответ: "
-        "2–4 коротких абзаца ИЛИ список из 2–5 пунктов (мини-план). "
-        "Всегда заверши 1 вопросом или вилкой."
-    )
-    sys_prompt = sys_prompt + "\n\n" + length_hint
-
     # 2) История (старые → новые)
     history_msgs: List[dict] = []
     try:
-        recent = get_recent_messages(chat_id, limit=60)
+        recent = get_recent_messages(chat_id, limit=70)  # чуть больше окна
         for r in recent:
             role = "assistant" if r["role"] == "bot" else "user"
             history_msgs.append({"role": role, "content": r["text"]})
@@ -704,51 +696,48 @@ async def _answer_with_llm(m: Message, user_text: str):
     rag_ctx = ""
     if rag_search is not None:
         try:
-            rag_ctx = await rag_search(user_text, k=6, max_chars=800, lang="ru")
+            rag_ctx = await rag_search(user_text, k=6, max_chars=900, lang="ru")
         except Exception:
             rag_ctx = ""
 
     messages = [{"role": "system", "content": sys_prompt}]
     if rag_ctx:
-        messages.append({
-            "role": "system",
-            "content": f"Фактический контекст по теме (используй по необходимости):\n{rag_ctx}"
-        })
+        messages.append({"role": "system", "content": f"Фактический контекст по теме (используй по необходимости):\n{rag_ctx}"})
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
-    # 4) Вызов LLM (две попытки: базовая + анти-штамповая), с запасом токенов
+    # 4) Вызов LLM (две попытки: базовая + анти-штамповая)
     if chat_with_style is None:
         await m.answer("Я тебя слышу. Сейчас подключаюсь…")
         return
 
-    wants_struct = _wants_structure(user_text)
+    # Хотим позволять 2–4 абзаца, если есть смысл — задаём потолок токенов
+    LLM_MAX_TOKENS = 480
 
     def _needs_regen(text: str) -> bool:
         return not text or _looks_templatey(text) or _too_similar_to_recent(chat_id, text)
 
-    # Первая попытка
+    # Первая попытка — обычная (чуть теплее и длиннее)
     try:
         reply = await chat_with_style(
             messages=messages,
-            temperature=0.7 if not wants_struct else 0.8,
-            top_p=0.95,
-            max_tokens=500,
+            style_hint=None,
+            temperature=0.85,
+            max_tokens=LLM_MAX_TOKENS,
         )
     except TypeError:
-        # на случай старой сигнатуры адаптера
-        reply = await chat_with_style(messages, temperature=0.8, max_tokens=500)
+        reply = await chat_with_style(messages, temperature=0.85, max_tokens=LLM_MAX_TOKENS)
     except Exception:
         reply = ""
 
-    # Если клишировано/похоже на прошлые — просим переписать живее, не ужимая специально
+    # Если звучит шаблонно или повторяет прошлое — просим переписать живее, допускаем 2–4 абзаца
     if _needs_regen(reply):
         fixer_system = (
-            "Перепиши ответ живее, без штампов и общих фраз. "
-            "Начни с наблюдения/уточнения или микро-вывода (не с «понимаю/это сложно»). "
-            "Допускается развёрнутый ответ: 2–4 коротких абзаца ИЛИ список из 2–5 пунктов (мини-план), "
-            "когда есть что структурировать. Заверши 1 вопросом или вилкой. "
-            "Избегай фраз из чёрного списка: " + "; ".join(BANNED_PHRASES) + "."
+            "Перепиши ответ живее, без клише и общих слов.\n"
+            "Формат: начни с наблюдения/уточнения или короткого вывода (не с «понимаю/это сложно»), "
+            "пиши конкретно, по делу. Допускается 2–4 коротких абзаца ИЛИ 2–5 пунктов, если это помогает. "
+            "Один мягкий вопрос/вилка в конце. Избегай фраз из чёрного списка: "
+            + "; ".join(BANNED_PHRASES) + "."
         )
         refine_msgs = [
             {"role": "system", "content": fixer_system},
@@ -757,24 +746,19 @@ async def _answer_with_llm(m: Message, user_text: str):
         try:
             better = await chat_with_style(
                 messages=refine_msgs,
-                temperature=0.85,
-                top_p=0.95,
-                max_tokens=520,
+                temperature=0.8,
+                max_tokens=LLM_MAX_TOKENS,
             )
         except TypeError:
-            better = await chat_with_style(refine_msgs, temperature=0.85, max_tokens=520)
+            better = await chat_with_style(refine_msgs, temperature=0.8, max_tokens=LLM_MAX_TOKENS)
         except Exception:
             better = ""
         if better and not _needs_regen(better):
             reply = better
 
     if not reply:
-        reply = (
-            "Если сузить до самого важного — какой момент тут тянет больше всего? "
-            "Хочешь, накину 2–4 шага мини-плана?"
-        )
+        reply = "Давай сузим: какой момент здесь для тебя самый болезненный? Два-три предложения."
 
-    # 5) Отправляем и логируем исходящую реплику
     await m.answer(reply, reply_markup=kb_main_menu())
     try:
         save_bot_message(chat_id, reply)
