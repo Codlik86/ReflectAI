@@ -48,8 +48,8 @@ def _ensure_user_and_get_id(tg_id: str | int) -> int:
         if uid is None:
             # privacy_level по умолчанию — 'insights' (как и раньше)
             s.execute(
-                text("INSERT INTO users (tg_id, privacy_level, created_at) VALUES (:tg, :pl, CURRENT_TIMESTAMP)"),
-                {"tg": str(tg_id), "pl": _DEFAULT_PRIVACY}
+                text("INSERT INTO users (tg_id, privacy_level, created_at) VALUES (:tg, 'insights', CURRENT_TIMESTAMP)"),
+    {"tg": str(tg_id)}
             )
             uid = s.execute(
                 text("SELECT id FROM users WHERE tg_id = :tg"),

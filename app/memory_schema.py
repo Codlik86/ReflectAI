@@ -158,3 +158,22 @@ def ensure_users_policy_column() -> None:
     except Exception as e:
         # Важно не ронять процесс из-за миграции в рантайме
         print("[memory] ensure_users_policy_column WARNING:", repr(e))
+
+def ensure_users_created_at_column():
+    """
+    Гарантируем наличие users.created_at с дефолтом CURRENT_TIMESTAMP.
+    Работает для SQLite (через PRAGMA table_info) и не роняет процесс.
+    """
+    try:
+        with db_session() as s:
+            cols = s.execute(text("PRAGMA table_info(users)")).fetchall()
+            colnames = {c[1] for c in cols}  # name
+            if "created_at" not in colnames:
+                s.execute(text(
+                    "ALTER TABLE users ADD COLUMN created_at DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP)"
+                ))
+                s.commit()
+    except Exception:
+        # Для Postgres можно позже сделать отдельную миграцию через Alembic,
+        # но тут просто не роняем, если столбец уже есть
+        pass

@@ -68,7 +68,8 @@ def _ensure_user_id(tg_id: int) -> int:
     with db_session() as s:
         uid = s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": str(tg_id)}).scalar()
         if uid is None:
-            s.execute(text("INSERT INTO users (tg_id, privacy_level) VALUES (:tg, 'insights')"), {"tg": str(tg_id)})
+            s.execute(text("INSERT INTO users (tg_id, privacy_level, created_at) VALUES (:tg, 'insights', CURRENT_TIMESTAMP)"),
+    {"tg": str(tg_id)})
             uid = s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": str(tg_id)}).scalar()
         s.commit()
         return int(uid)
