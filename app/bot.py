@@ -18,7 +18,6 @@ from aiogram.types import (
 )
 from app.meditations import get_categories, get_items, get_item
 from app.memory import save_user_message, save_bot_message, get_recent_messages
-from app.memory import fetch_recent_messages, add_message  # память: история+логирование
 
 # ===== Внутренние модули =====
 from .exercises import TOPICS, EXERCISES  # ожидается структура как в твоём exercises.py
@@ -805,70 +804,48 @@ async def _answer_with_llm(m: Message, user_text: str):
     mode = CHAT_MODE.get(chat_id, "talk")
     style_key = USER_TONE.get(chat_id, "default")
 
-    # Базовый системный промпт
+    # 1) Базовый системный промпт
     sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
-
     overlay = _style_overlay(style_key)
     if overlay:
         sys_prompt = sys_prompt + "\n\n" + overlay
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
 
-    # 1) подтянем историю (чтобы бот «помнил»)
+    # 2) История из памяти (БД) — хронологически (старые → новые)
     history = []
     try:
-        # можно увеличить до 40–60 при желании
-        history = fetch_recent_messages(chat_id, limit=60)
+        recent = get_recent_messages(chat_id, limit=60)
+        for r in recent:
+            role = "assistant" if r["role"] == "bot" else "user"
+            history.append({"role": role, "content": r["text"]})
     except Exception:
-        history = []
+        recent = []
 
-    # Собираем messages для модели: system + (история user/bot) + текущее user
-    messages = [{"role": "system", "content": sys_prompt}]
-    for rec in history:
-        # rec: {"role": "user"|"bot", "text": "..."}
-        role = "assistant" if rec["role"] == "bot" else "user"
-        messages.append({"role": role, "content": rec["text"]})
-    messages.append({"role": "user", "content": user_text})
+    # 3) Собираем сообщения для LLM:
+    messages = [{"role": "system", "content": sys_prompt}] + history + [
+        {"role": "user", "content": user_text},
+    ]
 
-    # 2) логируем текущее сообщение пользователя
-    try:
-        add_message(chat_id, "user", user_text)
-    except Exception:
-        pass
-
-    # опциональный RAG-контекст — если у тебя есть retrieve_relevant_context
-    try:
-        if retrieve_relevant_context:
-            rag_ctx = retrieve_relevant_context(user_text) or ""
-            if rag_ctx:
-                messages[0]["content"] = (
-                    messages[0]["content"]
-                    + "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки пользователю]\n"
-                    + rag_ctx
-                )
-    except Exception:
-        pass
-
+    # 4) Вызов LLM-адаптера
     if chat_with_style is None:
-        await m.answer("Я тебя слышу. Сейчас подключаюсь… (LLM-адаптер не сконфигурирован)",
-                       reply_markup=kb_main_menu())
+        await m.answer("Я тебя слышу. Сейчас подключаюсь… (LLM-адаптер не сконфигурирован)")
         return
 
-    # вызов LLM
     try:
         reply = await chat_with_style(messages=messages, style_key=style_key)
     except TypeError:
         reply = await chat_with_style(messages, style_key=style_key)
     except Exception:
-        reply = None
+        reply = "Кажется, соединение подвисло. Давай попробуем ещё раз?"
 
     if not reply:
         reply = "Я рядом. Давай попробуем ещё раз сформулировать мысль?"
 
-    # 3) отправляем и логируем ответ бота
+    # 5) Отправляем и логируем исходящую реплику
     await m.answer(reply, reply_markup=kb_main_menu())
     try:
-        add_message(chat_id, "bot", reply)
+        save_bot_message(chat_id, reply)
     except Exception:
         pass
 
@@ -888,38 +865,36 @@ async def on_debug_prompt(m: Message):
     await m.answer(f"<b>mode</b>: {mode}\n<b>tone</b>: {style_key}\n\n<code>{preview}</code>")
 
 # ===== Обработка произвольного текста: talk/reflection =====
-from app.memory import save_user_message, save_bot_message  # ← импорт (держи рядом с другими импортами)
 
-# ===== Обработка произвольного текста: talk/reflection =====
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
-    # сохраняем реплику пользователя в память
+    chat_id = m.chat.id
+
+    # логируем входящее
     try:
-        from app.memory import save_user_message
-        save_user_message(str(m.chat.id), m.text)
+        save_user_message(chat_id, m.text or "")
     except Exception:
-        pass
+        pass  # не мешаем диалогу, если БД недоступна
 
     # в любом режиме, где ожидается чат
-    if CHAT_MODE.get(m.chat.id, "talk") in ("talk", "reflection"):
-        await _answer_with_llm(m, m.text)
+    if CHAT_MODE.get(chat_id, "talk") in ("talk", "reflection"):
+        await _answer_with_llm(m, m.text or "")
         return
 
     # если человек в «Разобраться», а пишет текст — мягко направим
-    if CHAT_MODE.get(m.chat.id) == "work":
+    if CHAT_MODE.get(chat_id) == "work":
         await m.answer(
             "Если хочешь обсудить — нажми «Поговорить». "
             "Если упражнение — выбери тему в «Разобраться».",
-            reply_markup=kb_main_menu()
+            reply_markup=kb_main_menu(),
         )
         return
 
     # дефолт
     await m.answer(
         "Я рядом и на связи. Нажми «Поговорить» или «Разобраться».",
-        reply_markup=kb_main_menu()
+        reply_markup=kb_main_menu(),
     )
-
 
 # ===== Доп. команды-синонимы =====
 @router.message(Command("menu"))
