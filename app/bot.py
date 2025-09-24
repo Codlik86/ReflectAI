@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 from app.meditations import get_categories, get_items, get_item
 from app.memory import save_user_message, save_bot_message, get_recent_messages
+from app.memory import fetch_recent_messages, add_message  # память: история+логирование
 
 # ===== Внутренние модули =====
 from .exercises import TOPICS, EXERCISES  # ожидается структура как в твоём exercises.py
@@ -806,76 +807,68 @@ async def _answer_with_llm(m: Message, user_text: str):
 
     # Базовый системный промпт
     sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
+
     overlay = _style_overlay(style_key)
     if overlay:
         sys_prompt = sys_prompt + "\n\n" + overlay
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
 
-    # === краткая история диалога из памяти (последние 12 сообщений) ===
+    # 1) подтянем историю (чтобы бот «помнил»)
+    history = []
     try:
-        from app.memory import get_recent_messages  # ожидаем: List[{"role":"user"|"bot","text":str}]
-        history = get_recent_messages(str(chat_id), limit=12) or []
-        if history:
-            lines = []
-            for r in history:
-                speaker = "Пользователь" if r.get("role") == "user" else "Ты"
-                text = r.get("text", "").strip()
-                if text:
-                    # коротко, без лишних переносов
-                    lines.append(f"{speaker}: {text}")
-            if lines:
-                convo_snippet = "\n".join(lines)
-                sys_prompt += (
-                    "\n\n[Короткий контекст последних сообщений — используй аккуратно, "
-                    "не цитируй дословно и не раскрывай это как память]:\n" + convo_snippet
+        # можно увеличить до 40–60 при желании
+        history = fetch_recent_messages(chat_id, limit=60)
+    except Exception:
+        history = []
+
+    # Собираем messages для модели: system + (история user/bot) + текущее user
+    messages = [{"role": "system", "content": sys_prompt}]
+    for rec in history:
+        # rec: {"role": "user"|"bot", "text": "..."}
+        role = "assistant" if rec["role"] == "bot" else "user"
+        messages.append({"role": role, "content": rec["text"]})
+    messages.append({"role": "user", "content": user_text})
+
+    # 2) логируем текущее сообщение пользователя
+    try:
+        add_message(chat_id, "user", user_text)
+    except Exception:
+        pass
+
+    # опциональный RAG-контекст — если у тебя есть retrieve_relevant_context
+    try:
+        if retrieve_relevant_context:
+            rag_ctx = retrieve_relevant_context(user_text) or ""
+            if rag_ctx:
+                messages[0]["content"] = (
+                    messages[0]["content"]
+                    + "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки пользователю]\n"
+                    + rag_ctx
                 )
     except Exception:
         pass
 
-    # === RAG (если доступен) ===
-    if retrieve_relevant_context:
-        try:
-            rag_ctx = retrieve_relevant_context(user_text) or ""
-            if rag_ctx:
-                sys_prompt += (
-                    "\n\n[Контекст из проверенных источников — используй аккуратно, не раскрывай ссылки]:\n"
-                    + rag_ctx
-                )
-        except Exception:
-            pass
-
-    # === вызов LLM ===
     if chat_with_style is None:
-        text = "Я тебя слышу. Сейчас подключаюсь… (LLM-адаптер не сконфигурирован)"
-        await m.answer(text)
-        try:
-            from app.memory import save_bot_message
-            save_bot_message(str(chat_id), text)
-        except Exception:
-            pass
+        await m.answer("Я тебя слышу. Сейчас подключаюсь… (LLM-адаптер не сконфигурирован)",
+                       reply_markup=kb_main_menu())
         return
 
-    messages = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": user_text},
-    ]
-
+    # вызов LLM
     try:
         reply = await chat_with_style(messages=messages, style_key=style_key)
     except TypeError:
-        # совместимость с разными сигнатурами
         reply = await chat_with_style(messages, style_key=style_key)
+    except Exception:
+        reply = None
 
     if not reply:
         reply = "Я рядом. Давай попробуем ещё раз сформулировать мысль?"
 
+    # 3) отправляем и логируем ответ бота
     await m.answer(reply, reply_markup=kb_main_menu())
-
-    # === логируем реплику бота в память ===
     try:
-        from app.memory import save_bot_message
-        save_bot_message(str(chat_id), reply)
+        add_message(chat_id, "bot", reply)
     except Exception:
         pass
 
