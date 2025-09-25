@@ -15,6 +15,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
+from app.handlers import pay as pay_handlers
 
 # ===== Модули продукта =====
 from app.meditations import get_categories, get_items, get_item
@@ -44,6 +45,8 @@ from sqlalchemy import text
 from app.db import db_session
 
 router = Router()
+
+router.include_router(pay_handlers.router)
 
 # ===== Онбординг: ссылки и картинки =====
 POLICY_URL = os.getenv("POLICY_URL", "").strip()
