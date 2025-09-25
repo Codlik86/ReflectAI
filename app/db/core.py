@@ -10,9 +10,12 @@ from collections.abc import AsyncIterator  # или: from typing import AsyncGen
 
 DATABASE_URL = os.environ["DATABASE_URL"]  # postgresql+asyncpg://...&sslmode=require
 
-engine: AsyncEngine = create_async_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
+engine = create_async_engine(
+    DATABASE_URL,  # твой DSN вида postgresql+psycopg://...
+    echo=False,
+    future=True,
+    pool_pre_ping=True,         # <— добавь это
+    pool_size=5, max_overflow=10  # можно оставить дефолты, но так стабильнее на Render
 )
 
 async_session = async_sessionmaker(
