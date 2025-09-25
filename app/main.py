@@ -24,6 +24,7 @@ from .bot import router as bot_router
 
 # NEW: подключаем HTTP-роуты оплаты (вебхук ЮKassa)
 from app.api import payments as payments_api  # NEW
+from app.legal import router as legal_router
 
 # --- env (строго единые имена) ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -50,6 +51,8 @@ app = FastAPI(title="ReflectAI webhook")
 
 # NEW: регистрируем роутер оплаты (вебхук /api/payments/yookassa/webhook)
 app.include_router(payments_api.router)  # NEW
+
+app.include_router(legal_router)
 
 
 from aiogram.exceptions import TelegramRetryAfter

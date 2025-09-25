@@ -25,4 +25,4 @@ migrations/*_pycache__/
 # RAG raw corpus (keep out of repo)
 data/
 corpus/
-*.txt
+*.txt*.db
