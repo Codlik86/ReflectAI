@@ -1,34 +1,26 @@
-# venv & env
-.venv/
-venv/
-.env
+# macOS
+.DS_Store
 
-# Python артефакты
+# Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
+
+# venv
+.venv/
+venv/
+
+# local env & secrets
+.env
+.env.*
+
+# caches / temp
+backups/
 .mypy_cache/
 .pytest_cache/
-*.coverage
-coverage.xml
-htmlcov/
+.coverage
 
-# ОС/IDE
-.DS_Store
-.vscode/
-.idea/
-
-# БД/локальные файлы
-*.db
-insights.db
-
-# Локальные бэкапы/патчи
-backups/
-app/*.bak.*
-patch_*.py
-patch-pomni*.py
-patch_pomni*.py
+# alembic artifacts
+migrations/*_pycache__/
 
 # RAG raw corpus (keep out of repo)
 data/
