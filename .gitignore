@@ -29,3 +29,8 @@ app/*.bak.*
 patch_*.py
 patch-pomni*.py
 patch_pomni*.py
+
+# RAG raw corpus (keep out of repo)
+data/
+corpus/
+*.txt
