@@ -3,7 +3,7 @@ import os
 import asyncio
 from contextlib import suppress
 
-# NEW: подхватываем .env до чтения переменных
+# Подхватываем .env до чтения переменных
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -24,11 +24,11 @@ from .memory_schema import (
 )
 from .bot import router as bot_router
 
-# NEW: подключаем HTTP-роуты оплаты (вебхук ЮKassa) и легальные страницы
-from app.api import payments as payments_api  # NEW
-from app.legal import router as legal_router   # NEW
+# HTTP-роуты: вебхук ЮKassa и «юридические» страницы
+from app.api import payments as payments_api
+from app.legal import router as legal_router
 
-# --- env (строго единые имена) ---
+# --- ENV ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
@@ -38,10 +38,9 @@ if not BOT_TOKEN:
 if not WEBHOOK_BASE_URL:
     raise RuntimeError("WEBHOOK_BASE_URL не задан (например, https://<app>.onrender.com)")
 
-WEBHOOK_PATH = "/telegram/webhook"  # путь остаётся прежний
+WEBHOOK_PATH = "/telegram/webhook"
 WEBHOOK_URL = f"{WEBHOOK_BASE_URL}{WEBHOOK_PATH}"
 
-# === Watchdog: авто-восстановление вебхука, если он пуст/чужой ===
 WATCHDOG_INTERVAL_SEC = int(os.getenv("WEBHOOK_WATCHDOG_SEC", "60"))
 
 # aiogram 3.x
@@ -51,69 +50,82 @@ dp.include_router(bot_router)
 
 app = FastAPI(title="ReflectAI webhook")
 
-# NEW: регистрируем роутеры
+# Регистрируем сторонние роутеры
 app.include_router(payments_api.router)  # /api/payments/yookassa/webhook
 app.include_router(legal_router)         # /legal/requisites, /legal/offer
 
 # ==== Мини-лендинг для модерации YooKassa ====
 
-NAME = os.getenv("PROJECT_NAME", "Помни")
-BOT_URL = os.getenv("PUBLIC_BOT_URL", "https://t.me/reflectttaibot")
-MAIL = os.getenv("CONTACT_EMAIL", "selflect@proton.me")
-OFFER = os.getenv("LEGAL_OFFER_URL", "")
-POLICY = os.getenv("LEGAL_POLICY_URL", "")
-INN = os.getenv("INN_SELFEMP", "")  # ИНН самозанятого
+PROJECT_NAME = os.getenv("PROJECT_NAME", "Помни")
+PUBLIC_BOT_URL = os.getenv("PUBLIC_BOT_URL", "https://t.me/reflectttaibot")
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "selflect@proton.me")
+LEGAL_OFFER_URL = os.getenv("LEGAL_OFFER_URL", "")
+LEGAL_POLICY_URL = os.getenv("LEGAL_POLICY_URL", "")
+INN_SELFEMP = os.getenv("INN_SELFEMP", "")          # ИНН самозанятого
+OWNER_FULL_NAME = os.getenv("OWNER_FULL_NAME", "")  # ФИО самозанятого
 
 def _page(title: str, body: str) -> str:
     return f"""<!doctype html><meta charset="utf-8">
 <title>{escape(title)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <style>
-  body {{ font:16px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial; max-width:720px; margin:40px auto; padding:0 16px; color:#111}}
+  body {{ font:16px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial; max-width:740px; margin:40px auto; padding:0 16px; color:#111}}
   h1,h2 {{ margin:0 0 12px }} .muted{{color:#666}} a{{color:#136ef5; text-decoration:none}}
   .card{{border:1px solid #eee; border-radius:12px; padding:16px; margin:12px 0}}
+  .label{{color:#666}}
 </style>
 {body}
 """
 
 @app.get("/", response_class=HTMLResponse)
 async def landing():
+    fio = OWNER_FULL_NAME or "—"
+    inn = INN_SELFEMP or "—"
     return HTMLResponse(_page(
-        f"{NAME} — Telegram-помощник",
+        f"{PROJECT_NAME} — Telegram-помощник",
         f"""
-        <h1>{escape(NAME)}</h1>
+        <h1>{escape(PROJECT_NAME)}</h1>
         <p class="muted">Эмоциональная поддержка и само-рефлексия в Telegram.</p>
         <div class="card">
-          <p>Бот: <a href="{escape(BOT_URL)}">{escape(BOT_URL)}</a></p>
-          <p>Поддержка: <a href="mailto:{escape(MAIL)}">{escape(MAIL)}</a></p>
-          <p>Самозанятый, ИНН: <b>{escape(INN or "—")}</b></p>
+          <p><span class="label">Бот:</span> <a href="{escape(PUBLIC_BOT_URL)}">{escape(PUBLIC_BOT_URL)}</a></p>
+          <p><span class="label">Поддержка:</span> <a href="mailto:{escape(CONTACT_EMAIL)}">{escape(CONTACT_EMAIL)}</a></p>
+          <p><span class="label">Самозанятый:</span> <b>{escape(fio)}</b></p>
+          <p><span class="label">ИНН:</span> <b>{escape(inn)}</b></p>
         </div>
-        <p><a href="/requisites">Реквизиты</a> · <a href="/legal/policy">Политика</a> · <a href="/legal/offer">Оферта</a></p>
+        <p>
+          <a href="/requisites">Реквизиты</a>
+          · <a href="/legal/policy">Правила и Политика</a>
+          · <a href="/legal/offer">Оферта</a>
+        </p>
         """
     ))
 
 @app.get("/requisites", response_class=HTMLResponse)
 async def requisites():
+    fio = OWNER_FULL_NAME or "—"
+    inn = INN_SELFEMP or "—"
     return HTMLResponse(_page(
         "Реквизиты",
         f"""
         <h1>Реквизиты</h1>
         <div class="card">
-          <p>Самозанятый (НПД).</p>
-          <p>ИНН: <b>{escape(INN or "—")}</b></p>
-          <p>E-mail: <a href="mailto:{escape(MAIL)}">{escape(MAIL)}</a></p>
-          <p>Telegram: <a href="{escape(BOT_URL)}">{escape(BOT_URL)}</a></p>
+          <p><span class="label">Самозанятый (НПД):</span> <b>{escape(fio)}</b></p>
+          <p><span class="label">ИНН:</span> <b>{escape(inn)}</b></p>
+          <p><span class="label">E-mail:</span> <a href="mailto:{escape(CONTACT_EMAIL)}">{escape(CONTACT_EMAIL)}</a></p>
+          <p><span class="label">Telegram:</span> <a href="{escape(PUBLIC_BOT_URL)}">{escape(PUBLIC_BOT_URL)}</a></p>
+          <p><a href="/">← На главную</a></p>
         </div>
         """
     ))
 
 @app.get("/legal/policy")
 async def legal_policy():
-    return RedirectResponse(POLICY or "/")
+    return RedirectResponse(LEGAL_POLICY_URL or "/")
 
 @app.get("/legal/offer")
 async def legal_offer():
-    return RedirectResponse(OFFER or "/")
+    return RedirectResponse(LEGAL_OFFER_URL or "/")
 
 # ==== /Мини-лендинг ====
 
@@ -126,7 +138,7 @@ async def _webhook_watchdog():
                 if info.url != WEBHOOK_URL:
                     print(f"[watchdog] webhook mismatch ('{info.url}') -> set '{WEBHOOK_URL}'")
                     await bot.set_webhook(url=WEBHOOK_URL, secret_token=WEBHOOK_SECRET, allowed_updates=[])
-                    backoff = 5  # сброс бэкоффа
+                    backoff = 5
             except TelegramRetryAfter as e:
                 wait = int(getattr(e, "retry_after", 1)) + 1
                 print(f"[watchdog] retry_after {wait}s")
@@ -135,6 +147,7 @@ async def _webhook_watchdog():
                 print("[watchdog] error:", e)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 300)
+
             await asyncio.sleep(max(5, WATCHDOG_INTERVAL_SEC))
     except asyncio.CancelledError:
         pass
@@ -149,24 +162,24 @@ async def health_head():
 
 @app.on_event("startup")
 async def on_startup():
-    # 1) схема БД мигрируется Alembic; здесь — доп. проверки старых таблиц (async)
+    # Доп. проверки старых таблиц (async)
     await ensure_memory_schema_async()
     await ensure_users_policy_column_async()
     await ensure_users_created_at_column_async()
 
-    # 2) чистим вебхук и ставим заново
+    # Вебхук
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         ok = await bot.set_webhook(
             url=WEBHOOK_URL,
             secret_token=WEBHOOK_SECRET or None,
-            allowed_updates=[],  # default набор
+            allowed_updates=[],
         )
         print(f"[startup] set_webhook: {ok} -> {WEBHOOK_URL}")
     except Exception as e:
         print("[startup] set_webhook ERROR:", repr(e))
 
-    # 3) список команд
+    # Команды
     try:
         await bot.set_my_commands([
             BotCommand(command="start",        description="▶️ Старт"),
@@ -183,7 +196,7 @@ async def on_startup():
     except Exception as e:
         print("[startup] set_my_commands ERROR:", repr(e))
 
-    # 4) стартуем watchdog (если уже был — не запускаем второй раз)
+    # Watchdog
     if not getattr(app.state, "webhook_watchdog", None):
         app.state.webhook_watchdog = asyncio.create_task(_webhook_watchdog())
         print("[startup] webhook watchdog started")
@@ -204,16 +217,13 @@ async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: str = Header(default="")
 ):
-    # 1) секрет из заголовка (если задан)
     if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
         return Response(status_code=403)
 
-    # 2) читаем JSON
     data = await request.json()
 
-    # 3) пробуем обработать; любые сбои логируем и всё равно возвращаем 200
     try:
-        update = Update.model_validate(data)  # pydantic v2
+        update = Update.model_validate(data)
         msg_txt = None
         cb_data = None
         try:
@@ -235,5 +245,4 @@ async def telegram_webhook(
             print("payload:", json.dumps(data, ensure_ascii=False))
             traceback.print_exc()
 
-    # важно: всегда 200, чтобы Телега не спамила ретраями
     return PlainTextResponse("ok")
