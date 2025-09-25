@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import List, Dict, Optional
-from datetime import datetime
 
 from sqlalchemy import text
 from app.db import db_session
@@ -22,15 +21,30 @@ _DEFAULT_PRIVACY = "insights"
 
 
 # ---------------------------------------------------------------------------
+# Вспомогательные утилиты
+# ---------------------------------------------------------------------------
+
+def _tg_as_int(tg_id: str | int) -> int:
+    """Аккуратно привести tg_id к int (для BIGINT в БД)."""
+    if isinstance(tg_id, int):
+        return tg_id
+    try:
+        return int(str(tg_id).strip())
+    except Exception:
+        raise ValueError(f"tg_id must be integer-like, got: {tg_id!r}")
+
+
+# ---------------------------------------------------------------------------
 # ВНУТРЕННИЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (не экспортируем)
 # ---------------------------------------------------------------------------
 
 def _get_user_id_by_tg(tg_id: str | int) -> Optional[int]:
     """Вернуть users.id по tg_id, если есть."""
+    tg = _tg_as_int(tg_id)
     with db_session() as s:
         return s.execute(
             text("SELECT id FROM users WHERE tg_id = :tg"),
-            {"tg": str(tg_id)}
+            {"tg": tg}
         ).scalar()
 
 
@@ -39,22 +53,27 @@ def _ensure_user_and_get_id(tg_id: str | int) -> int:
     Гарантированно вернуть users.id по tg_id.
     Создаёт запись в users, если её ещё нет.
     """
+    tg = _tg_as_int(tg_id)
     with db_session() as s:
         uid = s.execute(
             text("SELECT id FROM users WHERE tg_id = :tg"),
-            {"tg": str(tg_id)}
+            {"tg": tg}
         ).scalar()
 
         if uid is None:
-            # privacy_level по умолчанию — 'insights' (как и раньше)
+            # privacy_level по умолчанию — 'insights' (исторически)
             s.execute(
-                text("INSERT INTO users (tg_id, privacy_level, created_at) VALUES (:tg, 'insights', CURRENT_TIMESTAMP)"),
-    {"tg": str(tg_id)}
+                text("""
+                    INSERT INTO users (tg_id, privacy_level, created_at)
+                    VALUES (:tg, 'insights', CURRENT_TIMESTAMP)
+                """),
+                {"tg": tg}
             )
             uid = s.execute(
                 text("SELECT id FROM users WHERE tg_id = :tg"),
-                {"tg": str(tg_id)}
+                {"tg": tg}
             ).scalar()
+
         s.commit()
         return int(uid)
 
@@ -64,9 +83,7 @@ def _ensure_user_and_get_id(tg_id: str | int) -> int:
 # ---------------------------------------------------------------------------
 
 def save_user_message(tg_id: str | int, text_value: str) -> None:
-    """
-    Сохранить входящую реплику пользователя в bot_messages.
-    """
+    """Сохранить входящую реплику пользователя в bot_messages."""
     if not text_value:
         return
     uid = _ensure_user_and_get_id(tg_id)
@@ -102,12 +119,9 @@ def save_bot_message(tg_id: str | int, text_value: str) -> None:
 
 def get_recent_messages(tg_id: str | int, limit: int = DEFAULT_MEMORY_LIMIT) -> List[Dict[str, str]]:
     """
-    Вернуть последние N сообщений диалога пользователя в формате:
-    [
-      {"role": "user"|"assistant", "text": "..."},
-      ...
-    ]
-    Порядок — от старых к новым (хронологический), чтобы удобно подмешивать в промпт.
+    Вернуть последние N сообщений диалога пользователя:
+    [{"role": "user"|"assistant", "text": "..."}, ...]
+    Порядок — от старых к новым (хронологический).
     """
     uid = _ensure_user_and_get_id(tg_id)
     with db_session() as s:
@@ -122,16 +136,14 @@ def get_recent_messages(tg_id: str | int, limit: int = DEFAULT_MEMORY_LIMIT) -> 
             {"uid": uid, "lim": int(limit)}
         ).fetchall()
 
-    # Разворачиваем: хотим хронологию (старые → новые)
+    # Разворачиваем: от старых к новым
     out: List[Dict[str, str]] = []
     for role, txt in rows[::-1]:
-        # Нормализуем роли для LLM
         if role == _DB_ASSISTANT_ROLE:
             norm_role = _LLM_ASSISTANT_ROLE
         elif role == _USER_ROLE:
             norm_role = _USER_ROLE
         else:
-            # На всякий случай всё неизвестное считаем ответом ассистента
             norm_role = _LLM_ASSISTANT_ROLE
         out.append({"role": norm_role, "text": txt})
     return out
@@ -144,21 +156,21 @@ def get_recent_messages(tg_id: str | int, limit: int = DEFAULT_MEMORY_LIMIT) -> 
 def get_privacy(tg_id: str | int) -> str:
     """
     Вернуть текущий уровень приватности пользователя.
-    Используется колонка users.privacy_level (совместимо со старой схемой).
     Возможные значения: 'ask' | 'auto' | 'off' | 'insights' (по умолчанию).
     """
+    tg = _tg_as_int(tg_id)
     with db_session() as s:
         val = s.execute(
             text("SELECT privacy_level FROM users WHERE tg_id = :tg"),
-            {"tg": str(tg_id)}
+            {"tg": tg}
         ).scalar()
-    return (val or _DEFAULT_PRIVACY) if (val or _DEFAULT_PRIVACY) in _ALLOWED_PRIVACY else _DEFAULT_PRIVACY
+
+    value = val or _DEFAULT_PRIVACY
+    return value if value in _ALLOWED_PRIVACY else _DEFAULT_PRIVACY
 
 
 def set_privacy(tg_id: str | int, value: str) -> None:
-    """
-    Установить уровень приватности пользователя.
-    """
+    """Установить уровень приватности пользователя."""
     value = value if value in _ALLOWED_PRIVACY else _DEFAULT_PRIVACY
     uid = _ensure_user_and_get_id(tg_id)
     with db_session() as s:
@@ -181,11 +193,9 @@ def purge_user_data(tg_id: str | int) -> int:
             {"uid": uid}
         )
         s.commit()
-        # rowcount может быть None на некоторых драйверах — нормализуем
         return int(getattr(res, "rowcount", 0) or 0)
 
 
-# Явно укажем, что экспортируем наружу
 __all__ = [
     "save_user_message",
     "save_bot_message",
