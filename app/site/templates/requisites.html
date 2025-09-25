@@ -1,0 +1,18 @@
+<!doctype html><html lang="ru"><head>
+<meta charset="utf-8"/><title>Реквизиты — {{ project_name }}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;line-height:1.5;margin:24px;color:#111}
+ a{color:#1769ff;text-decoration:none}a:hover{text-decoration:underline}
+ .card{border:1px solid #e6e6e6;border-radius:12px;padding:20px;background:#fff;max-width:760px}
+ .label{color:#666}
+</style>
+</head><body>
+<h1>Реквизиты</h1>
+<div class="card">
+  {% if full_name %}<p><span class="label">Самозанятый (НПД):</span> {{ full_name }}</p>{% endif %}
+  {% if inn_selfemp %}<p><span class="label">ИНН:</span> {{ inn_selfemp }}</p>{% endif %}
+  <p><span class="label">E-mail:</span> <a href="mailto:{{ contact_email }}">{{ contact_email }}</a></p>
+  <p><a href="/">← На главную</a></p>
+</div>
+</body></html>
