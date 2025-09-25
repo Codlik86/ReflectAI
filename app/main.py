@@ -1,19 +1,21 @@
 # app/main.py
-import asyncio
 import os
+import asyncio
 from contextlib import suppress
 
 # NEW: подхватываем .env до чтения переменных
-from dotenv import load_dotenv  # NEW
-load_dotenv()                   # NEW
+from dotenv import load_dotenv
+load_dotenv()
 
 from fastapi import FastAPI, Request, Header, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
+from markupsafe import escape
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import Update, BotCommand
+from aiogram.exceptions import TelegramRetryAfter
 
 from .memory_schema import (
     ensure_memory_schema_async,
@@ -22,9 +24,9 @@ from .memory_schema import (
 )
 from .bot import router as bot_router
 
-# NEW: подключаем HTTP-роуты оплаты (вебхук ЮKassa)
+# NEW: подключаем HTTP-роуты оплаты (вебхук ЮKassa) и легальные страницы
 from app.api import payments as payments_api  # NEW
-from app.legal import router as legal_router
+from app.legal import router as legal_router   # NEW
 
 # --- env (строго единые имена) ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -49,14 +51,71 @@ dp.include_router(bot_router)
 
 app = FastAPI(title="ReflectAI webhook")
 
-# NEW: регистрируем роутер оплаты (вебхук /api/payments/yookassa/webhook)
-app.include_router(payments_api.router)  # NEW
+# NEW: регистрируем роутеры
+app.include_router(payments_api.router)  # /api/payments/yookassa/webhook
+app.include_router(legal_router)         # /legal/requisites, /legal/offer
 
-app.include_router(legal_router)
+# ==== Мини-лендинг для модерации YooKassa ====
 
+NAME = os.getenv("PROJECT_NAME", "Помни")
+BOT_URL = os.getenv("PUBLIC_BOT_URL", "https://t.me/reflectttaibot")
+MAIL = os.getenv("CONTACT_EMAIL", "selflect@proton.me")
+OFFER = os.getenv("LEGAL_OFFER_URL", "")
+POLICY = os.getenv("LEGAL_POLICY_URL", "")
+INN = os.getenv("INN_SELFEMP", "")  # ИНН самозанятого
 
-from aiogram.exceptions import TelegramRetryAfter
-import asyncio
+def _page(title: str, body: str) -> str:
+    return f"""<!doctype html><meta charset="utf-8">
+<title>{escape(title)}</title>
+<meta name="robots" content="noindex,nofollow">
+<style>
+  body {{ font:16px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial; max-width:720px; margin:40px auto; padding:0 16px; color:#111}}
+  h1,h2 {{ margin:0 0 12px }} .muted{{color:#666}} a{{color:#136ef5; text-decoration:none}}
+  .card{{border:1px solid #eee; border-radius:12px; padding:16px; margin:12px 0}}
+</style>
+{body}
+"""
+
+@app.get("/", response_class=HTMLResponse)
+async def landing():
+    return HTMLResponse(_page(
+        f"{NAME} — Telegram-помощник",
+        f"""
+        <h1>{escape(NAME)}</h1>
+        <p class="muted">Эмоциональная поддержка и само-рефлексия в Telegram.</p>
+        <div class="card">
+          <p>Бот: <a href="{escape(BOT_URL)}">{escape(BOT_URL)}</a></p>
+          <p>Поддержка: <a href="mailto:{escape(MAIL)}">{escape(MAIL)}</a></p>
+          <p>Самозанятый, ИНН: <b>{escape(INN or "—")}</b></p>
+        </div>
+        <p><a href="/requisites">Реквизиты</a> · <a href="/legal/policy">Политика</a> · <a href="/legal/offer">Оферта</a></p>
+        """
+    ))
+
+@app.get("/requisites", response_class=HTMLResponse)
+async def requisites():
+    return HTMLResponse(_page(
+        "Реквизиты",
+        f"""
+        <h1>Реквизиты</h1>
+        <div class="card">
+          <p>Самозанятый (НПД).</p>
+          <p>ИНН: <b>{escape(INN or "—")}</b></p>
+          <p>E-mail: <a href="mailto:{escape(MAIL)}">{escape(MAIL)}</a></p>
+          <p>Telegram: <a href="{escape(BOT_URL)}">{escape(BOT_URL)}</a></p>
+        </div>
+        """
+    ))
+
+@app.get("/legal/policy")
+async def legal_policy():
+    return RedirectResponse(POLICY or "/")
+
+@app.get("/legal/offer")
+async def legal_offer():
+    return RedirectResponse(OFFER or "/")
+
+# ==== /Мини-лендинг ====
 
 async def _webhook_watchdog():
     backoff = 5
@@ -76,31 +135,21 @@ async def _webhook_watchdog():
                 print("[watchdog] error:", e)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 300)
-
-            # не давим API — спим фиксированный интервал
             await asyncio.sleep(max(5, WATCHDOG_INTERVAL_SEC))
     except asyncio.CancelledError:
-        # тихо выходим на остановке приложения
         pass
-
-@app.get("/")
-async def root():
-    return PlainTextResponse("ok")
-
 
 @app.get("/health")
 async def health_get():
     return PlainTextResponse("ok")
 
-
 @app.head("/health")
 async def health_head():
     return Response(status_code=200)
 
-
 @app.on_event("startup")
 async def on_startup():
-    # 1) схему БД не создаём вручную — просто no-op (всё делает Alembic)
+    # 1) схема БД мигрируется Alembic; здесь — доп. проверки старых таблиц (async)
     await ensure_memory_schema_async()
     await ensure_users_policy_column_async()
     await ensure_users_created_at_column_async()
@@ -115,10 +164,9 @@ async def on_startup():
         )
         print(f"[startup] set_webhook: {ok} -> {WEBHOOK_URL}")
     except Exception as e:
-        # важно не уронить процесс: Telegram всё равно будет пытаться доставлять
         print("[startup] set_webhook ERROR:", repr(e))
 
-    # 3) выставляем список команд (левая панель / меню команд)
+    # 3) список команд
     try:
         await bot.set_my_commands([
             BotCommand(command="start",        description="▶️ Старт"),
@@ -139,7 +187,6 @@ async def on_startup():
     if not getattr(app.state, "webhook_watchdog", None):
         app.state.webhook_watchdog = asyncio.create_task(_webhook_watchdog())
         print("[startup] webhook watchdog started")
-
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -166,8 +213,7 @@ async def telegram_webhook(
 
     # 3) пробуем обработать; любые сбои логируем и всё равно возвращаем 200
     try:
-        # aiogram 3 использует pydantic v2; model_validate работает устойчиво
-        update = Update.model_validate(data)
+        update = Update.model_validate(data)  # pydantic v2
         msg_txt = None
         cb_data = None
         try:
