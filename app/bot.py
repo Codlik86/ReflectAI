@@ -67,14 +67,56 @@ CHAT_MODE: Dict[int, str] = {}        # chat_id -> "talk" | "work" | "reflection
 USER_TONE: Dict[int, str] = {}        # chat_id -> "default" | "friend" | "therapist" | "18plus"
 
 # ===== Локальные БД-хелперы под приватность/очистку =====
-def _ensure_user_id(tg_id: int) -> int:
+from sqlalchemy import text
+from app.db.core import get_session
+
+async def _ensure_user_id(tg_id: int) -> int:
+    """
+    Возвращает user.id по tg_id, создаёт при отсутствии.
+    """
+    async for session in get_session():
+        row = (await session.execute(
+            text("SELECT id FROM users WHERE tg_id = :tg LIMIT 1"),
+            {"tg": int(tg_id)},
+        )).first()
+        if row:
+            return int(row[0])
+
+        # создаём
+        new_id = (await session.execute(
+            text("""
+                INSERT INTO users (tg_id, privacy_level, created_at)
+                VALUES (:tg, 'ask', now())
+                RETURNING id
+            """),
+            {"tg": int(tg_id)},
+        )).scalar_one()
+        await session.commit()
+        return int(new_id)
+    
+    # синхронный шорткат для старых Sync-участков кода
+def _ensure_user_id_sync(tg_id: int) -> int:
+    from sqlalchemy import text
+    from app.db import db_session
+
     with db_session() as s:
-        uid = s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": str(tg_id)}).scalar()
-        if uid is None:
-            s.execute(text("INSERT INTO users (tg_id, privacy_level, created_at) VALUES (:tg, 'insights', CURRENT_TIMESTAMP)"),
-    {"tg": str(tg_id)})
-            uid = s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": str(tg_id)}).scalar()
-        s.commit()
+        uid = s.execute(
+            text("SELECT id FROM users WHERE tg_id = :tg"),
+            {"tg": str(tg_id)},
+        ).scalar()
+
+        if not uid:
+            s.execute(
+                text("INSERT INTO users (tg_id, privacy_level, created_at) "
+                     "VALUES (:tg, 'all', now())"),
+                {"tg": str(tg_id)},
+            )
+            s.commit()
+            uid = s.execute(
+                text("SELECT id FROM users WHERE tg_id = :tg"),
+                {"tg": str(tg_id)},
+            ).scalar()
+
         return int(uid)
 
 def _db_get_privacy(tg_id: int) -> str:
@@ -86,17 +128,24 @@ def _db_get_privacy(tg_id: int) -> str:
 def _db_set_privacy(tg_id: int, mode: str) -> None:
     mode = "none" if mode == "none" else "insights"
     with db_session() as s:
-        _ensure_user_id(tg_id)
-        s.execute(text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"), {"m": mode, "tg": str(tg_id)})
+        uid = _ensure_user_id_sync(tg_id)   # ✅ без await
+        s.execute(
+            text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"),
+            {"m": mode, "tg": str(tg_id)},
+        )
         s.commit()
 
 def _purge_user_history(tg_id: int) -> int:
-    """Удаляет историю из bot_messages. Возвращает число удалённых записей."""
     with db_session() as s:
-        uid = _ensure_user_id(tg_id)
-        # Узнаем сколько будет удалено (SQLite friendly)
-        cnt = s.execute(text("SELECT COUNT(*) FROM bot_messages WHERE user_id = :u"), {"u": uid}).scalar() or 0
-        s.execute(text("DELETE FROM bot_messages WHERE user_id = :u"), {"u": uid})
+        uid = _ensure_user_id_sync(tg_id)   # ✅ без await
+        cnt = s.execute(
+            text("SELECT COUNT(*) FROM bot_messages WHERE user_id = :u"),
+            {"u": uid},
+        ).scalar() or 0
+        s.execute(
+            text("DELETE FROM bot_messages WHERE user_id = :u"),
+            {"u": uid},
+        )
         s.commit()
         return int(cnt)
 
@@ -331,7 +380,7 @@ async def on_onb_step2(cb: CallbackQuery):
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
     tg_id = cb.from_user.id
-    uid = _ensure_user_id(tg_id)
+    uid = await _ensure_user_id(tg_id)
     # 1) фиксируем согласие
     try:
         with db_session() as s:
@@ -552,7 +601,7 @@ async def on_med_play(cb: CallbackQuery):
     try:
         import json
         with db_session() as s:
-            uid = _ensure_user_id(cb.from_user.id)
+            uid = await _ensure_user_id(cb.from_user.id)
             s.execute(
                 text("""
                     INSERT INTO bot_events (user_id, event_type, payload, created_at)
@@ -625,10 +674,6 @@ async def on_privacy_cmd(m: Message):
 async def on_about(m: Message):
     await m.answer("«Помни» — тёплый помощник, который помогает выговориться и прояснить мысли. "
                    "Здесь бережно, безоценочно, с опорой на научный подход.")
-
-@router.message(Command("pay"))
-async def on_pay(m: Message):
-    await m.answer("Подписка скоро появится. Мы готовим удобные тарифы.")
 
 @router.message(Command("help"))
 async def on_help(m: Message):
