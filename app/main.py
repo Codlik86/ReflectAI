@@ -3,6 +3,10 @@ import asyncio
 import os
 from contextlib import suppress
 
+# NEW: подхватываем .env до чтения переменных
+from dotenv import load_dotenv  # NEW
+load_dotenv()                   # NEW
+
 from fastapi import FastAPI, Request, Header, Response
 from fastapi.responses import PlainTextResponse
 
@@ -11,9 +15,15 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import Update, BotCommand
 
-from .memory_schema import ensure_memory_schema, ensure_users_policy_column
-from .memory_schema import ensure_users_created_at_column
+from .memory_schema import (
+    ensure_memory_schema_async,
+    ensure_users_policy_column_async,
+    ensure_users_created_at_column_async,
+)
 from .bot import router as bot_router
+
+# NEW: подключаем HTTP-роуты оплаты (вебхук ЮKassa)
+from app.api import payments as payments_api  # NEW
 
 # --- env (строго единые имена) ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -37,6 +47,9 @@ dp = Dispatcher()
 dp.include_router(bot_router)
 
 app = FastAPI(title="ReflectAI webhook")
+
+# NEW: регистрируем роутер оплаты (вебхук /api/payments/yookassa/webhook)
+app.include_router(payments_api.router)  # NEW
 
 
 from aiogram.exceptions import TelegramRetryAfter
@@ -84,10 +97,10 @@ async def health_head():
 
 @app.on_event("startup")
 async def on_startup():
-    # 1) гарантируем схему памяти (таблицы создадутся сами, если их нет)
-    ensure_memory_schema()
-    ensure_users_policy_column()
-    ensure_users_created_at_column()
+    # 1) схему БД не создаём вручную — просто no-op (всё делает Alembic)
+    await ensure_memory_schema_async()
+    await ensure_users_policy_column_async()
+    await ensure_users_created_at_column_async()
 
     # 2) чистим вебхук и ставим заново
     try:
@@ -114,7 +127,7 @@ async def on_startup():
             BotCommand(command="policy",       description="📜 Политика и правила"),
             BotCommand(command="about",        description="ℹ️ О проекте"),
             BotCommand(command="help",         description="🆘 Помощь"),
-            BotCommand(command="pay",          description="💳 Подписка (скоро)"),
+            BotCommand(command="pay",          description="💳 Подписка"),
         ])
     except Exception as e:
         print("[startup] set_my_commands ERROR:", repr(e))
@@ -127,9 +140,6 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    # не трогаем webhook на shutdown (Телеге всё равно),
-    # если хотите — оставьте как было: await bot.delete_webhook(drop_pending_updates=False)
-
     task = getattr(app.state, "webhook_watchdog", None)
     if task:
         task.cancel()
@@ -169,7 +179,6 @@ async def telegram_webhook(
         import json, traceback
         msg = str(e)
         if "chat not found" in msg.lower():
-            # фейковые/чужие chat_id — не роняем сервер
             print("[webhook] ignore: chat not found; payload:",
                   json.dumps(data, ensure_ascii=False))
         else:
