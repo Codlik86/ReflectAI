@@ -1,0 +1,27 @@
+<!doctype html><html lang="ru"><head>
+<meta charset="utf-8"/><title>{{ project_name }}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;line-height:1.5;margin:24px;color:#111}
+ .card{border:1px solid #e6e6e6;border-radius:12px;padding:20px;background:#fff;max-width:860px}
+ a{color:#1769ff;text-decoration:none}a:hover{text-decoration:underline}
+ .muted{color:#666}
+</style>
+</head><body>
+<h1>{{ project_name }}</h1>
+<p class="muted">Эмоциональная поддержка и само-рефлексия в Telegram.</p>
+
+<div class="card">
+  <p><b>Бот:</b> <a href="{{ bot_url }}" target="_blank" rel="noopener">{{ bot_url }}</a></p>
+  <p><b>Поддержка:</b> <a href="mailto:{{ contact_email }}">{{ contact_email }}</a></p>
+  <p>
+    <b>Самозанятый</b>{% if full_name %}: {{ full_name }}{% endif %}
+    {% if inn_selfemp %}, <b>ИНН:</b> {{ inn_selfemp }}{% endif %}
+  </p>
+  <p>
+    <a href="/requisites">Реквизиты</a>
+    · <a href="/legal/policy" target="_blank" rel="noopener">Правила и Политика</a>
+    · <a href="/legal/offer" target="_blank" rel="noopener">Оферта</a>
+  </p>
+</div>
+</body></html>
