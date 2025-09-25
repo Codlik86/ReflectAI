@@ -1,44 +1,84 @@
 # app/legal.py
-from fastapi import APIRouter, Response
+import os
+from fastapi import APIRouter
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-router = APIRouter(tags=["legal"])
+router = APIRouter()
 
-REKV_HTML = """
-<!doctype html><html lang="ru"><meta charset="utf-8">
-<title>Реквизиты</title>
-<body style="font:16px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial">
-<h1>Реквизиты самозанятого</h1>
-<p><b>ФИО:</b> Сафронов Елисей Егорович</p>
-<p><b>Статус:</b> физическое лицо, самозанятый (НПД)</p>
-<p><b>ИНН:</b> 772917893200</p>
-<p><b>Email:</b> selflect@proton.me</p>
-<p><b>Телефон:</b> +7 999 979-66-25</p>
-<p><b>Сервис:</b> «Помни» — телеграм-бот эмоциональной поддержки.</p>
-<p><b>Прием платежей:</b> ЮKassa (ООО «ЮMoney»), чек высылается автоматически.</p>
-<p><b>Возвраты:</b> в течение 7 дней с момента списания по обращению на e-mail, если услуга не была оказана. Подписка может быть отменена в боте.</p>
-<p>Политика и оферта: <a href="/legal/offer">/legal/offer</a></p>
-</body></html>
-"""
+PROJECT_NAME    = os.getenv("PROJECT_NAME", "Помни")
+PUBLIC_BOT_URL  = os.getenv("PUBLIC_BOT_URL", "https://t.me/reflectttaibot")
+CONTACT_EMAIL   = os.getenv("CONTACT_EMAIL", "selflect@proton.me")
 
-OFFER_HTML = """
-<!doctype html><html lang="ru"><meta charset="utf-8">
-<title>Пользовательское соглашение (оферта)</title>
-<body style="font:16px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial">
-<h1>Пользовательское соглашение (оферта) сервиса «Помни»</h1>
-<p>1. Исполнитель: Сафронов Елисей Егорович, самозанятый (НПД), ИНН 772917893200.</p>
-<p>2. Сервис: доступ к функциям бота (Разобрать, Поговорить, Медитации). Пробный период 5 дней, далее подписка по тарифу.</p>
-<p>3. Оплата: через ЮKassa банковскими картами/СПБ. Чек направляется автоматически.</p>
-<p>4. Автопродление: включается при подключении тарифа, можно отключить в боте.</p>
-<p>5. Отмена и возврат: подписку можно отменить в любое время; возврат в течение 7 дней, если не было оказания услуги, по обращению на selflect@proton.me.</p>
-<p>6. Обработка данных: по Политике конфиденциальности.</p>
-<p>7. Реквизиты и контакты: см. <a href="/legal/requisites">/legal/requisites</a>.</p>
-</body></html>
-"""
+LEGAL_POLICY_URL = os.getenv("LEGAL_POLICY_URL", "")
+LEGAL_OFFER_URL  = os.getenv("LEGAL_OFFER_URL", "")
 
-@router.get("/legal/requisites")
-async def legal_requisites():
-    return Response(content=REKV_HTML, media_type="text/html; charset=utf-8")
+INN_SELFEMP = os.getenv("INN_SELFEMP", "").strip()
+
+def _a(href: str, text: str) -> str:
+    return f'<a href="{href}" target="_blank" rel="noopener noreferrer">{text}</a>'
+
+@router.get("/", response_class=HTMLResponse)
+async def landing():
+    policy_link = LEGAL_POLICY_URL or "/legal/policy"
+    offer_link  = LEGAL_OFFER_URL  or "/legal/offer"
+    inn_block = INN_SELFEMP if INN_SELFEMP else "—"
+
+    html = f"""
+    <html><head>
+      <meta charset="utf-8" />
+      <title>{PROJECT_NAME}</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial, sans-serif;
+               margin: 40px; color:#111; }}
+        .card {{ border:1px solid #eee; border-radius:12px; padding:24px; max-width:720px; }}
+        h1 {{ font-size:40px; margin:0 0 12px; }}
+        .muted {{ color:#555; }}
+        a {{ color:#1a73e8; text-decoration:none; }}
+        a:hover {{ text-decoration:underline; }}
+        .links a {{ margin-right: 16px; }}
+      </style>
+    </head><body>
+      <h1>{PROJECT_NAME}</h1>
+      <p class="muted">Эмоциональная поддержка и само-рефлексия в Telegram.</p>
+      <div class="card">
+        <p>Бот: {_a(PUBLIC_BOT_URL, PUBLIC_BOT_URL)}</p>
+        <p>Поддержка: {_a("mailto:"+CONTACT_EMAIL, CONTACT_EMAIL)}</p>
+        <p>Самозанятый, ИНН: {inn_block}</p>
+        <p class="links">
+          {_a("/requisites", "Реквизиты")}
+          · {_a(policy_link, "Правила и Политика")}
+          · {_a(offer_link, "Оферта")}
+        </p>
+      </div>
+    </body></html>
+    """
+    return HTMLResponse(html)
+
+@router.get("/requisites", response_class=HTMLResponse)
+async def requisites():
+    inn_block = INN_SELFEMP if INN_SELFEMP else "—"
+    html = f"""
+    <html><head><meta charset="utf-8"><title>Реквизиты</title></head>
+    <body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif; margin:40px">
+      <h2>Реквизиты</h2>
+      <p>Самозанятый (НПД)</p>
+      <p><b>ИНН:</b> {inn_block}</p>
+      <p><b>E-mail:</b> {CONTACT_EMAIL}</p>
+      <p><a href="/">← На главную</a></p>
+    </body></html>
+    """
+    return HTMLResponse(html)
+
+# Редиректы на внешние документы (на случай, если где-то укажем /legal/policy|offer)
+@router.get("/legal/policy")
+async def policy_redirect():
+    if LEGAL_POLICY_URL:
+        return RedirectResponse(LEGAL_POLICY_URL, status_code=302)
+    return HTMLResponse("<p>Ссылка на политику не настроена.</p>", status_code=404)
 
 @router.get("/legal/offer")
-async def legal_offer():
-    return Response(content=OFFER_HTML, media_type="text/html; charset=utf-8")
+async def offer_redirect():
+    if LEGAL_OFFER_URL:
+        return RedirectResponse(LEGAL_OFFER_URL, status_code=302)
+    return HTMLResponse("<p>Ссылка на оферту не настроена.</p>", status_code=404)
