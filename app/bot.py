@@ -102,19 +102,19 @@ def _ensure_user_id_sync(tg_id: int) -> int:
     with db_session() as s:
         uid = s.execute(
             text("SELECT id FROM users WHERE tg_id = :tg"),
-            {"tg": str(tg_id)},
+            {"tg": tg_id},
         ).scalar()
 
         if not uid:
             s.execute(
                 text("INSERT INTO users (tg_id, privacy_level, created_at) "
                      "VALUES (:tg, 'all', now())"),
-                {"tg": str(tg_id)},
+                {"tg": tg_id},
             )
             s.commit()
             uid = s.execute(
                 text("SELECT id FROM users WHERE tg_id = :tg"),
-                {"tg": str(tg_id)},
+                {"tg": tg_id},
             ).scalar()
 
         return int(uid)
@@ -122,7 +122,7 @@ def _ensure_user_id_sync(tg_id: int) -> int:
 def _db_get_privacy(tg_id: int) -> str:
     """Возвращает режим: 'none' | 'insights' (иные значения считаем как включено)."""
     with db_session() as s:
-        mode = s.execute(text("SELECT privacy_level FROM users WHERE tg_id = :tg"), {"tg": str(tg_id)}).scalar()
+        mode = s.execute(text("SELECT privacy_level FROM users WHERE tg_id = :tg"), {"tg": tg_id}).scalar()
         return (mode or "insights").strip()
 
 def _db_set_privacy(tg_id: int, mode: str) -> None:
@@ -131,7 +131,7 @@ def _db_set_privacy(tg_id: int, mode: str) -> None:
         uid = _ensure_user_id_sync(tg_id)   # ✅ без await
         s.execute(
             text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"),
-            {"m": mode, "tg": str(tg_id)},
+            {"m": mode, "tg": tg_id},
         )
         s.commit()
 
