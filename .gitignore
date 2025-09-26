@@ -32,3 +32,6 @@ corpus/
 
 # local sqlite/db artifacts
 *.db
+
+# local sqlite/db artifacts
+*.db
