@@ -8,3 +8,4 @@ uvicorn[standard]
 aiogram==3.*
 python-dotenv
 jinja2
+yookassa==3.*

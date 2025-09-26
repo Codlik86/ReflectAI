@@ -1,56 +1,71 @@
-# app/billing/yookassa_client.py
+# -*- coding: utf-8 -*-
+"""
+ЮKassa thin-client: создаёт redirect-ссылку на платёж.
+Экспортирует две функции для совместимости с ботом:
+- create_payment_link(amount_rub:int, description:str, metadata:dict|None) -> str
+- create_redirect_payment(...): legacy-алиас на create_payment_link
+"""
+
 from __future__ import annotations
-import os, base64, uuid
-from typing import Literal, Optional
+import os
+import uuid
+from typing import Optional, Dict
 
-import httpx
+try:
+    from yookassa import Configuration, Payment
+except Exception as e:  # защитим импорт, чтобы не завалить модуль на билд-стадии
+    Configuration = None
+    Payment = None
+    _import_error = e
+else:
+    _import_error = None
 
-YK_API = "https://api.yookassa.ru/v3"
-YK_SHOP_ID = os.getenv("YK_SHOP_ID", "")
-YK_SECRET_KEY = os.getenv("YK_SECRET_KEY", "")
-YK_RETURN_URL = os.getenv("YK_RETURN_URL", "https://t.me")
+# --- ENV ---
+_SHOP_ID     = os.getenv("YK_SHOP_ID", "").strip()
+_SECRET_KEY  = os.getenv("YK_SECRET_KEY", "").strip()
+_RETURN_URL  = os.getenv("YK_RETURN_URL", "").strip()  # куда вернёт после оплаты
 
-if not (YK_SHOP_ID and YK_SECRET_KEY):
-    # Не падаем при импорте — просто не сможем создать платёж
-    pass
+def _ensure_configured() -> None:
+    if _import_error:
+        raise RuntimeError(f"yookassa SDK not available: {_import_error}")
+    if not _SHOP_ID or not _SECRET_KEY:
+        raise RuntimeError("YK_SHOP_ID / YK_SECRET_KEY не заданы в окружении")
+    Configuration.account_id = _SHOP_ID
+    Configuration.secret_key = _SECRET_KEY
 
-def _auth_headers() -> dict[str, str]:
-    token = base64.b64encode(f"{YK_SHOP_ID}:{YK_SECRET_KEY}".encode()).decode()
-    return {
-        "Authorization": f"Basic {token}",
-        "Idempotence-Key": str(uuid.uuid4()),
-        "Content-Type": "application/json",
-    }
-
-async def create_payment_rub(
+def create_payment_link(
+    *,
     amount_rub: int,
     description: str,
-    user_id: int,
-    plan: Literal["week","month","quarter","year"],
-    metadata: Optional[dict] = None,
-) -> dict:
+    metadata: Optional[Dict] = None,
+) -> str:
     """
-    Возвращает JSON платёжа ЮKassa. Ссылку берём из result['confirmation']['confirmation_url'].
+    Создаёт платёж YooKassa (redirect) и возвращает confirmation_url.
     """
-    payload = {
-        "amount": {"value": f"{amount_rub:.2f}", "currency": "RUB"},
-        "capture": True,
-        "description": description[:128],
-        "confirmation": {
-            "type": "redirect",
-            "return_url": YK_RETURN_URL,
-        },
-        # Сохранить карту для рекуррента
-        "save_payment_method": True,
-        "payment_method_data": { "type": "bank_card" },
-        "metadata": {
-            "user_id": str(user_id),
-            "plan": plan,
-            **(metadata or {}),
-        },
-    }
+    _ensure_configured()
+    if not isinstance(amount_rub, int) or amount_rub <= 0:
+        raise ValueError("amount_rub должен быть положительным целым числом (в рублях)")
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{YK_API}/payments", headers=_auth_headers(), json=payload)
-        r.raise_for_status()
-        return r.json()
+    idempotence_key = str(uuid.uuid4())
+    payload = {
+        "amount": {"value": f"{amount_rub}.00", "currency": "RUB"},
+        "confirmation": {"type": "redirect", "return_url": _RETURN_URL or "https://t.me/"},
+        "capture": True,  # захват средств сразу
+        "description": (description or "")[:128],
+        "metadata": metadata or {},
+    }
+    payment = Payment.create(payload, idempotence_key)  # type: ignore[operator]
+    # SDK даёт объект; у него есть confirmation.confirmation_url
+    url = getattr(getattr(payment, "confirmation", None), "confirmation_url", None)
+    if not url:
+        raise RuntimeError("YooKassa: не получили confirmation_url")
+    return str(url)
+
+# --- legacy-алиас для старого импорт-имени ---
+def create_redirect_payment(
+    *,
+    amount_rub: int,
+    description: str,
+    metadata: Optional[Dict] = None,
+) -> str:
+    return create_payment_link(amount_rub=amount_rub, description=description, metadata=metadata)
