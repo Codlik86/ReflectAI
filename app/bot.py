@@ -802,23 +802,77 @@ async def on_text(m: Message):
 
     await m.answer("Я рядом и на связи. Нажми «Поговорить» или «Разобраться».", reply_markup=kb_main_menu())
 
-# === /pay — кнопки тарифов ====================================================
+# === /pay — планы с 4 тарифами =========================================
 from aiogram.filters import Command as _CmdPay
 from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
+from sqlalchemy import text as _text
+from app.db import db_session as _sync_session
+from app.billing.yookassa_client import create_redirect_payment as _create_payment
+import os as _os
 
-_SITE_BASE = (os.getenv("WEBHOOK_BASE_URL") or os.getenv("PUBLIC_SITE_URL") or "").rstrip("/")
-if not _SITE_BASE:
-    _SITE_BASE = "https://selflect.onrender.com"
+_PLANS = {
+    "week":  (499,  "Подписка на 1 неделю"),
+    "month": (1190, "Подписка на 1 месяц"),
+    "q3":    (2990, "Подписка на 3 месяца"),
+    "year":  (7990, "Подписка на 1 год"),
+}
+
+def _kb_pay_plans() -> _IKM:
+    return _IKM(inline_keyboard=[
+        [_IKB(text="Неделя — 499 ₽",    callback_data="pay:plan:week")],
+        [_IKB(text="Месяц — 1190 ₽",    callback_data="pay:plan:month")],
+        [_IKB(text="3 месяца — 2990 ₽", callback_data="pay:plan:q3")],
+        [_IKB(text="Год — 7990 ₽",      callback_data="pay:plan:year")],
+    ])
 
 @router.message(_CmdPay("pay"))
 async def on_pay(m: Message):
-    text = (
-        "💳 Подписка\n\n"
-        "Выберите тариф — оплата откроется в браузере. После оплаты доступ активируется автоматически."
+    await m.answer(
+        "Подписка «Помни»\\n"
+        "• Все функции без ограничений\\n"
+        "• 5 дней бесплатно, далее по тарифу\\n\\n"
+        "<b>Выбери план:</b>",
+        reply_markup=_kb_pay_plans()
     )
-    kb = _IKM(inline_keyboard=[
-        [_IKB(text="Месяц · 349 ₽",     url=f"{_SITE_BASE}/pay?plan=month")],
-        [_IKB(text="3 месяца · 899 ₽",  url=f"{_SITE_BASE}/pay?plan=quarter")],
-        [_IKB(text="Год · 2 990 ₽",     url=f"{_SITE_BASE}/pay?plan=year")],
-    ])
-    await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
+def _thanks_url() -> str:
+    base = (_os.getenv("WEBHOOK_BASE_URL", "") or "").rstrip("/")
+    return base + "/pay/thanks" if base else "https://yookassa.ru"
+
+@router.callback_query(F.data.startswith("pay:plan:"))
+async def on_pick_plan(cb: CallbackQuery):
+    plan = cb.data.split(":")[-1]
+    if plan not in _PLANS:
+        await cb.answer("Неизвестный план", show_alert=True); return
+    amount, desc = _PLANS[plan]
+
+    tg = cb.from_user.id
+    with _sync_session() as s:
+        uid = s.execute(_text("SELECT id FROM users WHERE tg_id=:tg"), {"tg": str(tg)}).scalar()
+        if not uid:
+            s.execute(
+                _text("INSERT INTO users(tg_id, privacy_level, created_at) VALUES(:tg, 'insights', CURRENT_TIMESTAMP)"),
+                {"tg": str(tg)}
+            )
+            uid = s.execute(_text("SELECT id FROM users WHERE tg_id=:tg"), {"tg": str(tg)}).scalar()
+        s.commit()
+
+    try:
+        data = await _create_payment(
+            user_id=int(uid),
+            plan=plan,
+            amount=int(amount),
+            description=desc,
+            return_url=_thanks_url(),
+        )
+        url = data.get("confirmation_url")
+    except Exception:
+        url = None
+
+    if not url:
+        await cb.message.answer("Не удалось сформировать платёж. Попробуй ещё раз позже."); await cb.answer(); return
+
+    kb = _IKM(inline_keyboard=[[ _IKB(text="Оплатить 💳", url=url) ]])
+    await cb.message.answer(f"<b>{desc}</b>\\nСумма: <b>{amount} ₽</b>\\n\\nНажми «Оплатить 💳», чтобы перейти к форме.", reply_markup=kb)
+    await cb.answer()
+# === /pay =====================================================================
