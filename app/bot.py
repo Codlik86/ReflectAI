@@ -39,12 +39,53 @@ try:
 except Exception:
     rag_search = None
 
-# БД для служебных операций (policy/приватность/очистка)
+# БД (async)
 from sqlalchemy import text
-from app.db import db_session
+from app.db.core import async_session
 
 router = Router()
 
+# --- async DB helpers (privacy, users, history) -----------------
+async def _ensure_user_id(tg_id: int) -> int:
+    """Вернёт users.id по tg_id, создаст пользователя при отсутствии."""
+    async with async_session() as s:
+        r = await s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+        uid = r.scalar()
+        if uid is None:
+            r = await s.execute(
+                text("""
+                    INSERT INTO users (tg_id, privacy_level, created_at)
+                    VALUES (:tg, 'ask', NOW())
+                    RETURNING id
+                """),
+                {"tg": int(tg_id)},
+            )
+            uid = r.scalar_one()
+            await s.commit()
+        return int(uid)
+
+async def _db_get_privacy(tg_id: int) -> str:
+    async with async_session() as s:
+        r = await s.execute(text("SELECT privacy_level FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+        val = r.scalar()
+    return (val or "insights")
+
+async def _db_set_privacy(tg_id: int, mode: str) -> None:
+    async with async_session() as s:
+        await s.execute(text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"),
+                        {"m": mode, "tg": int(tg_id)})
+        await s.commit()
+
+async def _purge_user_history(tg_id: int) -> int:
+    async with async_session() as s:
+        r = await s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+        uid = r.scalar()
+        if not uid:
+            return 0
+        r = await s.execute(text("DELETE FROM bot_messages WHERE user_id = :u"), {"u": int(uid)})
+        await s.commit()
+        return int(getattr(r, "rowcount", 0) or 0)
+# ----------------------------------------------------------------
 
 # ===== Онбординг: ссылки и картинки =====
 POLICY_URL = os.getenv("POLICY_URL", "").strip()
@@ -64,89 +105,6 @@ def get_onb_image(key: str) -> str:
 CHAT_MODE: Dict[int, str] = {}        # chat_id -> "talk" | "work" | "reflection"
 USER_TONE: Dict[int, str] = {}        # chat_id -> "default" | "friend" | "therapist" | "18plus"
 
-# ===== Локальные БД-хелперы под приватность/очистку =====
-from sqlalchemy import text
-from app.db.core import get_session
-
-async def _ensure_user_id(tg_id: int) -> int:
-    """
-    Возвращает user.id по tg_id, создаёт при отсутствии.
-    """
-    async for session in get_session():
-        row = (await session.execute(
-            text("SELECT id FROM users WHERE tg_id = :tg LIMIT 1"),
-            {"tg": int(tg_id)},
-        )).first()
-        if row:
-            return int(row[0])
-
-        # создаём
-        new_id = (await session.execute(
-            text("""
-                INSERT INTO users (tg_id, privacy_level, created_at)
-                VALUES (:tg, 'ask', now())
-                RETURNING id
-            """),
-            {"tg": int(tg_id)},
-        )).scalar_one()
-        await session.commit()
-        return int(new_id)
-    
-    # синхронный шорткат для старых Sync-участков кода
-def _ensure_user_id_sync(tg_id: int) -> int:
-    from sqlalchemy import text
-    from app.db import db_session
-
-    with db_session() as s:
-        uid = s.execute(
-            text("SELECT id FROM users WHERE tg_id = :tg"),
-            {"tg": tg_id},
-        ).scalar()
-
-        if not uid:
-            s.execute(
-                text("INSERT INTO users (tg_id, privacy_level, created_at) "
-                     "VALUES (:tg, 'all', now())"),
-                {"tg": tg_id},
-            )
-            s.commit()
-            uid = s.execute(
-                text("SELECT id FROM users WHERE tg_id = :tg"),
-                {"tg": tg_id},
-            ).scalar()
-
-        return int(uid)
-
-def _db_get_privacy(tg_id: int) -> str:
-    """Возвращает режим: 'none' | 'insights' (иные значения считаем как включено)."""
-    with db_session() as s:
-        mode = s.execute(text("SELECT privacy_level FROM users WHERE tg_id = :tg"), {"tg": tg_id}).scalar()
-        return (mode or "insights").strip()
-
-def await _db_set_privacy(tg_id: int, mode: str) -> None:
-    mode = "none" if mode == "none" else "insights"
-    with db_session() as s:
-        uid = _ensure_user_id_sync(tg_id)   # ✅ без await
-        s.execute(
-            text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"),
-            {"m": mode, "tg": tg_id},
-        )
-        s.commit()
-
-def await _purge_user_history(tg_id: int) -> int:
-    with db_session() as s:
-        uid = _ensure_user_id_sync(tg_id)   # ✅ без await
-        cnt = s.execute(
-            text("SELECT COUNT(*) FROM bot_messages WHERE user_id = :u"),
-            {"u": uid},
-        ).scalar() or 0
-        s.execute(
-            text("DELETE FROM bot_messages WHERE user_id = :u"),
-            {"u": uid},
-        )
-        s.commit()
-        return int(cnt)
-
 # --- Анти-штампы и эвристики «шаблонности»
 BANNED_PHRASES = [
     "это, безусловно, очень трудная ситуация",
@@ -156,8 +114,8 @@ BANNED_PHRASES = [
     "если тебе нужно, можешь обратиться к друзьям"
 ]
 
-def _has_banned_phrases(text: str) -> bool:
-    t = (text or "").lower()
+def _has_banned_phrases(text_: str) -> bool:
+    t = (text_ or "").lower()
     return any(p in t for p in BANNED_PHRASES)
 
 def _jaccard(a: str, b: str) -> float:
@@ -169,14 +127,14 @@ def _jaccard(a: str, b: str) -> float:
 
 def _too_similar_to_recent(chat_id: int, candidate: str, *, lookback: int = 8, thr: float = 0.62) -> bool:
     try:
-        recent = get_recent_messages(chat_id, limit=lookback*2)
+        recent = get_recent_messages(chat_id, limit=lookback * 2)
         prev_bot = [m["text"] for m in recent if m["role"] == "bot"][-lookback:]
     except Exception:
         prev_bot = []
     return any(_jaccard(candidate, old) >= thr for old in prev_bot)
 
-def _looks_templatey(text: str) -> bool:
-    return _has_banned_phrases(text)
+def _looks_templatey(text_: str) -> bool:
+    return _has_banned_phrases(text_)
 
 # --- «дневничковая» длина: когда можно расписать подробнее
 STRUCTURE_KEYWORDS = [
@@ -219,13 +177,11 @@ EMO_DEFAULTS = {
 }
 
 def _emoji_by_topic(tid: str, title: str) -> str:
-    # 1) пробуем TOPICS (там у тебя есть emoji/title)
     meta = TOPICS.get(tid) or {}
     if isinstance(meta, dict):
         e = (meta.get("emoji") or "").strip()
         if e:
             return e
-    # 2) устойчивый фолбэк по хешу
     pool = ["🌱", "🌿", "🌸", "🌙", "☀️", "🔥", "🧭", "🧠", "🛠️", "💡", "🧩", "🎯", "🌊", "🫶", "✨"]
     idx = int(hashlib.md5((tid or title).encode("utf-8")).hexdigest(), 16) % len(pool)
     return pool[idx]
@@ -264,9 +220,8 @@ def kb_topics() -> InlineKeyboardMarkup:
 
 def kb_exercises(tid: str) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
-    # Структура EXERCISES плоская: EXERCISES[tid][eid] -> {title,intro,steps}
     for eid, ex in (EXERCISES.get(tid) or {}).items():
-        if not isinstance(ex, dict):  # страховка на случай мусора
+        if not isinstance(ex, dict):
             continue
         title = ex.get("title", eid)
         buttons.append([InlineKeyboardButton(text=title, callback_data=f"ex:{tid}:{eid}:start")])
@@ -291,10 +246,8 @@ def kb_tone_picker() -> InlineKeyboardMarkup:
         ]
     )
 
-def kb_privacy_for(chat_id: int) -> InlineKeyboardMarkup:
-    """
-    Режимы users.privacy_level: 'none' -> хранение ВЫКЛ, иначе считаем ВКЛ.
-    """
+async def kb_privacy_for(chat_id: int) -> InlineKeyboardMarkup:
+    """Строим клавиатуру с учётом текущего режима приватности."""
     try:
         mode = (await _db_get_privacy(chat_id) or "insights").lower()
     except Exception:
@@ -381,9 +334,12 @@ async def on_onb_agree(cb: CallbackQuery):
     uid = await _ensure_user_id(tg_id)
     # 1) фиксируем согласие
     try:
-        with db_session() as s:
-            s.execute(text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"), {"uid": uid})
-            s.commit()
+        async with async_session() as s:
+            await s.execute(
+                text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"),
+                {"uid": uid},
+            )
+            await s.commit()
     except Exception:
         pass
     # 2) ответ
@@ -475,8 +431,8 @@ async def on_ex_click(cb: CallbackQuery):
         await cb.answer(); return
 
     if action == "start":
-        text = intro or (steps[0] if steps else "Шагов нет.")
-        await _safe_edit(cb.message, text, reply_markup=step_keyboard_intro(tid, eid, total))
+        text_ = intro or (steps[0] if steps else "Шагов нет.")
+        await _safe_edit(cb.message, text_, reply_markup=step_keyboard_intro(tid, eid, total))
         await cb.answer(); return
 
     try:
@@ -484,8 +440,8 @@ async def on_ex_click(cb: CallbackQuery):
     except Exception:
         idx = 0
     idx = max(0, min(idx, total - 1))
-    text = steps[idx] if steps else "Шагов нет."
-    await _safe_edit(cb.message, text, reply_markup=step_keyboard(tid, eid, idx, total))
+    text_ = steps[idx] if steps else "Шагов нет."
+    await _safe_edit(cb.message, text_, reply_markup=step_keyboard(tid, eid, idx, total))
     await cb.answer()
 
 # ===== Рефлексия =====
@@ -595,12 +551,12 @@ async def on_med_play(cb: CallbackQuery):
     if not sent_ok:
         await cb.message.answer(caption)
 
-    # метрика (мягко)
+    # мягкая метрика
     try:
         import json
-        with db_session() as s:
-            uid = await _ensure_user_id(cb.from_user.id)
-            s.execute(
+        uid = await _ensure_user_id(cb.from_user.id)
+        async with async_session() as s:
+            await s.execute(
                 text("""
                     INSERT INTO bot_events (user_id, event_type, payload, created_at)
                     VALUES (:uid, :etype, :payload, CURRENT_TIMESTAMP)
@@ -614,7 +570,7 @@ async def on_med_play(cb: CallbackQuery):
                     ),
                 },
             )
-            s.commit()
+            await s.commit()
     except Exception:
         pass
 
@@ -639,7 +595,8 @@ async def on_settings_tone(cb: CallbackQuery):
 
 @router.callback_query(F.data == "settings:privacy")
 async def on_settings_privacy(cb: CallbackQuery):
-    await _safe_edit(cb.message, "Приватность:", reply_markup=kb_privacy_for(cb.message.chat.id)); await cb.answer()
+    rm = await kb_privacy_for(cb.message.chat.id)
+    await _safe_edit(cb.message, "Приватность:", reply_markup=rm); await cb.answer()
 
 @router.callback_query(F.data == "privacy:toggle")
 async def on_privacy_toggle(cb: CallbackQuery):
@@ -648,7 +605,8 @@ async def on_privacy_toggle(cb: CallbackQuery):
     new_mode = "none" if mode != "none" else "insights"
     await _db_set_privacy(chat_id, new_mode)
     state_txt = "выключено" if new_mode == "none" else "включено"
-    await _safe_edit(cb.message, f"Хранение истории сейчас: <b>{state_txt}</b>.", reply_markup=kb_privacy_for(chat_id))
+    rm = await kb_privacy_for(chat_id)
+    await _safe_edit(cb.message, f"Хранение истории сейчас: <b>{state_txt}</b>.", reply_markup=rm)
     await cb.answer("Настройка применена")
 
 @router.callback_query(F.data == "privacy:clear")
@@ -658,14 +616,16 @@ async def on_privacy_clear(cb: CallbackQuery):
     except Exception:
         await cb.answer("Не получилось очистить историю", show_alert=True); return
     await cb.answer("История удалена ✅", show_alert=True)
-    text = f"Готово. Что дальше?\n\nУдалено записей: {count}."
-    await _safe_edit(cb.message, text, reply_markup=kb_privacy_for(cb.message.chat.id))
+    text_ = f"Готово. Что дальше?\n\nУдалено записей: {count}."
+    rm = await kb_privacy_for(cb.message.chat.id)
+    await _safe_edit(cb.message, text_, reply_markup=rm)
 
 @router.message(Command("privacy"))
 async def on_privacy_cmd(m: Message):
     mode = (await _db_get_privacy(m.chat.id) or "insights").lower()
     state = "выключено" if mode == "none" else "включено"
-    await m.answer(f"Хранение истории сейчас: <b>{state}</b>.", reply_markup=kb_privacy_for(m.chat.id))
+    rm = await kb_privacy_for(m.chat.id)
+    await m.answer(f"Хранение истории сейчас: <b>{state}</b>.", reply_markup=rm)
 
 # ===== Прочие команды =====
 @router.message(Command("about"))
@@ -731,7 +691,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     # 2) История (старые → новые)
     history_msgs: List[dict] = []
     try:
-        recent = get_recent_messages(chat_id, limit=70)  # чуть больше окна
+        recent = get_recent_messages(chat_id, limit=70)
         for r in recent:
             role = "assistant" if r["role"] == "bot" else "user"
             history_msgs.append({"role": role, "content": r["text"]})
@@ -752,18 +712,16 @@ async def _answer_with_llm(m: Message, user_text: str):
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
-    # 4) Вызов LLM (две попытки: базовая + анти-штамповая)
     if chat_with_style is None:
         await m.answer("Я тебя слышу. Сейчас подключаюсь…")
         return
 
-    # Хотим позволять 2–4 абзаца, если есть смысл — задаём потолок токенов
     LLM_MAX_TOKENS = 480
 
-    def _needs_regen(text: str) -> bool:
-        return not text or _looks_templatey(text) or _too_similar_to_recent(chat_id, text)
+    def _needs_regen(text_: str) -> bool:
+        return not text_ or _looks_templatey(text_) or _too_similar_to_recent(chat_id, text_)
 
-    # Первая попытка — обычная (чуть теплее и длиннее)
+    # Первая попытка
     try:
         reply = await chat_with_style(
             messages=messages,
@@ -776,7 +734,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     except Exception:
         reply = ""
 
-    # Если звучит шаблонно или повторяет прошлое — просим переписать живее, допускаем 2–4 абзаца
+    # Переписываем при шаблонности
     if _needs_regen(reply):
         fixer_system = (
             "Перепиши ответ живее, без клише и общих слов.\n"
@@ -828,7 +786,6 @@ async def on_debug_prompt(m: Message):
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
     chat_id = m.chat.id
-    # лог входящего
     try:
         save_user_message(chat_id, m.text or "")
     except Exception:
@@ -845,48 +802,7 @@ async def on_text(m: Message):
 
     await m.answer("Я рядом и на связи. Нажми «Поговорить» или «Разобраться».", reply_markup=kb_main_menu())
 
-
-# === Async DB helpers (override legacy sync) =================================
-from sqlalchemy import text as _sql_text
-from app.db.core import async_session as _async_session
-
-async def _db_get_privacy(tg_id: int) -> str | None:
-    async with _async_session() as s2:
-        val = (await s2.execute(
-            _sql_text("SELECT privacy_level FROM users WHERE tg_id = :tg"),
-            {"tg": str(tg_id)}
-        )).scalar()
-        return val
-
-async def _db_set_privacy(tg_id: int, mode: str) -> None:
-    await _ensure_user_id(tg_id)
-    async with _async_session() as s2:
-        await s2.execute(
-            _sql_text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"),
-            {"m": mode, "tg": str(tg_id)}
-        )
-        await s2.commit()
-
-async def _purge_user_history(tg_id: int) -> int:
-    uid = await _ensure_user_id(tg_id)
-    async with _async_session() as s2:
-        cnt = (await s2.execute(
-            _sql_text("SELECT COUNT(*) FROM bot_messages WHERE user_id = :u"),
-            {"u": uid}
-        )).scalar() or 0
-        await s2.execute(
-            _sql_text("DELETE FROM bot_messages WHERE user_id = :u"),
-            {"u": uid}
-        )
-        await s2.commit()
-        return int(cnt)
-
 # === /pay (временная заглушка, пока ЮKassa на модерации) =====================
-from aiogram.filters import Command
-from aiogram.types import Message
-
-if "on_pay" not in globals():
-    @router.message(Command("pay"))
-    async def on_pay(m: Message):
-        await m.answer("Подписка скоро появится. Мы готовим удобные тарифы.")
-
+@router.message(Command("pay"))
+async def on_pay(m: Message):
+    await m.answer("Подписка скоро появится. Мы готовим удобные тарифы.")
