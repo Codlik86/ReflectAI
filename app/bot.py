@@ -807,7 +807,10 @@ from aiogram.filters import Command as _CmdPay
 from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
 from sqlalchemy import text as _text
 from app.db import db_session as _sync_session
-from app.billing.yookassa_client import create_redirect_payment as _create_payment
+try:
+    from app.billing.yookassa_client import create_payment_link as _create_payment
+except ImportError:
+    from app.billing.yookassa_client import create_redirect_payment as _create_payment  # legacy
 import os as _os
 
 _PLANS = {
