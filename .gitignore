@@ -26,3 +26,6 @@ migrations/*_pycache__/
 data/
 corpus/
 *.txt*.db
+
+# local artifacts
+*.db
