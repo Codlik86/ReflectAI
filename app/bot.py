@@ -123,7 +123,7 @@ def _db_get_privacy(tg_id: int) -> str:
         mode = s.execute(text("SELECT privacy_level FROM users WHERE tg_id = :tg"), {"tg": tg_id}).scalar()
         return (mode or "insights").strip()
 
-def _db_set_privacy(tg_id: int, mode: str) -> None:
+def await _db_set_privacy(tg_id: int, mode: str) -> None:
     mode = "none" if mode == "none" else "insights"
     with db_session() as s:
         uid = _ensure_user_id_sync(tg_id)   # ✅ без await
@@ -133,7 +133,7 @@ def _db_set_privacy(tg_id: int, mode: str) -> None:
         )
         s.commit()
 
-def _purge_user_history(tg_id: int) -> int:
+def await _purge_user_history(tg_id: int) -> int:
     with db_session() as s:
         uid = _ensure_user_id_sync(tg_id)   # ✅ без await
         cnt = s.execute(
@@ -296,7 +296,7 @@ def kb_privacy_for(chat_id: int) -> InlineKeyboardMarkup:
     Режимы users.privacy_level: 'none' -> хранение ВЫКЛ, иначе считаем ВКЛ.
     """
     try:
-        mode = (_db_get_privacy(chat_id) or "insights").lower()
+        mode = (await _db_get_privacy(chat_id) or "insights").lower()
     except Exception:
         mode = "insights"
     save_on = (mode != "none")
@@ -644,9 +644,9 @@ async def on_settings_privacy(cb: CallbackQuery):
 @router.callback_query(F.data == "privacy:toggle")
 async def on_privacy_toggle(cb: CallbackQuery):
     chat_id = cb.message.chat.id
-    mode = (_db_get_privacy(chat_id) or "insights").lower()
+    mode = (await _db_get_privacy(chat_id) or "insights").lower()
     new_mode = "none" if mode != "none" else "insights"
-    _db_set_privacy(chat_id, new_mode)
+    await _db_set_privacy(chat_id, new_mode)
     state_txt = "выключено" if new_mode == "none" else "включено"
     await _safe_edit(cb.message, f"Хранение истории сейчас: <b>{state_txt}</b>.", reply_markup=kb_privacy_for(chat_id))
     await cb.answer("Настройка применена")
@@ -654,7 +654,7 @@ async def on_privacy_toggle(cb: CallbackQuery):
 @router.callback_query(F.data == "privacy:clear")
 async def on_privacy_clear(cb: CallbackQuery):
     try:
-        count = _purge_user_history(cb.from_user.id)
+        count = await _purge_user_history(cb.from_user.id)
     except Exception:
         await cb.answer("Не получилось очистить историю", show_alert=True); return
     await cb.answer("История удалена ✅", show_alert=True)
@@ -663,7 +663,7 @@ async def on_privacy_clear(cb: CallbackQuery):
 
 @router.message(Command("privacy"))
 async def on_privacy_cmd(m: Message):
-    mode = (_db_get_privacy(m.chat.id) or "insights").lower()
+    mode = (await _db_get_privacy(m.chat.id) or "insights").lower()
     state = "выключено" if mode == "none" else "включено"
     await m.answer(f"Хранение истории сейчас: <b>{state}</b>.", reply_markup=kb_privacy_for(m.chat.id))
 
@@ -844,3 +844,49 @@ async def on_text(m: Message):
         ); return
 
     await m.answer("Я рядом и на связи. Нажми «Поговорить» или «Разобраться».", reply_markup=kb_main_menu())
+
+
+# === Async DB helpers (override legacy sync) =================================
+from sqlalchemy import text as _sql_text
+from app.db.core import async_session as _async_session
+
+async def _db_get_privacy(tg_id: int) -> str | None:
+    async with _async_session() as s2:
+        val = (await s2.execute(
+            _sql_text("SELECT privacy_level FROM users WHERE tg_id = :tg"),
+            {"tg": str(tg_id)}
+        )).scalar()
+        return val
+
+async def _db_set_privacy(tg_id: int, mode: str) -> None:
+    await _ensure_user_id(tg_id)
+    async with _async_session() as s2:
+        await s2.execute(
+            _sql_text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"),
+            {"m": mode, "tg": str(tg_id)}
+        )
+        await s2.commit()
+
+async def _purge_user_history(tg_id: int) -> int:
+    uid = await _ensure_user_id(tg_id)
+    async with _async_session() as s2:
+        cnt = (await s2.execute(
+            _sql_text("SELECT COUNT(*) FROM bot_messages WHERE user_id = :u"),
+            {"u": uid}
+        )).scalar() or 0
+        await s2.execute(
+            _sql_text("DELETE FROM bot_messages WHERE user_id = :u"),
+            {"u": uid}
+        )
+        await s2.commit()
+        return int(cnt)
+
+# === /pay (временная заглушка, пока ЮKassa на модерации) =====================
+from aiogram.filters import Command
+from aiogram.types import Message
+
+if "on_pay" not in globals():
+    @router.message(Command("pay"))
+    async def on_pay(m: Message):
+        await m.answer("Подписка скоро появится. Мы готовим удобные тарифы.")
+
