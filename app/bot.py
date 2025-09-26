@@ -45,6 +45,34 @@ from app.db.core import async_session
 
 router = Router()
 
+
+# === Trial / access gating (temporary in-memory) ==============================
+ACCESS_GRANTED: dict[int, bool] = {}
+
+def _paywall_text() -> str:
+    return (
+        "Подписка «Помни»\n"
+        "• Все функции без ограничений\n"
+        "• 5 дней бесплатно\n\n"
+        "<b>Чтобы открыть все функции, начните пробный период.</b>"
+    )
+
+def kb_trial_start() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Начать пробный период", callback_data="trial:start")]]
+    )
+
+def _require_access_msg(m: Message) -> bool:
+    """True -> доступ закрыт и мы показали пейволл."""
+    if not ACCESS_GRANTED.get(m.chat.id):
+        try:
+            # показываем аккуратно, без спама
+            m.bot.loop.create_task(m.answer(_paywall_text(), reply_markup=kb_trial_start()))
+        except Exception:
+            pass
+        return True
+    return False
+# =============================================================================
 # --- async DB helpers (privacy, users, history) -----------------
 async def _ensure_user_id(tg_id: int) -> int:
     """Вернёт users.id по tg_id, создаст пользователя при отсутствии."""
@@ -301,13 +329,13 @@ def kb_onb_step2() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 WHAT_NEXT_TEXT = (
-    "Что дальше? Несколько вариантов:\n\n"
-    "1) Если хочешь просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе — я поддержу и помогу разобраться.\n"
-    "2) Нужен оперативный разбор — заходи в «Разобраться». Там короткие упражнения по темам.\n"
-    "3) Хочешь аудио-передышку — «Медитации».\n\n"
-    "Пиши, как удобно — я рядом 🖤"
+    "Что дальше?\n\n"
+    "• Хочешь просто выговориться — нажми «Поговорить». Я поддержу и помогу навести ясность.\n"
+    "• Нужен быстрый разбор — «Разобраться»: короткие упражнения по темам.\n"
+    "• Нужна передышка — «Медитации».\n\n"
+    "<b>Чтобы открыть все функции, начните пробный период — 5 дней бесплатно.</b> "
+    "После — можно выбрать удобный план."
 )
-
 def kb_onb_step3() -> ReplyKeyboardMarkup:
     return kb_main_menu()
 
@@ -332,26 +360,30 @@ async def on_onb_step2(cb: CallbackQuery):
 async def on_onb_agree(cb: CallbackQuery):
     tg_id = cb.from_user.id
     uid = await _ensure_user_id(tg_id)
-    # 1) фиксируем согласие
     try:
         async with async_session() as s:
-            await s.execute(
-                text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"),
-                {"uid": uid},
-            )
+            await s.execute(text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"), {"uid": uid})
             await s.commit()
     except Exception:
         pass
-    # 2) ответ
     try:
         await cb.answer("Спасибо! Принял ✅", show_alert=False)
     except Exception:
         pass
-    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb_onb_step3())
+    # показываем пейволл (пока без реального тримера)
+    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb_trial_start())
+
+# триал: старт (пока просто даёт доступ)
+@router.callback_query(F.data == "trial:start")
+async def on_trial_start(cb: CallbackQuery):
+    ACCESS_GRANTED[cb.message.chat.id] = True
+    await cb.answer("Пробный период активирован ✅")
+    await cb.message.answer("Готово! Я открыл все функции. Если что — меню ниже.", reply_markup=kb_main_menu())
 
 # ===== Меню/навигация =====
 @router.message(F.text.in_(["🌿 Разобраться", "/work"]))
 async def on_work_menu(m: Message):
+    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     CHAT_MODE[m.chat.id] = "work"
     img = get_onb_image("work")
     if img:
@@ -364,11 +396,13 @@ async def on_work_menu(m: Message):
 
 @router.callback_query(F.data == "work:topics")
 async def on_back_to_topics(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     await _safe_edit(cb.message, "Выбирай тему:", reply_markup=kb_topics())
     await cb.answer()
 
 @router.callback_query(F.data.startswith("t:"))
 async def on_topic_click(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     tid = cb.data.split(":", 1)[1]
     await _safe_edit(cb.message, topic_button_title(tid), reply_markup=kb_exercises(tid))
     await cb.answer()
@@ -398,12 +432,14 @@ def step_keyboard_intro(tid: str, eid: str, total: int) -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data.startswith("exlist:"))
 async def on_exlist(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     tid = cb.data.split(":", 1)[1]
     await _safe_edit(cb.message, topic_button_title(tid), reply_markup=kb_exercises(tid))
     await cb.answer()
 
 @router.callback_query(F.data.startswith("ex:"))
 async def on_ex_click(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     # ex:<tid>:<eid>:<idx|start|finish>
     try:
         parts = cb.data.split(":", 3)
@@ -447,6 +483,7 @@ async def on_ex_click(cb: CallbackQuery):
 # ===== Рефлексия =====
 @router.callback_query(F.data == "reflect:start")
 async def on_reflect_start(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     CHAT_MODE[cb.message.chat.id] = "reflection"
     await _safe_edit(cb.message, "Давай немного притормозим и прислушаемся к себе. "
                                   "Можешь начать с того, что больше всего откликается сейчас.")
@@ -498,6 +535,7 @@ MEDITATIONS_TEXT = (
 
 @router.message(Command(commands=["meditations", "meditions", "meditation"]))
 async def cmd_meditations(m: Message):
+    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     img = get_onb_image("meditations")
     if img:
         try:
@@ -508,14 +546,17 @@ async def cmd_meditations(m: Message):
 
 @router.message(F.text == "🎧 Медитации")
 async def on_meditations_btn(m: Message):
+    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     await _safe_edit(m, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
 
 @router.callback_query(F.data == "med:cats")
 async def on_med_cats(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     await _safe_edit(cb.message, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories()); await cb.answer()
 
 @router.callback_query(F.data.startswith("med:cat:"))
 async def on_med_cat(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     cid = cb.data.split(":", 2)[2]
     title = dict(get_categories()).get(cid, "Медитации")
     await _safe_edit(cb.message, f"🎧 {title}", reply_markup=kb_meditations_list(cid))
@@ -523,6 +564,7 @@ async def on_med_cat(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("med:play:"))
 async def on_med_play(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     _, _, cid, mid = cb.data.split(":", 3)
     raw = get_item(cid, mid)
     tr = _as_track(raw) if raw is not None else None
@@ -579,6 +621,7 @@ async def on_med_play(cb: CallbackQuery):
 # ===== Настройки =====
 @router.message(F.text.in_(["⚙️ Настройки", "/settings", "/setting"]))
 async def on_settings(m: Message):
+    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     await m.answer("Настройки:", reply_markup=kb_settings())
 
 @router.callback_query(F.data == "menu:main")
@@ -587,6 +630,7 @@ async def on_menu_main(cb: CallbackQuery):
 
 @router.callback_query(F.data == "menu:settings")
 async def on_menu_settings(cb: CallbackQuery):
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     await _safe_edit(cb.message, "Настройки:", reply_markup=kb_settings()); await cb.answer()
 
 @router.callback_query(F.data == "settings:tone")
@@ -644,6 +688,7 @@ async def on_menu(m: Message):
 # ===== Тон и режим разговора =====
 @router.message(F.text.in_(["💬 Поговорить", "/talk"]))
 async def on_talk(m: Message):
+    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     CHAT_MODE[m.chat.id] = "talk"
     await m.answer("Я рядом и слушаю. О чём хочется поговорить?", reply_markup=kb_main_menu())
 
@@ -785,6 +830,7 @@ async def on_debug_prompt(m: Message):
 # ===== Текстовые сообщения =====
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
+    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     chat_id = m.chat.id
     try:
         save_user_message(chat_id, m.text or "")
