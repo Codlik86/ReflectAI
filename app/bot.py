@@ -802,10 +802,6 @@ async def on_text(m: Message):
 
     await m.answer("Я рядом и на связи. Нажми «Поговорить» или «Разобраться».", reply_markup=kb_main_menu())
 
-# === /pay (временная заглушка, пока ЮKassa на модерации) =====================
-@router.message(Command("pay"))
-async def on_pay(m: Message):
-    await m.answer("Подписка скоро появится. Мы готовим удобные тарифы.")
 # === /pay — кнопки тарифов ====================================================
 from aiogram.filters import Command as _CmdPay
 from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
