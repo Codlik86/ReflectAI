@@ -29,3 +29,6 @@ corpus/
 
 # local artifacts
 *.db
+
+# local sqlite/db artifacts
+*.db
