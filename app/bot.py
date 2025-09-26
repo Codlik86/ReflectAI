@@ -806,3 +806,23 @@ async def on_text(m: Message):
 @router.message(Command("pay"))
 async def on_pay(m: Message):
     await m.answer("Подписка скоро появится. Мы готовим удобные тарифы.")
+# === /pay — кнопки тарифов ====================================================
+from aiogram.filters import Command as _CmdPay
+from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
+
+_SITE_BASE = (os.getenv("WEBHOOK_BASE_URL") or os.getenv("PUBLIC_SITE_URL") or "").rstrip("/")
+if not _SITE_BASE:
+    _SITE_BASE = "https://selflect.onrender.com"
+
+@router.message(_CmdPay("pay"))
+async def on_pay(m: Message):
+    text = (
+        "💳 Подписка\n\n"
+        "Выберите тариф — оплата откроется в браузере. После оплаты доступ активируется автоматически."
+    )
+    kb = _IKM(inline_keyboard=[
+        [_IKB(text="Месяц · 349 ₽",     url=f"{_SITE_BASE}/pay?plan=month")],
+        [_IKB(text="3 месяца · 899 ₽",  url=f"{_SITE_BASE}/pay?plan=quarter")],
+        [_IKB(text="Год · 2 990 ₽",     url=f"{_SITE_BASE}/pay?plan=year")],
+    ])
+    await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
