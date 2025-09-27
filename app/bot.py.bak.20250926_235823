@@ -15,8 +15,6 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
-# алиасы для клавиатуры (используются в нескольких местах, в т.ч. deep-link)
-from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
 
 # ===== Модули продукта =====
 from app.meditations import get_categories, get_items, get_item
@@ -45,70 +43,7 @@ except Exception:
 from sqlalchemy import text
 from app.db.core import async_session
 
-from sqlalchemy import select
-from app.db.core import get_session
-from app.billing.yookassa_client import create_payment_link
-from app.billing.service import start_trial_for_user, check_access, is_trial_active
-
 router = Router()
-
-# === Trial / access gating (temporary in-memory) ==============================
-ACCESS_GRANTED: dict[int, bool] = {}
-
-def _paywall_text() -> str:
-    return (
-        "Подписка «Помни»\n"
-        "• Все функции без ограничений\n"
-        "• 5 дней бесплатно\n\n"
-        "<b>Чтобы открыть все функции, начните пробный период.</b>"
-    )
-
-# --- Возврат из оплаты: /start paid_ok | paid_canceled | paid_fail ------------
-@router.message(F.text.regexp(r"^/start(\s+paid_(ok|canceled|fail))?$"))
-async def on_start_payment_deeplink(m: Message):
-    text_ = (m.text or "").strip()
-    parts = text_.split(maxsplit=1)
-    payload = parts[1].strip() if len(parts) > 1 else ""
-
-    if payload == "paid_ok":
-        await m.answer(
-            "Оплата прошла ✅\nДоступ активирован. Можно продолжать — «Поговорить», «Разобраться» или «Медитации».",
-            reply_markup=kb_main_menu()
-        )
-        return
-
-    if payload in {"paid_canceled", "paid_fail"}:
-        kb = _IKM(inline_keyboard=[
-            [_IKB(text="Оформить подписку 💳", callback_data="pay:open")],
-            [_IKB(text="Открыть меню", callback_data="menu:main")],
-        ])
-        await m.answer(
-            "Похоже, оплата не завершилась или была отменена.\nМожно попробовать ещё раз — это безопасно и займёт минуту.",
-            reply_markup=kb
-        )
-        return
-
-    # если payload не наш — пусть ниже обработает обычный /start
-    return
-
-# ===== Универсальный paywall в рантайме ======================================
-def kb_trial_start() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Начать пробный период", callback_data="trial:start")]]
-    )
-
-def _require_access_msg(m: Message) -> bool:
-    """True -> доступ закрыт и мы показали пейволл."""
-    if not ACCESS_GRANTED.get(m.chat.id):
-        try:
-            # показываем аккуратно, без спама
-            m.bot.loop.create_task(m.answer(_paywall_text(), reply_markup=kb_trial_start()))
-        except Exception:
-            pass
-        return True
-    return False
-
-# =============================================================================
 
 # --- async DB helpers (privacy, users, history) -----------------
 async def _ensure_user_id(tg_id: int) -> int:
@@ -210,35 +145,6 @@ STRUCTURE_KEYWORDS = [
 def _wants_structure(user_text: str) -> bool:
     t = (user_text or "").lower()
     return (len(t) >= 240) or any(k in t for k in STRUCTURE_KEYWORDS)
-
-# --- paywall helpers ---
-async def _get_user_by_tg(session, tg_id: int):
-    from app.db.models import User
-    q = await session.execute(select(User).where(User.tg_id == tg_id))
-    return q.scalar_one_or_none()
-
-def _kb_paywall(show_trial: bool) -> InlineKeyboardMarkup:
-    rows = []
-    if show_trial:
-        rows.append([InlineKeyboardButton(text="Начать пробный период ⭐️", callback_data="trial:start")])
-    rows.append([InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:open")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-async def _enforce_access_or_paywall(msg_or_call, session, user_id: int) -> bool:
-    """True — доступ есть; False — показан пейволл и нужно прекратить обработку."""
-    if await check_access(session, user_id):
-        return True
-    trial_active = await is_trial_active(session, user_id)
-    show_trial = not trial_active
-    text_ = (
-        "Доступ к разделу открыт по подписке.\n"
-        "Можно начать 5-дневный пробный период бесплатно, затем — по выбранному плану."
-    )
-    if isinstance(msg_or_call, Message):
-        await msg_or_call.answer(text_, reply_markup=_kb_paywall(show_trial))
-    else:
-        await msg_or_call.message.answer(text_, reply_markup=_kb_paywall(show_trial))
-    return False
 
 # ===== Универсальный safe_edit (не роняет UX) =====
 async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
@@ -356,43 +262,6 @@ async def kb_privacy_for(chat_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
-# ===== Триал: реальная активация в БД =========================================
-@router.callback_query(lambda c: c.data == "trial:start")
-async def cb_trial_start(call: CallbackQuery):
-    tg_id = call.from_user.id
-
-    async for session in get_session():
-        from app.db.models import User
-        q = await session.execute(select(User).where(User.tg_id == tg_id))
-        u = q.scalar_one_or_none()
-        if not u:
-            await call.answer("Нажми /start, чтобы завершить онбординг.", show_alert=True)
-            return
-
-        # если триал уже активен — просто сообщим
-        if await is_trial_active(session, u.id):
-            await call.answer("Триал уже активен ✅", show_alert=True)
-            return
-
-        started, expires = await start_trial_for_user(session, u.id)
-        await session.commit()
-
-    # UI после активации триала
-    await call.message.edit_text(
-        f"Триал активирован ✅\n"
-        f"Доступ открыт до {expires.astimezone().strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"Готов продолжать: выбрать «Поговорить», «Разобраться» или «Медитации».",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")]
-        ])
-    )
-    await call.answer()
-
-@router.callback_query(lambda c: c.data == "pay:open")
-async def cb_pay_open(call: CallbackQuery):
-    await on_pay(call.message)   # переиспользуем твой хэндлер /pay
-    await call.answer()
-
 # ===== /policy =====
 @router.message(Command("policy"))
 async def cmd_policy(m: Message):
@@ -431,13 +300,14 @@ def kb_onb_step2() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-WHAT_NEXT_TEXT = """С чего начнём? 💛
+WHAT_NEXT_TEXT = (
+    "Что дальше? Несколько вариантов:\n\n"
+    "1) Если хочешь просто поговорить — нажми «Поговорить». Поделись, что у тебя на душе — я поддержу и помогу разобраться.\n"
+    "2) Нужен оперативный разбор — заходи в «Разобраться». Там короткие упражнения по темам.\n"
+    "3) Хочешь аудио-передышку — «Медитации».\n\n"
+    "Пиши, как удобно — я рядом 🖤"
+)
 
-💬 «Поговорить» — место, где можно выговориться, порефлексировать и просто навести ясность. Заботливый психолог, тёплый друг или бережный дневник событий и мыслей — то, что нужно именно сейчас. Глубокая научная база знаний для полезного взаимодействия.
-🌿 «Разобраться» — короткие упражнения и практики под разные запросы: стресс, прокрастинация, решения и др.
-🎧 «Медитации» — спокойные аудио-паузы, чтобы переключиться и дать себе передышку.
-
-Чтобы открыть все функции, начните пробный период — 5 дней бесплатно. После — можно выбрать удобный план."""
 def kb_onb_step3() -> ReplyKeyboardMarkup:
     return kb_main_menu()
 
@@ -462,32 +332,26 @@ async def on_onb_step2(cb: CallbackQuery):
 async def on_onb_agree(cb: CallbackQuery):
     tg_id = cb.from_user.id
     uid = await _ensure_user_id(tg_id)
+    # 1) фиксируем согласие
     try:
         async with async_session() as s:
-            await s.execute(text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"), {"uid": uid})
+            await s.execute(
+                text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"),
+                {"uid": uid},
+            )
             await s.commit()
     except Exception:
         pass
+    # 2) ответ
     try:
         await cb.answer("Спасибо! Принял ✅", show_alert=False)
     except Exception:
         pass
-    # показываем пейволл (пока без реального тримера)
-    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb_trial_start())
-
-# (старый легаси-хэндлер trial:start был удалён)
+    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb_onb_step3())
 
 # ===== Меню/навигация =====
 @router.message(F.text.in_(["🌿 Разобраться", "/work"]))
 async def on_work_menu(m: Message):
-    async for session in get_session():
-        u = await _get_user_by_tg(session, m.from_user.id)
-        if not u:
-            await m.answer("Нажми /start, чтобы начать.")
-            return
-        if not await _enforce_access_or_paywall(m, session, u.id):
-            return
-    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     CHAT_MODE[m.chat.id] = "work"
     img = get_onb_image("work")
     if img:
@@ -500,20 +364,11 @@ async def on_work_menu(m: Message):
 
 @router.callback_query(F.data == "work:topics")
 async def on_back_to_topics(cb: CallbackQuery):
-    async for session in get_session():
-        u = await _get_user_by_tg(session, cb.from_user.id)
-        if not u:
-            await cb.answer("Нажми /start, чтобы начать.", show_alert=True)
-            return
-        if not await _enforce_access_or_paywall(cb, session, u.id):
-            return
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     await _safe_edit(cb.message, "Выбирай тему:", reply_markup=kb_topics())
     await cb.answer()
 
 @router.callback_query(F.data.startswith("t:"))
 async def on_topic_click(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     tid = cb.data.split(":", 1)[1]
     await _safe_edit(cb.message, topic_button_title(tid), reply_markup=kb_exercises(tid))
     await cb.answer()
@@ -543,14 +398,12 @@ def step_keyboard_intro(tid: str, eid: str, total: int) -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data.startswith("exlist:"))
 async def on_exlist(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     tid = cb.data.split(":", 1)[1]
     await _safe_edit(cb.message, topic_button_title(tid), reply_markup=kb_exercises(tid))
     await cb.answer()
 
 @router.callback_query(F.data.startswith("ex:"))
 async def on_ex_click(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     # ex:<tid>:<eid>:<idx|start|finish>
     try:
         parts = cb.data.split(":", 3)
@@ -594,7 +447,6 @@ async def on_ex_click(cb: CallbackQuery):
 # ===== Рефлексия =====
 @router.callback_query(F.data == "reflect:start")
 async def on_reflect_start(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     CHAT_MODE[cb.message.chat.id] = "reflection"
     await _safe_edit(cb.message, "Давай немного притормозим и прислушаемся к себе. "
                                   "Можешь начать с того, что больше всего откликается сейчас.")
@@ -646,7 +498,6 @@ MEDITATIONS_TEXT = (
 
 @router.message(Command(commands=["meditations", "meditions", "meditation"]))
 async def cmd_meditations(m: Message):
-    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     img = get_onb_image("meditations")
     if img:
         try:
@@ -657,17 +508,14 @@ async def cmd_meditations(m: Message):
 
 @router.message(F.text == "🎧 Медитации")
 async def on_meditations_btn(m: Message):
-    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     await _safe_edit(m, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
 
 @router.callback_query(F.data == "med:cats")
 async def on_med_cats(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     await _safe_edit(cb.message, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories()); await cb.answer()
 
 @router.callback_query(F.data.startswith("med:cat:"))
 async def on_med_cat(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     cid = cb.data.split(":", 2)[2]
     title = dict(get_categories()).get(cid, "Медитации")
     await _safe_edit(cb.message, f"🎧 {title}", reply_markup=kb_meditations_list(cid))
@@ -675,7 +523,6 @@ async def on_med_cat(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("med:play:"))
 async def on_med_play(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     _, _, cid, mid = cb.data.split(":", 3)
     raw = get_item(cid, mid)
     tr = _as_track(raw) if raw is not None else None
@@ -732,7 +579,6 @@ async def on_med_play(cb: CallbackQuery):
 # ===== Настройки =====
 @router.message(F.text.in_(["⚙️ Настройки", "/settings", "/setting"]))
 async def on_settings(m: Message):
-    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     await m.answer("Настройки:", reply_markup=kb_settings())
 
 @router.callback_query(F.data == "menu:main")
@@ -741,7 +587,6 @@ async def on_menu_main(cb: CallbackQuery):
 
 @router.callback_query(F.data == "menu:settings")
 async def on_menu_settings(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     await _safe_edit(cb.message, "Настройки:", reply_markup=kb_settings()); await cb.answer()
 
 @router.callback_query(F.data == "settings:tone")
@@ -797,17 +642,8 @@ async def on_menu(m: Message):
     await m.answer("Меню:", reply_markup=kb_main_menu())
 
 # ===== Тон и режим разговора =====
-@router.message(F.text.in_(("🗣 Поговорить", "/talk")))
+@router.message(F.text.in_(["💬 Поговорить", "/talk"]))
 async def on_talk(m: Message):
-    async for session in get_session():
-        u = await _get_user_by_tg(session, m.from_user.id)
-        if not u:
-            await m.answer("Нажми /start, чтобы начать.")
-            return
-        if not await _enforce_access_or_paywall(m, session, u.id):
-            return
-
-    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     CHAT_MODE[m.chat.id] = "talk"
     await m.answer("Я рядом и слушаю. О чём хочется поговорить?", reply_markup=kb_main_menu())
 
@@ -949,7 +785,6 @@ async def on_debug_prompt(m: Message):
 # ===== Текстовые сообщения =====
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
-    if _require_access_msg(m.message if hasattr(m, "message") else m): return
     chat_id = m.chat.id
     try:
         save_user_message(chat_id, m.text or "")
@@ -969,6 +804,14 @@ async def on_text(m: Message):
 
 # === /pay — планы с 4 тарифами =========================================
 from aiogram.filters import Command as _CmdPay
+from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
+from sqlalchemy import text as _text
+from app.db import db_session as _sync_session
+try:
+    from app.billing.yookassa_client import create_payment_link as _create_payment
+except ImportError:
+    from app.billing.yookassa_client import create_redirect_payment as _create_payment  # legacy
+import os as _os
 
 _PLANS = {
     "week":  (499,  "Подписка на 1 неделю"),
@@ -988,52 +831,51 @@ def _kb_pay_plans() -> _IKM:
 @router.message(_CmdPay("pay"))
 async def on_pay(m: Message):
     await m.answer(
-        "Подписка «Помни»\n"
-        "• Все функции без ограничений\n"
-        "• 5 дней бесплатно, далее по тарифу\n\n"
+        "Подписка «Помни»\\n"
+        "• Все функции без ограничений\\n"
+        "• 5 дней бесплатно, далее по тарифу\\n\\n"
         "<b>Выбери план:</b>",
         reply_markup=_kb_pay_plans()
     )
 
+def _thanks_url() -> str:
+    base = (_os.getenv("WEBHOOK_BASE_URL", "") or "").rstrip("/")
+    return base + "/pay/thanks" if base else "https://yookassa.ru"
+
 @router.callback_query(F.data.startswith("pay:plan:"))
 async def on_pick_plan(cb: CallbackQuery):
-    plan = cb.data.split(":")[-1]  # week|month|q3|year
+    plan = cb.data.split(":")[-1]
     if plan not in _PLANS:
-        await cb.answer("Неизвестный план", show_alert=True)
-        return
+        await cb.answer("Неизвестный план", show_alert=True); return
+    amount, desc = _PLANS[plan]
 
-    amount, desc = _PLANS[plan]  # amount: int, desc: str
-
-    # --- найдём пользователя (из нашей таблицы users) ---
-    async for session in get_session():
-        from app.db.models import User
-        u = (await session.execute(
-            select(User).where(User.tg_id == cb.from_user.id)
-        )).scalar_one_or_none()
-
-        if not u:
-            await cb.answer("Нажми /start, чтобы начать.", show_alert=True)
-            return
-
-        # --- создаём платёж в YooKassa и берём redirect URL ---
-        try:
-            pay_url = create_payment_link(
-                amount_rub=int(amount),
-                description=desc,
-                metadata={"user_id": int(u.id), "plan": plan},
-                # return_url не указываем — возьмётся из YK_RETURN_URL (ENV)
+    tg = cb.from_user.id
+    with _sync_session() as s:
+        uid = s.execute(_text("SELECT id FROM users WHERE tg_id=:tg"), {"tg": str(tg)}).scalar()
+        if not uid:
+            s.execute(
+                _text("INSERT INTO users(tg_id, privacy_level, created_at) VALUES(:tg, 'insights', CURRENT_TIMESTAMP)"),
+                {"tg": str(tg)}
             )
-        except Exception:
-            pay_url = None
+            uid = s.execute(_text("SELECT id FROM users WHERE tg_id=:tg"), {"tg": str(tg)}).scalar()
+        s.commit()
 
-    if not pay_url:
-        await cb.message.answer("Не удалось сформировать платёж. Попробуй ещё раз позже.")
-        await cb.answer()
-        return
+    try:
+        data = await _create_payment(
+            user_id=int(uid),
+            plan=plan,
+            amount=int(amount),
+            description=desc,
+            return_url=_thanks_url(),
+        )
+        url = data.get("confirmation_url")
+    except Exception:
+        url = None
 
-    kb = _IKM(inline_keyboard=[[ _IKB(text="Оплатить 💳", url=pay_url) ]])
-    await cb.message.answer(
-        f"<b>{desc}</b>\nСумма: <b>{amount} ₽</b>\n\nНажми «Оплатить 💳», чтобы перейти к форме.",
-        reply_markup=kb
-    )
+    if not url:
+        await cb.message.answer("Не удалось сформировать платёж. Попробуй ещё раз позже."); await cb.answer(); return
+
+    kb = _IKM(inline_keyboard=[[ _IKB(text="Оплатить 💳", url=url) ]])
+    await cb.message.answer(f"<b>{desc}</b>\\nСумма: <b>{amount} ₽</b>\\n\\nНажми «Оплатить 💳», чтобы перейти к форме.", reply_markup=kb)
     await cb.answer()
+# === /pay =====================================================================

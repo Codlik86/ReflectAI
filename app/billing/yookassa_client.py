@@ -1,71 +1,46 @@
-# -*- coding: utf-8 -*-
-"""
-ЮKassa thin-client: создаёт redirect-ссылку на платёж.
-Экспортирует две функции для совместимости с ботом:
-- create_payment_link(amount_rub:int, description:str, metadata:dict|None) -> str
-- create_redirect_payment(...): legacy-алиас на create_payment_link
-"""
-
-from __future__ import annotations
+# app/billing/yookassa_client.py
 import os
 import uuid
-from typing import Optional, Dict
+from typing import Optional
 
-try:
-    from yookassa import Configuration, Payment
-except Exception as e:  # защитим импорт, чтобы не завалить модуль на билд-стадии
-    Configuration = None
-    Payment = None
-    _import_error = e
-else:
-    _import_error = None
+from yookassa import Configuration, Payment
 
-# --- ENV ---
-_SHOP_ID     = os.getenv("YK_SHOP_ID", "").strip()
-_SECRET_KEY  = os.getenv("YK_SECRET_KEY", "").strip()
-_RETURN_URL  = os.getenv("YK_RETURN_URL", "").strip()  # куда вернёт после оплаты
+YK_SHOP_ID = os.getenv("YK_SHOP_ID")
+YK_SECRET_KEY = os.getenv("YK_SECRET_KEY")
+YK_RETURN_URL = os.getenv("YK_RETURN_URL")
 
-def _ensure_configured() -> None:
-    if _import_error:
-        raise RuntimeError(f"yookassa SDK not available: {_import_error}")
-    if not _SHOP_ID or not _SECRET_KEY:
-        raise RuntimeError("YK_SHOP_ID / YK_SECRET_KEY не заданы в окружении")
-    Configuration.account_id = _SHOP_ID
-    Configuration.secret_key = _SECRET_KEY
+class YooKassaError(Exception):
+    pass
 
-def create_payment_link(
-    *,
-    amount_rub: int,
-    description: str,
-    metadata: Optional[Dict] = None,
-) -> str:
+def _configure():
+    if not (YK_SHOP_ID and YK_SECRET_KEY):
+        raise YooKassaError("YK_SHOP_ID/YK_SECRET_KEY are not set")
+    Configuration.account_id = YK_SHOP_ID
+    Configuration.secret_key = YK_SECRET_KEY
+
+def create_payment_link(amount_rub: int, description: str, metadata: dict, return_url: Optional[str] = None) -> str:
     """
-    Создаёт платёж YooKassa (redirect) и возвращает confirmation_url.
+    Создаёт платёж YooKassa и возвращает redirect URL.
+    amount_rub — целые рубли.
     """
-    _ensure_configured()
-    if not isinstance(amount_rub, int) or amount_rub <= 0:
-        raise ValueError("amount_rub должен быть положительным целым числом (в рублях)")
-
+    _configure()
     idempotence_key = str(uuid.uuid4())
-    payload = {
-        "amount": {"value": f"{amount_rub}.00", "currency": "RUB"},
-        "confirmation": {"type": "redirect", "return_url": _RETURN_URL or "https://t.me/"},
-        "capture": True,  # захват средств сразу
-        "description": (description or "")[:128],
-        "metadata": metadata or {},
-    }
-    payment = Payment.create(payload, idempotence_key)  # type: ignore[operator]
-    # SDK даёт объект; у него есть confirmation.confirmation_url
-    url = getattr(getattr(payment, "confirmation", None), "confirmation_url", None)
-    if not url:
-        raise RuntimeError("YooKassa: не получили confirmation_url")
-    return str(url)
+    amount_value = f"{int(amount_rub)}.00"
 
-# --- legacy-алиас для старого импорт-имени ---
-def create_redirect_payment(
-    *,
-    amount_rub: int,
-    description: str,
-    metadata: Optional[Dict] = None,
-) -> str:
-    return create_payment_link(amount_rub=amount_rub, description=description, metadata=metadata)
+    payment = Payment.create({
+        "amount": {"value": amount_value, "currency": "RUB"},
+        "confirmation": {
+            "type": "redirect",
+            "return_url": return_url or YK_RETURN_URL or "https://google.com",
+        },
+        "capture": True,
+        "description": description[:127],  # ограничим длину
+        "metadata": metadata or {},
+    }, idempotence_key)
+
+    # confirmation_url может лежать либо прямо в объекте, либо внутри confirmation
+    confirmation = getattr(payment, "confirmation", None) or {}
+    url = getattr(confirmation, "confirmation_url", None) or confirmation.get("confirmation_url")
+    if not url:
+        raise YooKassaError("No confirmation_url in YooKassa response")
+    return url

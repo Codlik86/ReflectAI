@@ -1,4 +1,8 @@
 from __future__ import annotations
+
+from dotenv import load_dotenv
+load_dotenv()  # подхватит .env из корня проекта
+
 from logging.config import fileConfig
 from alembic import context
 import os

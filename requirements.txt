@@ -9,3 +9,5 @@ aiogram==3.*
 python-dotenv
 jinja2
 yookassa==3.*
+yookassa>=2.5.0
+python-dotenv>=1.0.1

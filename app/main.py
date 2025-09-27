@@ -24,8 +24,6 @@ from .memory_schema import (
 )
 from .bot import router as bot_router
 
-# HTTP-роуты: вебхук ЮKassa и «юридические» страницы
-from app.api import payments as payments_api
 from app.legal import router as legal_router
 
 # --- ENV ---
@@ -53,6 +51,13 @@ app = FastAPI(title="ReflectAI webhook")
 # Регистрируем сторонние роутеры
 app.include_router(payments_api.router)  # /api/payments/yookassa/webhook
 app.include_router(legal_router)         # /legal/requisites, /legal/offer
+
+# --- HTTP-роуты: вебхук YooKassa и юридические страницы ---
+from app.api import payments as payments_api
+app.include_router(payments_api.router)
+
+from app.api import admin as admin_api
+app.include_router(admin_api.router)
 
 # ==== Мини-лендинг для модерации YooKassa ====
 

@@ -1,28 +1,22 @@
-from fastapi import APIRouter, Depends, Request
+# app/api/payments.py
+from fastapi import APIRouter, Request, Response, status, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.core import get_session
-from app.billing.service import apply_success_payment
+from app.billing.service import handle_yookassa_webhook
 
-router = APIRouter()
+router = APIRouter(prefix="/api/payments", tags=["payments"])
 
-@router.post("/api/payments/yookassa/webhook")
-async def yk_webhook(req: Request, session: AsyncSession = Depends(get_session)):
-    data = await req.json()
-    event = data.get("event")
-    obj = data.get("object", {}) or {}
-
-    if event == "payment.succeeded" and obj.get("status") == "succeeded":
-        meta = obj.get("metadata") or {}
-        user_id = int(meta.get("user_id"))
-        plan = meta.get("plan")
-        pm = obj.get("payment_method") or {}
-        payment_method_id = pm.get("id")
-        customer = obj.get("customer") or {}
-        customer_id = customer.get("id")
-        await apply_success_payment(
-            user_id, plan, obj["id"],
-            payment_method_id, customer_id, session
-        )
-        return {"ok": True}
-
-    return {"ok": True}
+@router.post("/yookassa/webhook")
+async def yookassa_webhook(request: Request, session: AsyncSession = Depends(get_session)):
+    body = await request.json()
+    # необязательно, но полезно в логах
+    obj = body.get("object", {})
+    print(f"[YooKassa] webhook: status={obj.get('status')} id={obj.get('id')} meta={obj.get('metadata')}")
+    try:
+        await handle_yookassa_webhook(session, body)
+        await session.commit()
+        return Response(status_code=status.HTTP_200_OK)
+    except Exception as e:
+        await session.rollback()
+        print(f"[YooKassa] webhook error: {e}")
+        return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
