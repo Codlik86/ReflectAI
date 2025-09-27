@@ -240,6 +240,25 @@ async def _enforce_access_or_paywall(msg_or_call, session, user_id: int) -> bool
         await msg_or_call.message.answer(text_, reply_markup=_kb_paywall(show_trial))
     return False
 
+# --- pay status helpers ---
+async def _access_status_text(session, user_id: int) -> str | None:
+    """Возвращает человекочитаемый статус доступа или None, если доступа нет."""
+    # подписка?
+    try:
+        from app.db.models import User
+        u = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    except Exception:
+        u = None
+    if u and (getattr(u, "subscription_status", None) or "") == "active":
+        return "Подписка активна ✅\nДоступ ко всем функциям открыт."
+
+    # триал?
+    if await is_trial_active(session, user_id):
+        until = getattr(u, "trial_expires_at", None)
+        tail = f" до {until.astimezone().strftime('%d.%m.%Y %H:%M')}" if until else ""
+        return f"Пробный период активен{tail} ✅\nДоступ ко всем функциям открыт."
+    return None
+
 # ===== Универсальный safe_edit (не роняет UX) =====
 async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
     try:
@@ -987,6 +1006,23 @@ def _kb_pay_plans() -> _IKM:
 
 @router.message(_CmdPay("pay"))
 async def on_pay(m: Message):
+    # если доступ уже активен — показываем статус и ссылку в меню
+    async for session in get_session():
+        from app.db.models import User
+        u = (await session.execute(select(User).where(User.tg_id == m.from_user.id))).scalar_one_or_none()
+        if u:
+            status_text = await _access_status_text(session, u.id)
+        else:
+            status_text = None
+
+    if status_text:
+        kb_ok = _IKM(inline_keyboard=[
+            [_IKB(text="Открыть меню", callback_data="menu:main")]
+        ])
+        await m.answer(status_text, reply_markup=kb_ok)
+        return
+
+    # иначе — предлагаем планы
     await m.answer(
         "Подписка «Помни»\n"
         "• Все функции без ограничений\n"
