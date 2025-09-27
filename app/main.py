@@ -24,7 +24,10 @@ from .memory_schema import (
 )
 from .bot import router as bot_router
 
+# --- внешние роутеры ---
 from app.legal import router as legal_router
+from app.api import payments as payments_api         # /api/payments/yookassa/webhook
+from app.api import admin as admin_api               # /api/admin/*
 
 # --- ENV ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -48,17 +51,10 @@ dp.include_router(bot_router)
 
 app = FastAPI(title="ReflectAI webhook")
 
-# Регистрируем сторонние роутеры
-app.include_router(payments_api.router)  # /api/payments/yookassa/webhook
-app.include_router(legal_router)         # /legal/requisites, /legal/offer
-
-# --- HTTP-роуты: вебхук YooKassa и юридические страницы ---
-from app.api import payments as payments_api
-app.include_router(payments_api.router)
-
-from app.api import admin as admin_api
-app.include_router(admin_api.router)
-
+# Регистрируем сторонние роутеры (после создания app и ПОСЛЕ импортов)
+app.include_router(legal_router)              # /, /requisites, /legal/*
+app.include_router(payments_api.router)       # /api/payments/yookassa/webhook
+app.include_router(admin_api.router)          # /api/admin/*
 # ==== Мини-лендинг для модерации YooKassa ====
 
 PROJECT_NAME = os.getenv("PROJECT_NAME", "Помни")
