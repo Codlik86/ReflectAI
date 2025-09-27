@@ -8,9 +8,14 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.core import get_session
+from app.db.core import async_session
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+# правильная зависимость для FastAPI: открывает сессию и отдаёт её в хэндлер
+async def get_session_dep():
+    async with async_session() as s:
+        yield s
 
 # ---- auth (Bearer) ----------------------------------------------------------
 auth = HTTPBearer()
@@ -30,7 +35,7 @@ async def list_users(
     q: Optional[str] = Query(None, description="Поиск по tg_id/id/части полей"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     from app.db.models import User  # type: ignore
 
@@ -67,7 +72,7 @@ async def list_users(
 @router.get("/users/{tg_id}", dependencies=[Depends(require_admin)])
 async def user_by_tg(
     tg_id: int,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     from app.db.models import User  # type: ignore
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
@@ -87,7 +92,7 @@ async def user_by_tg(
 
 @router.get("/export/users.csv", dependencies=[Depends(require_admin)])
 async def export_users_csv(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     from app.db.models import User  # type: ignore
     rows = (await session.execute(select(User).order_by(User.id))).scalars().all()
@@ -122,7 +127,7 @@ async def export_users_csv(
 async def list_payments(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     try:
         from app.db.models import Payment  # type: ignore
@@ -152,7 +157,7 @@ def _utcnow():
 @router.post("/users/{tg_id}/subscription/activate", dependencies=[Depends(require_admin)])
 async def admin_activate_subscription(
     tg_id: int,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     from app.db.models import User  # type: ignore
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
@@ -167,7 +172,7 @@ async def admin_activate_subscription(
 @router.post("/users/{tg_id}/subscription/deactivate", dependencies=[Depends(require_admin)])
 async def admin_deactivate_subscription(
     tg_id: int,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     from app.db.models import User  # type: ignore
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
@@ -183,7 +188,7 @@ async def admin_deactivate_subscription(
 async def admin_trial_start(
     tg_id: int,
     days: int = 5,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     from app.db.models import User  # type: ignore
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
@@ -201,7 +206,7 @@ async def admin_trial_start(
 @router.post("/users/{tg_id}/trial/end", dependencies=[Depends(require_admin)])
 async def admin_trial_end(
     tg_id: int,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     from app.db.models import User  # type: ignore
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
@@ -218,7 +223,7 @@ async def admin_trial_end(
 async def admin_trial_extend(
     tg_id: int,
     days: int = 1,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_session_dep),
 ):
     from app.db.models import User  # type: ignore
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
