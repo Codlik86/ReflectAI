@@ -5,14 +5,14 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy import select, or_, update
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.core import async_session
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
-# правильная зависимость для FastAPI: открывает сессию и отдаёт её в хэндлер
+# ---- DB dependency (FastAPI-friendly) ---------------------------------------
 async def get_session_dep():
     async with async_session() as s:
         yield s
@@ -48,14 +48,10 @@ async def list_users(
         if as_int is not None:
             stmt = stmt.where(or_(User.tg_id == as_int, User.id == as_int))
         else:
-            try:
-                stmt = stmt.where(or_(
-                    User.privacy_level.ilike(f"%{q}%"),
-                ))
-            except Exception:
-                pass
+            stmt = stmt.where(User.privacy_level.ilike(f"%{q}%"))
 
     rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+
     def _row(u) -> dict:
         return {
             "id": u.id,
@@ -67,6 +63,7 @@ async def list_users(
             "subscription_status": getattr(u, "subscription_status", None),
             "created_at": getattr(u, "created_at", None),
         }
+
     return {"items": [_row(u) for u in rows], "limit": limit, "offset": offset}
 
 @router.get("/users/{tg_id}", dependencies=[Depends(require_admin)])
@@ -100,12 +97,15 @@ async def export_users_csv(
         "id","tg_id","privacy_level","policy_accepted_at",
         "trial_started_at","trial_expires_at","subscription_status","created_at"
     ]
+
     def as_csv_val(v: Any) -> str:
-        if v is None: return ""
+        if v is None:
+            return ""
         s = str(v)
         if any(ch in s for ch in [",", ";", "\n", '"']):
             s = '"' + s.replace('"', '""') + '"'
         return s
+
     lines = [",".join(headers)]
     for u in rows:
         vals = [
@@ -136,6 +136,7 @@ async def list_payments(
 
     stmt = select(Payment).order_by(Payment.id.desc()).limit(limit).offset(offset)
     rows = (await session.execute(stmt)).scalars().all()
+
     def _row(p) -> dict:
         return {
             "id": p.id,
@@ -146,6 +147,7 @@ async def list_payments(
             "status": getattr(p, "status", None),
             "created_at": getattr(p, "created_at", None),
         }
+
     return {"items": [_row(p) for p in rows], "limit": limit, "offset": offset}
 
 # ---------- ACTIONS: manage subscription & trial -----------------------------
@@ -163,9 +165,7 @@ async def admin_activate_subscription(
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    await session.execute(
-        update(User).where(User.id == u.id).values(subscription_status="active")
-    )
+    setattr(u, "subscription_status", "active")
     await session.commit()
     return {"ok": True, "user_id": u.id, "subscription_status": "active"}
 
@@ -178,9 +178,7 @@ async def admin_deactivate_subscription(
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    await session.execute(
-        update(User).where(User.id == u.id).values(subscription_status="none")
-    )
+    setattr(u, "subscription_status", "none")
     await session.commit()
     return {"ok": True, "user_id": u.id, "subscription_status": "none"}
 
@@ -194,12 +192,12 @@ async def admin_trial_start(
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
+
     started, expires = await start_trial_for_user(session, u.id)
     if days != 5:
-        await session.execute(
-            update(User).where(User.id == u.id).values(trial_expires_at=started + timedelta(days=days))
-        )
-        expires = started + timedelta(days=days)
+        new_exp = started + timedelta(days=days)
+        setattr(u, "trial_expires_at", new_exp)
+        expires = new_exp
     await session.commit()
     return {"ok": True, "user_id": u.id, "trial_started_at": started, "trial_expires_at": expires}
 
@@ -212,12 +210,10 @@ async def admin_trial_end(
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    new_exp = _utcnow() - timedelta(seconds=1)
-    await session.execute(
-        update(User).where(User.id == u.id).values(trial_expires_at=new_exp)
-    )
+    now = _utcnow()
+    setattr(u, "trial_expires_at", now - timedelta(seconds=1))
     await session.commit()
-    return {"ok": True, "user_id": u.id, "trial_expires_at": new_exp}
+    return {"ok": True, "user_id": u.id, "trial_expires_at": getattr(u, "trial_expires_at", None)}
 
 @router.post("/users/{tg_id}/trial/extend", dependencies=[Depends(require_admin)])
 async def admin_trial_extend(
@@ -229,11 +225,10 @@ async def admin_trial_extend(
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    current_exp = getattr(u, "trial_expires_at", None)
-    base = current_exp if current_exp and current_exp > _utcnow() else _utcnow()
+    now = _utcnow()
+    cur_exp = getattr(u, "trial_expires_at", None)
+    base = cur_exp if cur_exp and cur_exp > now else now
     new_exp = base + timedelta(days=days)
-    await session.execute(
-        update(User).where(User.id == u.id).values(trial_expires_at=new_exp)
-    )
+    setattr(u, "trial_expires_at", new_exp)
     await session.commit()
     return {"ok": True, "user_id": u.id, "trial_expires_at": new_exp}
