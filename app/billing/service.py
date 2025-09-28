@@ -1,4 +1,5 @@
 # app/billing/service.py
+import json
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -51,15 +52,16 @@ async def apply_success_payment(
     payment_method_id: Optional[str],
     customer_id: Optional[str],
     session: AsyncSession,
+    raw_event: Optional[dict] = None,  # <--- можно прокинуть тело ответа ЮKassa
 ) -> None:
     """
     Фиксируем успешный платёж и продлеваем подписку.
-    Таблицы: payments, subscriptions, users (только читаем).
+    Таблицы: payments, subscriptions (и users только читаем).
     """
     if plan not in PRICES_RUB:
         raise ValueError(f"Unknown plan: {plan}")
 
-    now = utcnow()
+    now = datetime.now(timezone.utc)
     amount = PRICES_RUB[plan]
     delta = PLAN_TO_DELTA[plan]
 
@@ -70,7 +72,7 @@ async def apply_success_payment(
             amount, currency, status, is_recurring, created_at, updated_at, raw
         ) VALUES (
             :user_id, 'yookassa', :provider_payment_id,
-            :amount, 'RUB', 'succeeded', true, :now, :now, :raw_json
+            :amount, 'RUB', 'succeeded', true, :now, :now, CAST(:raw_json AS JSON)
         )
         ON CONFLICT DO NOTHING
     """)
@@ -81,7 +83,8 @@ async def apply_success_payment(
             "provider_payment_id": provider_payment_id,
             "amount": amount,
             "now": now,
-            "raw_json": {},  # при желании сюда можно прокинуть весь объект от ЮKassa
+            # ВАЖНО: сериализуем dict -> JSON-строку (иначе psycopg не примет)
+            "raw_json": json.dumps(raw_event or {}),
         },
     )
 
@@ -94,21 +97,13 @@ async def apply_success_payment(
         LIMIT 1
     """)
     row = (await session.execute(select_sub_sql, {"user_id": user_id})).first()
+    current_until = row[1] if row else None
 
-    # Считаем новую дату окончания: с максимума(now, old_until) + delta
-    if row:
-        _, current_until = row
-    else:
-        current_until = None
-
-    base_start = now
-    if current_until and current_until > now:
-        base_start = current_until
-
+    # 3) Новая дата окончания: max(now, current_until) + delta
+    base_start = current_until if (current_until and current_until > now) else now
     new_until = base_start + delta
 
     if row:
-        # 3a) Обновляем существующую подписку
         update_sql = text("""
             UPDATE subscriptions
             SET plan = :plan,
@@ -132,7 +127,6 @@ async def apply_success_payment(
             },
         )
     else:
-        # 3b) Создаём новую подписку
         insert_sub_sql = text("""
             INSERT INTO subscriptions (
                 user_id, plan, status, is_auto_renew,
