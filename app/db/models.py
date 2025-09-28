@@ -74,27 +74,29 @@ class Payment(Base):
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
-
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
 
+    # основные поля плана/статуса
     plan: Mapped[str] = mapped_column(Text, nullable=False)                 # week|month|quarter|year
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")  # active|canceled|expired
-    is_auto_renew: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
+    is_auto_renew: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     subscription_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # ВАЖНО: эти поля должны быть в модели, т.к. они есть в БД и NOT NULL
+    is_premium: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tier: Mapped[str] = mapped_column(Text, nullable=False, default="basic")
+
+    # опционально (если есть такие столбцы в БД — оставляем, если нет, тоже ок, просто не будут использоваться)
+    renewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    # реквизиты ЮК (опциональны)
     yk_payment_method_id: Mapped[str | None] = mapped_column(Text)
     yk_customer_id: Mapped[str | None] = mapped_column(Text)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
-    user: Mapped["User"] = relationship(back_populates="subscriptions")
+    user: Mapped[User] = relationship(back_populates="subscriptions")

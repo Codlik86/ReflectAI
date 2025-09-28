@@ -49,6 +49,8 @@ async def yookassa_webhook(
     x_yookassa_signature: Optional[str] = Header(None),  # если включишь подпись — проверяй тут
 ):
     body = await request.json()
+
+    # --- необязательная проверка подписи (секрет задаётся в ENV YK_WEBHOOK_SECRET)
     if YK_WEBHOOK_SECRET:
         sig = (x_yookassa_signature or "").strip()
         if not sig or sig != YK_WEBHOOK_SECRET:
@@ -77,7 +79,7 @@ async def yookassa_webhook(
         session = cast(AsyncSession, _s)
         from app.db.models import User, Payment, Subscription  # type: ignore
 
-        # ---- найдём пользователя по users.id; если метадата внезапно была tg_id — аккуратно пробуем вторым шагом
+        # --- ищем пользователя по users.id; если вдруг прислали tg_id — пробуем вторым шагом
         u = (await session.execute(select(User).where(User.id == int(meta_user_id)))).scalar_one_or_none()
         if not u:
             try:
@@ -87,7 +89,7 @@ async def yookassa_webhook(
         if not u:
             raise HTTPException(status_code=404, detail="user not found")
 
-        # ---- апсерт/апдейт платежа по уникальному provider_payment_id
+        # --- апсерт платежа по уникальному provider_payment_id
         existing = (await session.execute(
             select(Payment).where(Payment.provider_payment_id == provider_payment_id)
         )).scalar_one_or_none()
@@ -95,7 +97,6 @@ async def yookassa_webhook(
         if existing:
             existing.status = status
             existing.updated_at = now
-            # raw сохраняем последнюю версию
             try:
                 existing.raw = body  # type: ignore[assignment]
             except Exception:
@@ -115,9 +116,9 @@ async def yookassa_webhook(
             )
             session.add(p)
 
-        # ---- если платёж успешен — апдейтим/создаём подписку
+        # --- если платёж успешен — апдейтим/создаём подписку (+ продление, если активна)
         if status == "succeeded":
-            # простая логика: план -> срок
+            # план -> дни
             add_days = 30
             if plan in ("week", "weekly"):
                 add_days = 7
@@ -131,35 +132,65 @@ async def yookassa_webhook(
             )).scalar_one_or_none()
 
             import datetime as dt
-            new_until = None
-            if sub and getattr(sub, "subscription_until", None):
-                base = sub.subscription_until
-                if base is not None and base > now:
-                    new_until = base + dt.timedelta(days=add_days)
-            if new_until is None:
+            # расчёт новой даты окончания
+            base_until = getattr(sub, "subscription_until", None) if sub else None
+            if base_until and base_until > now:
+                new_until = base_until + dt.timedelta(days=add_days)
+            else:
                 new_until = now + dt.timedelta(days=add_days)
+
+            # premium = активна и не истекла
+            premium = (new_until is not None) and (new_until > now)
 
             if sub:
                 sub.plan = plan or (sub.plan or "month")
                 sub.status = "active"
-                sub.subscription_until = new_until
                 sub.is_auto_renew = True
+                sub.subscription_until = new_until
+                sub.is_premium = premium           # <-- ВАЖНО: всегда проставляем
+                sub.tier = getattr(sub, "tier", None) or "basic"
+                sub.yk_payment_method_id = pm_id or sub.yk_payment_method_id
+                # если в схеме есть доп. поля — обновим их бережно
+                try:
+                    sub.renewed_at = now
+                    sub.expires_at = new_until
+                except Exception:
+                    pass
                 sub.updated_at = now
             else:
                 sub = Subscription(
                     user_id=u.id,
-                    plan=plan or "month",
-                    status="active",
-                    is_auto_renew=True,
-                    subscription_until=new_until,
-                    yk_payment_method_id=pm_id,
-                    yk_customer_id=None,
-                    created_at=now,
-                    updated_at=now,
+    plan=plan or "month",
+    status="active",
+    is_auto_renew=True,
+    subscription_until=new_until,
+    is_premium=premium,
+    tier="basic",                   # <-- добавили, чтобы не было NULL в NOT NULL колонке
+    yk_payment_method_id=pm_id,
+    yk_customer_id=None,
+    created_at=now,
+    updated_at=now,
                 )
+                # опциональные поля (если есть в твоей модели)
+                try:
+                    sub.tier = "basic"
+                    sub.renewed_at = now
+                    sub.expires_at = new_until
+                except Exception:
+                    pass
                 session.add(sub)
+
+        # --- если платёж отменён — помечаем подписку (не удаляем историю)
+        elif status in ("canceled", "cancellation_pending"):
+            sub = (await session.execute(
+                select(Subscription).where(Subscription.user_id == u.id)
+            )).scalar_one_or_none()
+            if sub:
+                sub.status = "canceled"
+                sub.is_premium = False              # <-- на всякий случай
+                sub.updated_at = now
 
         await session.commit()
 
-    # Ничего не возвращаем YooKassa — 200 достаточно
+    # YooKassa достаточно 200 OK без тела
     return ""
