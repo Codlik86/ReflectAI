@@ -491,7 +491,8 @@ async def on_onb_agree(cb: CallbackQuery):
 # (старый легаси-хэндлер trial:start был удалён)
 
 # ===== Меню/навигация =====
-@router.message(F.text.in_(["🌿 Разобраться", "/work"]))
+@router.message(F.text == "🌿 Разобраться")
+@router.message(Command("work"))
 async def on_work_menu(m: Message):
     async for session in get_session():
         u = await _get_user_by_tg(session, m.from_user.id)
@@ -743,7 +744,9 @@ async def on_med_play(cb: CallbackQuery):
     await cb.answer("Запускай, я рядом 💛")
 
 # ===== Настройки =====
-@router.message(F.text.in_(["⚙️ Настройки", "/settings", "/setting"]))
+@router.message(F.text == "⚙️ Настройки")
+@router.message(Command("settings"))
+@router.message(Command("setting"))
 async def on_settings(m: Message):
     if _require_access_msg(m.message if hasattr(m, "message") else m): return
     await m.answer("Настройки:", reply_markup=kb_settings())
@@ -810,7 +813,8 @@ async def on_menu(m: Message):
     await m.answer("Меню:", reply_markup=kb_main_menu())
 
 # ===== Тон и режим разговора =====
-@router.message(F.text.in_(("🗣 Поговорить", "/talk")))
+@router.message(F.text == "💬 Поговорить")
+@router.message(Command("talk"))
 async def on_talk(m: Message):
     async for session in get_session():
         u = await _get_user_by_tg(session, m.from_user.id)
