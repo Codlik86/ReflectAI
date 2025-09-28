@@ -689,3 +689,48 @@ async def maintenance_charge_due(
         "window_hours": hours,
         "items": details[:50],  # чтобы ответ не раздувался
     }
+
+# ---------- TEST UTILITIES (temporary) ----------
+from pydantic import BaseModel, Field
+
+class SetUntilInBody(BaseModel):
+    minutes: int = Field(..., ge=-14400, le=14400, description="Сколько минут от текущего момента (можно отрицательно)")
+
+@router.post("/subscriptions/{tg_id}/set_until_in", dependencies=[Depends(require_admin)])
+async def admin_set_until_in(
+    tg_id: int,
+    body: SetUntilInBody,
+    session: AsyncSession = Depends(get_session_dep),
+):
+    """
+    Тестовый помощник: ставит subscription_until = now + minutes.
+    Удобно, чтобы загнать подписку в окно charge_due или сделать её просроченной.
+    """
+    from app.db.models import User, Subscription  # type: ignore
+    u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    sub = (await session.execute(select(Subscription).where(Subscription.user_id == u.id))).scalar_one_or_none()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    now = datetime.now(timezone.utc)
+    new_until = now + timedelta(minutes=body.minutes)
+
+    # гарантируем актив и автопродление для теста
+    sub.status = "active"
+    sub.is_auto_renew = True
+    sub.subscription_until = new_until
+    try:
+        sub.updated_at = now
+    except Exception:
+        pass
+
+    await session.commit()
+    return {
+        "ok": True,
+        "user_id": u.id,
+        "minutes": body.minutes,
+        "subscription_until": new_until,
+    }
