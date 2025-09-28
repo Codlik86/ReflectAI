@@ -162,20 +162,21 @@ async def is_trial_active(session: AsyncSession, user_id: int) -> bool:
         return False
     return u.trial_expires_at > datetime.now(timezone.utc)
 
-async def start_trial_for_user(session: AsyncSession, user_id: int):
-    """
-    Стартуем триал: выставляем trial_started_at=now (UTC),
-    trial_expires_at=now+TRIAL_DAYS. Возвращаем (started, expires).
-    """
-    now = datetime.now(timezone.utc)
-    expires = now + timedelta(days=TRIAL_DAYS)
-    from app.db.models import User
-    await session.execute(
-        update(User)
-        .where(User.id == user_id)
-        .values(trial_started_at=now, trial_expires_at=expires)
-    )
-    return now, expires
+async def start_trial_for_user(session, user_id: int, days: int = 5):
+    """Ставит даты триала через ORM-назначения, без bulk UPDATE."""
+    from app.db.models import User  # локальный импорт, чтобы избежать циклов
+    started = datetime.now(timezone.utc)
+    expires = started + timedelta(days=days)
+
+    u = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not u:
+        raise ValueError("User not found")
+
+    u.trial_started_at = started
+    u.trial_expires_at = expires
+    # не делаем commit здесь — пусть коммитит вызывающий код
+    await session.flush()
+    return started, expires
 
 async def has_active_subscription(session: AsyncSession, user_id: int) -> bool:
     """
