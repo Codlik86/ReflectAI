@@ -220,3 +220,53 @@ async def admin_trial_end(tg_id: int, session: AsyncSession = Depends(get_sessio
     await session.execute(update(User).where(User.id == u.id).values(trial_expires_at=new_exp))
     await session.commit()
     return {"ok": True, "user_id": u.id, "trial_expires_at": new_exp}
+
+
+@router.get("/users/{tg_id}/full", dependencies=[Depends(require_admin)])
+async def user_full(
+    tg_id: int,
+    session: AsyncSession = Depends(get_session_dep),
+):
+    from app.db.models import User, Payment, Subscription  # type: ignore
+    u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    pays = (await session.execute(
+        select(Payment).where(Payment.user_id == u.id).order_by(Payment.id.desc()).limit(50)
+    )).scalars().all()
+    subs = (await session.execute(
+        select(Subscription).where(Subscription.user_id == u.id).order_by(Subscription.id.desc())
+    )).scalars().all()
+
+    def _user(u):
+        return {
+            "id": u.id, "tg_id": u.tg_id,
+            "privacy_level": getattr(u,"privacy_level",None),
+            "policy_accepted_at": getattr(u,"policy_accepted_at",None),
+            "trial_started_at": getattr(u,"trial_started_at",None),
+            "trial_expires_at": getattr(u,"trial_expires_at",None),
+            "subscription_status": getattr(u,"subscription_status",None),
+            "created_at": getattr(u,"created_at",None),
+        }
+    def _pay(p):
+        return {
+            "id": p.id, "user_id": p.user_id,
+            "provider_payment_id": getattr(p,"provider_payment_id",None),
+            "amount": getattr(p,"amount",None),
+            "currency": getattr(p,"currency",None),
+            "status": getattr(p,"status",None),
+            "created_at": getattr(p,"created_at",None),
+        }
+    def _sub(su):
+        return {
+            "id": getattr(su,"id",None),
+            "user_id": getattr(su,"user_id",None),
+            "plan": getattr(su,"plan",None),
+            "status": getattr(su,"status",None),
+            "subscription_until": getattr(su,"subscription_until",None),
+            "is_auto_renew": getattr(su,"is_auto_renew",None),
+            "updated_at": getattr(su,"updated_at",None),
+            "created_at": getattr(su,"created_at",None),
+        }
+    return {"user": _user(u), "payments": [_pay(p) for p in pays], "subscriptions": [_sub(x) for x in subs]}
