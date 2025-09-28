@@ -55,6 +55,10 @@ app = FastAPI(title="ReflectAI webhook")
 app.include_router(legal_router)              # /, /requisites, /legal/*
 app.include_router(payments_api.router)       # /api/payments/yookassa/webhook
 app.include_router(admin_api.router)          # /api/admin/*
+
+from app.site.admin_ui import router as admin_ui_router
+app.include_router(admin_ui_router)     # /admin (HTML)
+
 # ==== Мини-лендинг для модерации YooKassa ====
 
 PROJECT_NAME = os.getenv("PROJECT_NAME", "Помни")
