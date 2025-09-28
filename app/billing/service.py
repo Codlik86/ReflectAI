@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Literal, Optional, List, Dict, Any, Tuple
 
-from sqlalchemy import text
+from sqlalchemy import text, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# -------------------------------
 # Планы и цены — держим в одном месте
+# -------------------------------
+
 Plan = Literal["week", "month", "quarter", "year"]
 
 PRICES_RUB: dict[Plan, int] = {
@@ -26,6 +29,21 @@ PLAN_TO_DELTA: dict[Plan, timedelta] = {
 }
 
 
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def plan_price_rub(plan: str | None) -> int:
+    p = (plan or "month").lower()
+    if p in PRICES_RUB:
+        return PRICES_RUB[p]  # type: ignore[index]
+    return PRICES_RUB["month"]
+
+
+# -------------------------------
+# Основная фиксация успешного платежа (webhook может звать/переиспользовать)
+# -------------------------------
+
 async def apply_success_payment(
     user_id: int,
     plan: Plan,
@@ -41,7 +59,7 @@ async def apply_success_payment(
     if plan not in PRICES_RUB:
         raise ValueError(f"Unknown plan: {plan}")
 
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     amount = PRICES_RUB[plan]
     delta = PLAN_TO_DELTA[plan]
 
@@ -140,8 +158,10 @@ async def apply_success_payment(
 
     await session.commit()
 
-# === Trial helpers (CTA "Начать пробный период") ===
-from sqlalchemy import select, update
+
+# -------------------------------
+# Trial helpers (CTA "Начать пробный период")
+# -------------------------------
 
 TRIAL_DAYS = 5  # длина пробного периода в днях
 
@@ -160,12 +180,12 @@ async def is_trial_active(session: AsyncSession, user_id: int) -> bool:
     u = await _get_user_by_id(session, user_id)
     if not u or not getattr(u, "trial_expires_at", None):
         return False
-    return u.trial_expires_at > datetime.now(timezone.utc)
+    return u.trial_expires_at > utcnow()
 
-async def start_trial_for_user(session, user_id: int, days: int = 5):
+async def start_trial_for_user(session: AsyncSession, user_id: int, days: int = 5):
     """Ставит даты триала через ORM-назначения, без bulk UPDATE."""
     from app.db.models import User  # локальный импорт, чтобы избежать циклов
-    started = datetime.now(timezone.utc)
+    started = utcnow()
     expires = started + timedelta(days=days)
 
     u = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
@@ -190,9 +210,10 @@ async def check_access(session: AsyncSession, user_id: int) -> bool:
     """Доступ к функциям: есть активная подписка ИЛИ активный триал."""
     return (await has_active_subscription(session, user_id)) or (await is_trial_active(session, user_id))
 
-# === YooKassa webhook handler: activate subscription on success ===
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+
+# -------------------------------
+# YooKassa webhook helper: обновление users.subscription_status
+# -------------------------------
 
 async def handle_yookassa_webhook(session: AsyncSession, event: dict):
     """
@@ -256,3 +277,111 @@ async def handle_yookassa_webhook(session: AsyncSession, event: dict):
     if event_name == "payment.canceled" or status == "canceled":
         # здесь ничего активировать не нужно
         return
+
+
+# -------------------------------
+# Автопродление / обслуживание (expire, charge)
+# -------------------------------
+
+async def expire_overdue_subscriptions(session: AsyncSession) -> int:
+    """
+    Пометить все активные подписки, у которых subscription_until <= now, как expired.
+    """
+    now = utcnow()
+    # читаем ORM-ом для совместимости со схемой
+    from app.db.models import Subscription  # type: ignore
+    subs = (await session.execute(
+        select(Subscription).where(
+            Subscription.status == "active",
+            Subscription.subscription_until <= now,
+        )
+    )).scalars().all()
+
+    count = 0
+    for s in subs:
+        s.status = "expired"
+        # если в схеме есть поле is_premium — снимем флаг
+        try:
+            s.is_premium = False
+        except Exception:
+            pass
+        s.updated_at = now
+        count += 1
+
+    await session.commit()
+    return count
+
+
+async def get_subscriptions_due(session: AsyncSession, within_hours: int = 24) -> List[Any]:
+    """
+    Истекающие подписки (<= now + within_hours), у которых включено автообновление.
+    Берём и active, и canceled/expired — чтобы можно было «реактивировать/пролонгировать».
+    """
+    from app.db.models import Subscription  # type: ignore
+    horizon = utcnow() + timedelta(hours=max(0, within_hours))
+
+    subs = (await session.execute(
+        select(Subscription).where(
+            Subscription.is_auto_renew == True,           # noqa: E712
+            Subscription.status.in_(("active", "canceled", "expired")),
+            Subscription.subscription_until <= horizon,
+        )
+    )).scalars().all()
+    return list(subs)
+
+
+async def charge_subscription(session: AsyncSession, sub: Any) -> Dict[str, Any]:
+    """
+    Создаёт платёж через YooKassa API по сохранённому payment_method_id.
+    Возвращает JSON YooKassa платежа.
+    """
+    pm_id = getattr(sub, "yk_payment_method_id", None)
+    if not pm_id:
+        raise RuntimeError("No payment_method_id saved for subscription")
+
+    user_id = int(getattr(sub, "user_id"))
+    plan = getattr(sub, "plan", "month") or "month"
+    amount = plan_price_rub(plan)
+    description = f"Renew {plan} for user {user_id}"
+
+    # импортируем внутри, чтобы не ловить циклы
+    from app.billing.yookassa_client import create_payment
+
+    # простая идемпотентность
+    idem_key = f"sub_{getattr(sub, 'id', 'x')}_renew_{int(utcnow().timestamp())}"
+
+    payment = await create_payment(
+        amount_rub=amount,
+        currency="RUB",
+        description=description,
+        metadata={"user_id": user_id, "plan": plan},
+        payment_method_id=pm_id,
+        capture=True,
+        idem_key=idem_key,
+    )
+    return payment
+
+
+async def charge_due_subscriptions(
+    session: AsyncSession,
+    within_hours: int = 24,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """
+    Ищем истекающие подписки и создаём платежи. Возвращаем сводку.
+    """
+    due = await get_subscriptions_due(session, within_hours=within_hours)
+    ok: List[Dict[str, Any]] = []
+    fail: List[Dict[str, Any]] = []
+
+    if dry_run:
+        return {"due": [int(getattr(x, "id", 0)) for x in due], "ok": ok, "fail": fail, "dry_run": True}
+
+    for sub in due:
+        try:
+            p = await charge_subscription(session, sub)
+            ok.append({"sub_id": int(getattr(sub, "id", 0)), "yk_id": p.get("id")})
+        except Exception as e:
+            fail.append({"sub_id": int(getattr(sub, "id", 0)), "error": str(e)})
+
+    return {"due": [int(getattr(x, "id", 0)) for x in due], "ok": ok, "fail": fail, "dry_run": False}

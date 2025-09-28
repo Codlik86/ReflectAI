@@ -527,3 +527,22 @@ async def user_full(
         }
 
     return {"user": _user(u), "payments": [_pay(p) for p in pays], "subscriptions": [_sub(x) for x in subs]}
+
+# === Maintenance ===
+from fastapi import Body
+
+@router.post("/maintenance/expire_overdue", dependencies=[Depends(require_admin)])
+async def maintenance_expire_overdue(session: AsyncSession = Depends(get_session_dep)):
+    from app.billing.service import expire_overdue_subscriptions
+    changed = await expire_overdue_subscriptions(session)
+    return {"ok": True, "expired_marked": changed}
+
+@router.post("/maintenance/charge_due", dependencies=[Depends(require_admin)])
+async def maintenance_charge_due(
+    hours: int = Query(24, ge=0, le=168),
+    dry_run: int = Query(0),
+    session: AsyncSession = Depends(get_session_dep),
+):
+    from app.billing.service import charge_due_subscriptions
+    res = await charge_due_subscriptions(session, within_hours=hours, dry_run=bool(dry_run))
+    return {"ok": True, **res}

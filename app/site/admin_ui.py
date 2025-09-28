@@ -73,6 +73,7 @@ PAGE = r"""
     <section>
       <h3>Subscription actions</h3>
       <div class="row">
+      <button id="btnCharge" onclick="chargeDue()">Charge due (24h)</button>
         <input id="uid" placeholder="user_id" class="small"/>
         <select id="plan">
           <option value="month">month</option>
@@ -138,6 +139,13 @@ PAGE = r"""
   function fmt(x){ return (x==null||x===undefined)?'':String(x); }
   function asMoney(cents, cur){ if(cents==null) return ''; const rub = Number(cents)/100; return rub.toFixed(2)+' '+(cur||'RUB'); }
   function pill(v, ok='ok', err='err'){ const cls = (String(v).toLowerCase()==='active'||v===true)?ok:err; return `<span class="pill ${cls}">${fmt(v)}</span>`; }
+
+  async function chargeDue(){
+  const [url, opts] = auth(`${base}/api/admin/maintenance/charge_due?hours=24&dry_run=0`);
+  const r = await fetch(url, { ...opts, method:'POST' });
+  const j = await r.json();
+  alert('Charge due:\n' + JSON.stringify(j, null, 2));
+}
 
   async function GET(path){
     const r = await fetch(`${base}${path}`, {headers:{'Authorization':'Bearer '+token}});
