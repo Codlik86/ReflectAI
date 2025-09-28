@@ -63,33 +63,27 @@ def _paywall_text() -> str:
         "<b>Чтобы открыть все функции, начните пробный период.</b>"
     )
 
-# --- Возврат из оплаты: /start paid_ok | paid_canceled | paid_fail ------------
-@router.message(F.text.regexp(r"^/start(\s+paid_(ok|canceled|fail))?$"))
+# обрабатываем ТОЛЬКО deep-link вида: /start paid_ok | paid_canceled | paid_fail
+@router.message(F.text.regexp(r"^/start\s+paid_(ok|canceled|fail)$"))
 async def on_start_payment_deeplink(m: Message):
-    text_ = (m.text or "").strip()
-    parts = text_.split(maxsplit=1)
-    payload = parts[1].strip() if len(parts) > 1 else ""
+    payload = (m.text or "").split(maxsplit=1)[1].strip().lower()
 
     if payload == "paid_ok":
         await m.answer(
             "Оплата прошла ✅\nДоступ активирован. Можно продолжать — «Поговорить», «Разобраться» или «Медитации».",
-            reply_markup=kb_main_menu()
+            reply_markup=kb_main_menu(),
         )
         return
 
-    if payload in {"paid_canceled", "paid_fail"}:
-        kb = _IKM(inline_keyboard=[
-            [_IKB(text="Оформить подписку 💳", callback_data="pay:open")],
-            [_IKB(text="Открыть меню", callback_data="menu:main")],
-        ])
-        await m.answer(
-            "Похоже, оплата не завершилась или была отменена.\nМожно попробовать ещё раз — это безопасно и займёт минуту.",
-            reply_markup=kb
-        )
-        return
-
-    # если payload не наш — пусть ниже обработает обычный /start
-    return
+    # paid_canceled / paid_fail
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:open")],
+        [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
+    ])
+    await m.answer(
+        "Похоже, оплата не завершилась или была отменена.\nМожно попробовать ещё раз — это безопасно и займёт минуту.",
+        reply_markup=kb,
+    )
 
 # ===== Универсальный paywall в рантайме ======================================
 def kb_trial_start() -> InlineKeyboardMarkup:
