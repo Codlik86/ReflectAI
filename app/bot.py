@@ -49,6 +49,8 @@ from sqlalchemy import select
 from app.db.core import get_session
 from app.billing.yookassa_client import create_payment_link
 from app.billing.service import start_trial_for_user, check_access, is_trial_active
+from app.billing.service import disable_auto_renew, cancel_subscription_now, get_active_subscription_row
+
 
 router = Router()
 
@@ -234,6 +236,45 @@ async def _access_status_text(session, user_id: int) -> str | None:
         return f"Пробный период активен{tail} ✅\nДоступ ко всем функциям открыт."
     return None
 
+def _fmt_dt(dt) -> str:
+    try:
+        return dt.astimezone().strftime('%d.%m.%Y %H:%M')
+    except Exception:
+        return str(dt)
+
+async def _get_active_subscription(session, user_id: int):
+    # минимально: читаем любую активную подписку с максимальным сроком
+    row = await session.execute(text("""
+        SELECT id, subscription_until, COALESCE(is_auto_renew, true) AS is_auto_renew
+        FROM subscriptions
+        WHERE user_id = :uid AND status = 'active'
+        ORDER BY subscription_until DESC
+        LIMIT 1
+    """), {"uid": user_id})
+    return row.mappings().first()
+
+def _kb_trial_pay() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")],
+        [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
+    ])
+
+def _kb_active_sub_actions() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Отменить подписку ❌", callback_data="sub:cancel")],
+        [InlineKeyboardButton(text="Отменить автопродление ⏹", callback_data="sub:auto_off")],
+        [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
+    ])
+
+def _kb_confirm(action: str) -> InlineKeyboardMarkup:
+    # action: 'cancel' | 'auto_off'
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Да, подтвердить", callback_data=f"sub:{action}:yes"),
+            InlineKeyboardButton(text="Назад", callback_data="pay:open"),
+        ],
+    ])
+
 # ===== Универсальный safe_edit (не роняет UX) =====
 async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
     try:
@@ -385,6 +426,90 @@ async def cb_trial_start(call: CallbackQuery):
 @router.callback_query(lambda c: c.data == "pay:open")
 async def cb_pay_open(call: CallbackQuery):
     await on_pay(call.message)   # переиспользуем твой хэндлер /pay
+    await call.answer()
+
+@router.callback_query(lambda c: c.data == "pay:plans")
+async def cb_pay_plans(call: CallbackQuery):
+    await call.message.answer(
+        "Подписка «Помни»\n"
+        "• Все функции без ограничений\n"
+        "• 5 дней бесплатно, далее по тарифу\n\n"
+        "⚠️ <i>Важно: подписка с автопродлением. Его можно отключить в любой момент в /pay.</i>\n\n"
+        "<b>Выбери план:</b>",
+        reply_markup=_kb_pay_plans()
+    )
+    await call.answer()
+
+# --- отключить автопродление ---
+@router.callback_query(lambda c: c.data == "sub:auto_off")
+async def cb_sub_auto_off(call: CallbackQuery):
+    async for session in get_session():
+        from app.db.models import User
+        u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+        if not u:
+            await call.answer("Пользователь не найден", show_alert=True); return
+        sub = await get_active_subscription_row(session, u.id)
+
+    if not sub:
+        await call.answer("Активной подписки нет.", show_alert=True); return
+
+    until_str = _fmt_dt(sub["subscription_until"])
+    await _safe_edit(
+        call.message,
+        text=f"Отключить автопродление?\nТекущий доступ останется до <b>{until_str}</b>, дальше продлений не будет.",
+        reply_markup=_kb_confirm("auto_off"),
+    )
+    await call.answer()
+
+@router.callback_query(lambda c: c.data == "sub:auto_off:yes")
+async def cb_sub_auto_off_yes(call: CallbackQuery):
+    async for session in get_session():
+        from app.db.models import User
+        u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+        if not u:
+            await call.answer("Пользователь не найден", show_alert=True); return
+        changed, until = await disable_auto_renew(session, u.id)
+
+    if not changed:
+        await _safe_edit(call.message, text="Автопродление уже было отключено ⏹", reply_markup=_kb_active_sub_actions())
+        await call.answer(); return
+
+    until_str = _fmt_dt(until) if until else "конца периода"
+    await _safe_edit(
+        call.message,
+        text=f"Автопродление отключено ⏹\nПодписка останется активной до {until_str}.",
+        reply_markup=_kb_active_sub_actions(),
+    )
+    await call.answer()
+
+# --- отменить подписку полностью ---
+@router.callback_query(lambda c: c.data == "sub:cancel")
+async def cb_sub_cancel(call: CallbackQuery):
+    await _safe_edit(
+        call.message,
+        text="Отменить подписку сейчас?\nДоступ закроется сразу и восстановлению не подлежит.",
+        reply_markup=_kb_confirm("cancel"),
+    )
+    await call.answer()
+
+@router.callback_query(lambda c: c.data == "sub:cancel:yes")
+async def cb_sub_cancel_yes(call: CallbackQuery):
+    async for session in get_session():
+        from app.db.models import User
+        u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+        if not u:
+            await call.answer("Пользователь не найден", show_alert=True); return
+        ok = await cancel_subscription_now(session, u.id)
+
+    if not ok:
+        await _safe_edit(call.message, text="Активной подписки не найдено.", reply_markup=_kb_pay_plans())
+        await call.answer(); return
+
+    await _safe_edit(
+        call.message,
+        text="Подписка отменена ❌\nЕсли захочешь вернуться — оформи новую в разделе /pay.",
+        reply_markup=_kb_pay_plans(),
+    )
     await call.answer()
 
 # ===== /policy =====
@@ -985,27 +1110,44 @@ def _kb_pay_plans() -> _IKM:
 
 @router.message(_CmdPay("pay"))
 async def on_pay(m: Message):
-    # если доступ уже активен — показываем статус и ссылку в меню
+    tg_id = m.from_user.id
+
     async for session in get_session():
         from app.db.models import User
-        u = (await session.execute(select(User).where(User.tg_id == m.from_user.id))).scalar_one_or_none()
-        if u:
-            status_text = await _access_status_text(session, u.id)
-        else:
-            status_text = None
+        u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
+        if not u:
+            await m.answer("Нажми /start, чтобы завершить онбординг.", reply_markup=kb_main_menu())
+            return
 
-    if status_text:
-        kb_ok = _IKM(inline_keyboard=[
-            [_IKB(text="Открыть меню", callback_data="menu:main")]
-        ])
-        await m.answer(status_text, reply_markup=kb_ok)
-        return
+        # 1) активная подписка?
+        active_sub = await _get_active_subscription(session, u.id)
+        if active_sub:
+            until = active_sub["subscription_until"]
+            await m.answer(
+                f"Подписка активна ✅\nДоступ открыт до <b>{_fmt_dt(until)}</b>.\n\n"
+                f"Что дальше?",
+                reply_markup=_kb_active_sub_actions()
+            )
+            return
 
-    # иначе — предлагаем планы
+        # 2) активный триал?
+        if await is_trial_active(session, u.id):
+            until = getattr(u, "trial_expires_at", None)
+            tail = f"до <b>{_fmt_dt(until)}</b>" if until else "сейчас"
+            await m.answer(
+                f"Пробный период активирован — {tail}. ✅\n"
+                f"Все функции открыты.\n\n"
+                f"Хочешь оформить подписку сразу? (Можно в любой момент отменить автопродление в /pay.)",
+                reply_markup=_kb_trial_pay()
+            )
+            return
+
+    # 3) доступа нет — показываем тарифы + предупреждение
     await m.answer(
         "Подписка «Помни»\n"
         "• Все функции без ограничений\n"
         "• 5 дней бесплатно, далее по тарифу\n\n"
+        "⚠️ <i>Важно: подписка с автопродлением. Его можно отключить в любой момент в /pay.</i>\n\n"
         "<b>Выбери план:</b>",
         reply_markup=_kb_pay_plans()
     )

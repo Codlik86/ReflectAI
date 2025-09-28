@@ -355,7 +355,6 @@ async def charge_subscription(session: AsyncSession, sub: Any) -> Dict[str, Any]
     )
     return payment
 
-
 async def charge_due_subscriptions(
     session: AsyncSession,
     within_hours: int = 24,
@@ -379,3 +378,72 @@ async def charge_due_subscriptions(
             fail.append({"sub_id": int(getattr(sub, "id", 0)), "error": str(e)})
 
     return {"due": [int(getattr(x, "id", 0)) for x in due], "ok": ok, "fail": fail, "dry_run": False}
+
+# -------------------------------
+# Управление подпиской из бота (cancel / auto_renew off)
+# -------------------------------
+
+async def get_active_subscription_row(session: AsyncSession, user_id: int) -> Optional[dict]:
+    """
+    Возвращает активную подписку пользователя (с максимальным сроком), либо None.
+    """
+    row = await session.execute(text("""
+        SELECT id, user_id, plan, status, is_auto_renew, subscription_until,
+               yk_payment_method_id, yk_customer_id
+        FROM subscriptions
+        WHERE user_id = :uid AND status = 'active'
+        ORDER BY subscription_until DESC
+        LIMIT 1
+    """), {"uid": user_id})
+    return row.mappings().first()
+
+async def disable_auto_renew(session: AsyncSession, user_id: int) -> Tuple[bool, Optional[datetime]]:
+    """
+    Отключает автопродление у активной подписки. Доступ остаётся до конца оплаченного периода.
+    Возвращает (изменилось_ли_что-то, subscription_until).
+    """
+    now = utcnow()
+    sub = await get_active_subscription_row(session, user_id)
+    if not sub:
+        return False, None
+
+    await session.execute(text("""
+        UPDATE subscriptions
+        SET is_auto_renew = FALSE, updated_at = :now
+        WHERE id = :sid
+    """), {"sid": sub["id"], "now": now})
+    await session.commit()
+    return True, sub["subscription_until"]
+
+async def cancel_subscription_now(session: AsyncSession, user_id: int) -> bool:
+    """
+    Полная отмена подписки: закрываем доступ сразу.
+    Ставит status='canceled', is_auto_renew=FALSE, subscription_until=now.
+    Плюс пытаемся синхронизировать users.subscription_status, если поле есть.
+    """
+    now = utcnow()
+    sub = await get_active_subscription_row(session, user_id)
+    if not sub:
+        return False
+
+    await session.execute(text("""
+        UPDATE subscriptions
+        SET status = 'canceled',
+            is_auto_renew = FALSE,
+            subscription_until = :now,
+            updated_at = :now
+        WHERE id = :sid
+    """), {"sid": sub["id"], "now": now})
+
+    # best-effort: если есть колонка users.subscription_status — пометим как неактивную
+    try:
+        await session.execute(text("""
+            UPDATE users
+            SET subscription_status = 'inactive'
+            WHERE id = :uid
+        """), {"uid": user_id})
+    except Exception:
+        pass
+
+    await session.commit()
+    return True
