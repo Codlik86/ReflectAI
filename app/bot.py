@@ -52,17 +52,6 @@ from app.billing.service import start_trial_for_user, check_access, is_trial_act
 
 router = Router()
 
-# === Trial / access gating (temporary in-memory) ==============================
-ACCESS_GRANTED: dict[int, bool] = {}
-
-def _paywall_text() -> str:
-    return (
-        "Подписка «Помни»\n"
-        "• Все функции без ограничений\n"
-        "• 5 дней бесплатно\n\n"
-        "<b>Чтобы открыть все функции, начните пробный период.</b>"
-    )
-
 # обрабатываем ТОЛЬКО deep-link вида: /start paid_ok | paid_canceled | paid_fail
 @router.message(F.text.regexp(r"^/start\s+paid_(ok|canceled|fail)$"))
 async def on_start_payment_deeplink(m: Message):
@@ -86,20 +75,12 @@ async def on_start_payment_deeplink(m: Message):
     )
 
 # ===== Универсальный paywall в рантайме ======================================
-def kb_trial_start() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Начать пробный период", callback_data="trial:start")]]
-    )
-
-def _require_access_msg(m: Message) -> bool:
-    """True -> доступ закрыт и мы показали пейволл."""
-    if not ACCESS_GRANTED.get(m.chat.id):
-        try:
-            # показываем аккуратно, без спама
-            m.bot.loop.create_task(m.answer(_paywall_text(), reply_markup=kb_trial_start()))
-        except Exception:
-            pass
-        return True
+def _require_access_msg(_: Message) -> bool:
+    """
+    LEGACY: раньше показывали пейволл из памяти процесса.
+    Теперь доступ проверяется через _enforce_access_or_paywall(...) с БД.
+    Отключаем этот хук, чтобы он не блокировал обработчики.
+    """
     return False
 
 # =============================================================================
@@ -486,7 +467,7 @@ async def on_onb_agree(cb: CallbackQuery):
     except Exception:
         pass
     # показываем пейволл (пока без реального тримера)
-    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb_trial_start())
+    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=_kb_paywall(True))
 
 # (старый легаси-хэндлер trial:start был удалён)
 
