@@ -157,6 +157,55 @@ async def export_users_csv(session: AsyncSession = Depends(get_session_dep)):
     csv_data = "\n".join(lines)
     return Response(content=csv_data, media_type="text/csv")
 
+@router.get("/export/payments.csv", dependencies=[Depends(require_admin)])
+async def export_payments_csv(session: AsyncSession = Depends(get_session_dep)):
+    from app.db.models import Payment  # type: ignore
+    rows = (await session.execute(select(Payment).order_by(Payment.id))).scalars().all()
+    headers = ["id","user_id","provider_payment_id","amount","currency","status","created_at"]
+    def val(x): 
+        s = "" if x is None else str(x)
+        return '"' + s.replace('"','""') + '"' if any(c in s for c in [",",";","\n",'"']) else s
+    lines = [",".join(headers)]
+    for p in rows:
+        lines.append(",".join([
+            val(getattr(p,"id",None)),
+            val(getattr(p,"user_id",None)),
+            val(getattr(p,"provider_payment_id",None)),
+            val(getattr(p,"amount",None)),
+            val(getattr(p,"currency",None)),
+            val(getattr(p,"status",None)),
+            val(getattr(p,"created_at",None)),
+        ]))
+    return Response("\n".join(lines), media_type="text/csv")
+
+
+@router.get("/export/subscriptions.csv", dependencies=[Depends(require_admin)])
+async def export_subscriptions_csv(session: AsyncSession = Depends(get_session_dep)):
+    from app.db.models import Subscription  # type: ignore
+    rows = (await session.execute(select(Subscription).order_by(Subscription.id))).scalars().all()
+    headers = [
+        "id","user_id","plan","status","is_auto_renew","subscription_until",
+        "yk_payment_method_id","yk_customer_id","created_at","updated_at"
+    ]
+    def val(x): 
+        s = "" if x is None else str(x)
+        return '"' + s.replace('"','""') + '"' if any(c in s for c in [",",";","\n",'"']) else s
+    lines = [",".join(headers)]
+    for s in rows:
+        lines.append(",".join([
+            val(getattr(s,"id",None)),
+            val(getattr(s,"user_id",None)),
+            val(getattr(s,"plan",None)),
+            val(getattr(s,"status",None)),
+            val(getattr(s,"is_auto_renew",None)),
+            val(getattr(s,"subscription_until",None)),
+            val(getattr(s,"yk_payment_method_id",None)),
+            val(getattr(s,"yk_customer_id",None)),
+            val(getattr(s,"created_at",None)),
+            val(getattr(s,"updated_at",None)),
+        ]))
+    return Response("\n".join(lines), media_type="text/csv")
+
 # ---------------------------------------------------------------------------
 # PAYMENTS
 # ---------------------------------------------------------------------------
