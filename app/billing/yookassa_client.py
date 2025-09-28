@@ -2,126 +2,111 @@
 from __future__ import annotations
 
 import os
-import json
-from datetime import datetime, timezone
-from typing import Literal, Optional, Tuple
+import uuid
+from typing import Optional, Literal
 
-# внешний HTTP-клиент – используем requests, он обычно есть в базовом окружении
-# если у тебя в deps его нет — добавь "requests" в requirements.txt
-import requests
+import httpx
 
-Plan = Literal["week", "month", "quarter", "year"]
+# Режимы работы:
+# - Если есть YK_SHOP_ID и YK_API_KEY — шлём реальные запросы в YooKassa
+# - Иначе работаем в mock-режиме (для локальных/стейдж тестов)
+YK_SHOP_ID = os.getenv("YK_SHOP_ID", "").strip()
+YK_API_KEY = os.getenv("YK_API_KEY", "").strip()
+YK_BASE = "https://api.yookassa.ru/v3"
 
-# Твои цены оставляю как есть
-PRICES_RUB: dict[Plan, int] = {
-    "week": 499,
-    "month": 1190,
-    "quarter": 2990,
-    "year": 7990,
+# Если нужно — можно подложить заглушки
+IS_REAL = bool(YK_SHOP_ID and YK_API_KEY)
+
+Headers = {
+    "Idempotence-Key": "",
+    "Content-Type": "application/json",
 }
 
-# ENV
-YK_SHOP_ID = os.getenv("YK_SHOP_ID", "").strip()
-YK_SECRET_KEY = os.getenv("YK_SECRET_KEY", "").strip()
-# куда вернёт пользователя после оплаты (кнопка «Вернуться в магазин»)
-YK_RETURN_URL = os.getenv("YK_RETURN_URL", "https://t.me/").strip()
+def _auth():
+    return (YK_SHOP_ID, YK_API_KEY)
 
-YOOKASSA_API = "https://api.yookassa.ru/v3/payments"
+def _amount_str(amount_rub: int) -> str:
+    # Целые рубли -> "1190.00"
+    return f"{amount_rub:.2f}"
 
-
-def _now_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-
-def _is_prod_ready() -> bool:
-    return bool(YK_SHOP_ID and YK_SECRET_KEY)
-
-
-def _build_headers(idempotency_key: str) -> dict:
-    # Basic auth c shop_id:secret
-    from base64 import b64encode
-    auth = b64encode(f"{YK_SHOP_ID}:{YK_SECRET_KEY}".encode()).decode()
-    return {
-        "Idempotence-Key": idempotency_key,
-        "Authorization": f"Basic {auth}",
-        "Content-Type": "application/json",
-    }
-
-
-def create_payment_link(*, user_id: int, plan: Plan) -> Tuple[str, str]:
+async def create_payment_link(
+    amount_rub: int,
+    description: Optional[str],
+    return_url: str,
+    metadata: dict | None = None,
+    idempotency_key: Optional[str] = None,
+) -> dict:
     """
-    Создаёт платёж ЮKassa и возвращает кортеж:
-    (payment_id, confirmation_url)
-    В DEMO-режиме возвращает тестовые значения, чтобы бот не падал.
+    Первая оплата через confirmation_url (redirect)
     """
-    amount = PRICES_RUB[plan]
-    if not _is_prod_ready():
-        # DEMO: генерим фиктивные id/ссылку – бот сможет работать,
-        # а оплату ты эмулируешь вебхуками.
-        pid = f"test_{_now_str()}"
-        url = f"https://yookassa.mock/confirm/{pid}"
-        return pid, url
-
-    idem = f"create_{user_id}_{plan}_{_now_str()}"
-    payload = {
-        "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+    body = {
+        "amount": {"value": _amount_str(amount_rub), "currency": "RUB"},
         "capture": True,
-        "confirmation": {"type": "redirect", "return_url": YK_RETURN_URL},
-        "description": f"Pomni {plan} plan",
-        "metadata": {"user_id": user_id, "plan": plan},
+        "confirmation": {
+            "type": "redirect",
+            "return_url": return_url,
+        },
+        "description": description or "",
+        "metadata": metadata or {},
     }
 
-    resp = requests.post(
-        YOOKASSA_API,
-        data=json.dumps(payload),
-        headers=_build_headers(idem),
-        timeout=25,
-    )
-    # поднимаем исключение, чтобы лог сразу показал проблему конфигурации
-    resp.raise_for_status()
-    data = resp.json()
-    payment_id = data.get("id") or ""
-    confirm_url = (data.get("confirmation") or {}).get("confirmation_url") or ""
-    if not payment_id or not confirm_url:
-        raise RuntimeError(f"Invalid YooKassa response: {data}")
-    return payment_id, confirm_url
+    if not IS_REAL:
+        # MOCK: делаем вид, что ЮKassa вернула ссылку
+        return {
+            "id": f"mock_{uuid.uuid4().hex[:12]}",
+            "status": "pending",
+            "amount": {"value": _amount_str(amount_rub), "currency": "RUB"},
+            "confirmation": {"type": "redirect", "confirmation_url": "https://example.test/pay"},
+        }
 
+    idem = idempotency_key or str(uuid.uuid4())
+    async with httpx.AsyncClient(base_url=YK_BASE, auth=_auth(), timeout=30.0) as client:
+        r = await client.post(
+            "/payments",
+            headers={"Idempotence-Key": idem},
+            json=body,
+        )
+        r.raise_for_status()
+        return r.json()
 
-def charge_saved_method(
+async def charge_saved_method(
     *,
-    user_id: int,
-    plan: Plan,
+    amount_rub: int,
     payment_method_id: str,
+    description: Optional[str] = None,
     customer_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
-) -> Tuple[str, str]:
+    metadata: dict | None = None,
+) -> dict:
     """
-    Списание по сохранённому способу оплаты (для автопродлений).
-    Возвращает (payment_id, status) – где status обычно 'pending' или 'succeeded'.
-    В DEMO-режиме просто генерит тестовый успешный платёж.
+    Автосписание по сохранённому способу оплаты (payment_method_id / customer_id).
+    Вызывается из maintenance/charge_due.
     """
-    amount = PRICES_RUB[plan]
-    if not _is_prod_ready():
-        pid = f"autopay_test_{_now_str()}"
-        return pid, "succeeded"
-
-    idem = idempotency_key or f"charge_{user_id}_{plan}_{_now_str()}"
-    payload = {
-        "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+    body = {
+        "amount": {"value": _amount_str(amount_rub), "currency": "RUB"},
         "capture": True,
+        "description": description or "",
+        "metadata": metadata or {},
         "payment_method_id": payment_method_id,
-        "description": f"Pomni auto-renew {plan}",
-        "metadata": {"user_id": user_id, "plan": plan, "auto": True},
-        # если используешь customer_id – можно добавить:
-        # "customer": {"id": customer_id}  # при необходимости
     }
+    if customer_id:
+        body["customer"] = {"id": customer_id}
 
-    resp = requests.post(
-        YOOKASSA_API,
-        data=json.dumps(payload),
-        headers=_build_headers(idem),
-        timeout=25,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("id", ""), data.get("status", "unknown")
+    if not IS_REAL:
+        # MOCK: имитируем успешное списание
+        return {
+            "id": f"mock_charge_{uuid.uuid4().hex[:10]}",
+            "status": "succeeded",
+            "amount": {"value": _amount_str(amount_rub), "currency": "RUB"},
+            "payment_method": {"id": payment_method_id, "saved": True},
+        }
+
+    idem = idempotency_key or str(uuid.uuid4())
+    async with httpx.AsyncClient(base_url=YK_BASE, auth=_auth(), timeout=30.0) as client:
+        r = await client.post(
+            "/payments",
+            headers={"Idempotence-Key": idem},
+            json=body,
+        )
+        r.raise_for_status()
+        return r.json()
