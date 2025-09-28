@@ -528,21 +528,164 @@ async def user_full(
 
     return {"user": _user(u), "payments": [_pay(p) for p in pays], "subscriptions": [_sub(x) for x in subs]}
 
-# === Maintenance ===
+# === Maintenance: expire overdue & charge due ===
 from fastapi import Body
+from sqlalchemy import select, update, and_
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-@router.post("/maintenance/expire_overdue", dependencies=[Depends(require_admin)])
-async def maintenance_expire_overdue(session: AsyncSession = Depends(get_session_dep)):
-    from app.billing.service import expire_overdue_subscriptions
-    changed = await expire_overdue_subscriptions(session)
-    return {"ok": True, "expired_marked": changed}
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
-@router.post("/maintenance/charge_due", dependencies=[Depends(require_admin)])
-async def maintenance_charge_due(
-    hours: int = Query(24, ge=0, le=168),
-    dry_run: int = Query(0),
+@router.api_route(
+    "/maintenance/expire_overdue",
+    methods=["GET", "POST"],
+    dependencies=[Depends(require_admin)],
+)
+async def maintenance_expire_overdue(
+    hours: int = Query(24, ge=1, le=168),
     session: AsyncSession = Depends(get_session_dep),
 ):
-    from app.billing.service import charge_due_subscriptions
-    res = await charge_due_subscriptions(session, within_hours=hours, dry_run=bool(dry_run))
-    return {"ok": True, **res}
+    """
+    Отмечает все активные подписки, у которых subscription_until < now,
+    как expired. Возвращает количество обновлённых строк.
+    """
+    now = _utcnow()
+    # ограничим окно «давности», чтобы случайно не трогать очень древние записи
+    oldest = now - timedelta(hours=hours)
+
+    from app.db.models import Subscription  # type: ignore
+
+    # выбираем активные, у которых истёк срок
+    q = await session.execute(
+        select(Subscription).where(
+            and_(
+                Subscription.status == "active",
+                Subscription.subscription_until < now,
+                Subscription.subscription_until > oldest,
+            )
+        )
+    )
+    subs = q.scalars().all()
+    for s in subs:
+        s.status = "expired"
+        # если есть поле is_premium — обнулим
+        try:
+            s.is_premium = False  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        s.updated_at = now
+    await session.commit()
+    return {"expired": len(subs), "window_hours": hours}
+
+@router.api_route(
+    "/maintenance/charge_due",
+    methods=["GET", "POST"],
+    dependencies=[Depends(require_admin)],
+)
+async def maintenance_charge_due(
+    hours: int = Query(24, ge=1, le=168),
+    dry_run: int = Query(1, description="1=dry-run, 0=делаем списания"),
+    session: AsyncSession = Depends(get_session_dep),
+):
+    """
+    Ищет подписки, которым истекает срок в ближайшие `hours` часов
+    (и включены авто-продления), и делает попытку автосписания.
+    При dry_run=1 только возвращает список кандидатов.
+    """
+    now = _utcnow()
+    till = now + timedelta(hours=hours)
+
+    from app.db.models import Subscription  # type: ignore
+    # кандидаты на продление
+    q = await session.execute(
+        select(Subscription).where(
+            and_(
+                Subscription.is_auto_renew == True,  # noqa: E712
+                Subscription.subscription_until <= till,
+                Subscription.subscription_until > now - timedelta(days=30),
+                Subscription.status.in_(("active", "expired")),
+            )
+        ).order_by(Subscription.subscription_until.asc())
+    )
+    subs = q.scalars().all()
+
+    charged, failed = 0, 0
+    details = []
+
+    # Импорты «по месту», чтобы не падать, если модуль ещё не завезли
+    try:
+        from app.billing.service import apply_success_payment, PRICES_RUB
+        from app.billing.yookassa_client import charge_saved_method
+    except Exception:
+        apply_success_payment = None           # type: ignore
+        charge_saved_method = None             # type: ignore
+        PRICES_RUB = {}                        # type: ignore
+
+    for s in subs:
+        uid = int(getattr(s, "user_id"))
+        plan = (getattr(s, "plan") or "month").strip()
+        pm_id = getattr(s, "yk_payment_method_id", None)
+        cust_id = getattr(s, "yk_customer_id", None)
+
+        item = {
+            "subscription_id": getattr(s, "id", None),
+            "user_id": uid,
+            "plan": plan,
+            "until": getattr(s, "subscription_until", None),
+        }
+
+        # если dry-run или нет клиента ЮKassa — просто сообщаем кандидата
+        if dry_run or not charge_saved_method or not apply_success_payment:
+            details.append({**item, "action": "would_charge"})
+            continue
+
+        # нет сохранённого метода — ничего не делаем (фейл)
+        if not pm_id:
+            failed += 1
+            details.append({**item, "action": "skip_no_payment_method"})
+            continue
+
+        # сумма в рублях по плану (если плана нет в прайсе — пропускаем)
+        amount = PRICES_RUB.get(plan)
+        if not amount:
+            failed += 1
+            details.append({**item, "action": "skip_unknown_plan"})
+            continue
+
+        # пробуем списать
+        try:
+            yk = await charge_saved_method(
+                amount_rub=amount,
+                description=f"Auto-renew {plan}",
+                payment_method_id=pm_id,
+                customer_id=cust_id,
+                idempotency_key=f"sub-{getattr(s,'id',uid)}-{int(now.timestamp())}",
+            )
+            if (yk or {}).get("status") == "succeeded":
+                # фиксируем платёж и продлеваем подписку
+                await apply_success_payment(
+                    user_id=uid,
+                    plan=plan,
+                    provider_payment_id=(yk or {}).get("id", "yk_auto"),
+                    payment_method_id=pm_id,
+                    customer_id=cust_id,
+                    session=session,
+                )
+                charged += 1
+                details.append({**item, "action": "charged"})
+            else:
+                failed += 1
+                details.append({**item, "action": "payment_not_succeeded"})
+        except Exception as e:
+            failed += 1
+            details.append({**item, "action": "exception", "error": str(e)})
+
+    return {
+        "candidates": len(subs),
+        "charged": charged,
+        "failed": failed,
+        "dry_run": bool(dry_run),
+        "window_hours": hours,
+        "items": details[:50],  # чтобы ответ не раздувался
+    }
