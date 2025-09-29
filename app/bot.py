@@ -618,13 +618,16 @@ async def on_onb_agree(cb: CallbackQuery):
     except Exception:
         pass
 
-    # Скрыть правое меню и показать CTA
+    # Скрыть правое меню и показать CTA (только inline-кнопки)
     try:
-        await cb.message.answer("…", reply_markup=ReplyKeyboardRemove())
+        # невидимый символ, чтобы Telegram принял ReplyKeyboardRemove
+        await cb.message.answer("\u2063", reply_markup=ReplyKeyboardRemove())
     except Exception:
         pass
+
     await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=_kb_paywall(True))
-    
+    return  # ничего дальше не шлём (чтобы не всплывали подсказки/меню)
+
 # ===== Меню/навигация =====
 @router.message(F.text == "🌿 Разобраться")
 @router.message(Command("work"))
