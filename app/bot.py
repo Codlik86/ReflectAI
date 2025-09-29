@@ -410,19 +410,24 @@ async def cb_trial_start(call: CallbackQuery):
         started, expires = await start_trial_for_user(session, u.id)
         await session.commit()
 
-    # уберём у предыдущего сообщения инлайн-кнопки (если были)
+    # 1) удаляем CTA-сообщение (чтобы не плодить «лишние»)
     try:
-        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.delete()
     except Exception:
         pass
 
-    # отправляем новое сообщение С ПРАВОЙ КЛАВИАТУРОЙ
-    await call.message.answer(
+    # 2) шлём новое сообщение УЖЕ с правой клавиатурой (главное меню)
+    text = (
         f"Пробный период активирован ✅\n"
         f"Доступ открыт до {expires.astimezone().strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"Готов продолжать: выбрать «Поговорить», «Разобраться» или «Медитации».",
-        reply_markup=kb_main_menu(),
+        f"Готов продолжать: выбрать «Поговорить», «Разобраться» или «Медитации»."
     )
+    try:
+        await call.message.answer(text, reply_markup=kb_main_menu())  # <-- правая клавиатура появляется сразу
+    except Exception:
+        # запасной вариант: хотя бы без клавиатуры
+        await call.message.answer(text)
+
     await call.answer()
 
 @router.callback_query(lambda c: c.data == "pay:open")
@@ -569,12 +574,6 @@ def kb_onb_step3() -> ReplyKeyboardMarkup:
 
 @router.message(CommandStart())
 async def on_start(m: Message):
-    """ШАГ 1: «обложка» + кнопка «Вперёд ➜». Прячем правое меню на входе."""
-    try:
-        await m.answer("…", reply_markup=ReplyKeyboardRemove())
-    except Exception:
-        pass
-
     CHAT_MODE[m.chat.id] = "talk"
     img = get_onb_image("cover")
     if img:
@@ -604,7 +603,7 @@ async def on_onb_step2(cb: CallbackQuery):
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
     """ШАГ 3: фиксируем согласие и показываем CTA пробного периода/тарифов.
-    Правую клавиатуру прячем. Подсказку /start не шлём.
+    Никаких скрытых сообщений, никаких подсказок /start.
     """
     tg_id = cb.from_user.id
     uid = await _ensure_user_id(tg_id)
@@ -624,15 +623,9 @@ async def on_onb_agree(cb: CallbackQuery):
     except Exception:
         pass
 
-    # скрыть правую клавиатуру
-    try:
-        await cb.message.answer("\u2063", reply_markup=ReplyKeyboardRemove())  # невидимый символ
-    except Exception:
-        pass
-
-    # показать CTA: триал/тарифы (inline)
+    # Показываем только CTA с inline-кнопками триала/тарифов.
+    # ВАЖНО: не отправляем никаких пустых сообщений для remove-клавиатуры.
     await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=_kb_paywall(True))
-    return
 
 # ===== Меню/навигация =====
 @router.message(F.text == "🌿 Разобраться")
