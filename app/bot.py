@@ -529,7 +529,9 @@ ONB_1_TEXT = (
 )
 
 def kb_onb_step1() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Вперёд ➜", callback_data="onb:step2")]])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Вперёд ➜", callback_data="onb:step2")]]
+    )
 
 ONB_2_TEXT = (
     "Прежде чем мы познакомимся, подтвердим правила и политику. "
@@ -555,11 +557,20 @@ WHAT_NEXT_TEXT = """С чего начнём? 💛
 🎧 «Медитации» — спокойные аудио-паузы, чтобы переключиться и дать себе передышку.
 
 Чтобы открыть все функции, начните пробный период — 5 дней бесплатно. После — можно выбрать удобный план."""
+
 def kb_onb_step3() -> ReplyKeyboardMarkup:
+    # не используем на 3-м шаге: правую клавиатуру прячем до CTA
     return kb_main_menu()
+
 
 @router.message(CommandStart())
 async def on_start(m: Message):
+    """ШАГ 1: «обложка» + кнопка «Вперёд ➜». Прячем правое меню на входе."""
+    try:
+        await m.answer("…", reply_markup=ReplyKeyboardRemove())
+    except Exception:
+        pass
+
     CHAT_MODE[m.chat.id] = "talk"
     img = get_onb_image("cover")
     if img:
@@ -570,18 +581,35 @@ async def on_start(m: Message):
             pass
     await m.answer(ONB_1_TEXT, reply_markup=kb_onb_step1())
 
+
 @router.callback_query(F.data == "onb:step2")
 async def on_onb_step2(cb: CallbackQuery):
+    """ШАГ 2: согласие с правилами/политикой. Тоже убираем правую клавиатуру."""
+    try:
+        await cb.answer()
+    except Exception:
+        pass
+    try:
+        # скрываем правую клавиатуру отдельным сообщением
+        await cb.message.answer("…", reply_markup=ReplyKeyboardRemove())
+    except Exception:
+        pass
     await cb.message.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
-    await cb.answer()
+
 
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
+    """ШАГ 3: фиксируем согласие и показываем CTA пробного периода/тарифов.
+    Правую клавиатуру прячем. Подсказку /start не шлём.
+    """
     tg_id = cb.from_user.id
     uid = await _ensure_user_id(tg_id)
     try:
         async with async_session() as s:
-            await s.execute(text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"), {"uid": uid})
+            await s.execute(
+                text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"),
+                {"uid": uid},
+            )
             await s.commit()
     except Exception:
         pass
@@ -589,13 +617,14 @@ async def on_onb_agree(cb: CallbackQuery):
         await cb.answer("Спасибо! Принял ✅", show_alert=False)
     except Exception:
         pass
-    # показываем пейволл (пока без реального тримера)
-    await cb.message.answer('…', reply_markup=ReplyKeyboardRemove())
-    await cb.message.answer('…', reply_markup=ReplyKeyboardRemove())
+
+    # Скрыть правое меню и показать CTA
+    try:
+        await cb.message.answer("…", reply_markup=ReplyKeyboardRemove())
+    except Exception:
+        pass
     await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=_kb_paywall(True))
-
-# (старый легаси-хэндлер trial:start был удалён)
-
+    
 # ===== Меню/навигация =====
 @router.message(F.text == "🌿 Разобраться")
 @router.message(Command("work"))
