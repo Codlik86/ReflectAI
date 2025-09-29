@@ -399,7 +399,7 @@ async def cb_trial_start(call: CallbackQuery):
         q = await session.execute(select(User).where(User.tg_id == tg_id))
         u = q.scalar_one_or_none()
         if not u:
-            await call.answer("Нажми /start, чтобы завершить онбординг.", show_alert=True)
+            await call.answer("", show_alert=True)
             return
 
         # если триал уже активен — просто сообщим
@@ -601,7 +601,7 @@ async def on_work_menu(m: Message):
     async for session in get_session():
         u = await _get_user_by_tg(session, m.from_user.id)
         if not u:
-            await m.answer("Нажми /start, чтобы начать.")
+            # removed: start-hint
             return
         if not await _enforce_access_or_paywall(m, session, u.id):
             return
@@ -921,7 +921,7 @@ async def on_talk(m: Message):
     async for session in get_session():
         u = await _get_user_by_tg(session, m.from_user.id)
         if not u:
-            await m.answer("Нажми /start, чтобы начать.")
+            # removed: start-hint
             return
         if not await _enforce_access_or_paywall(m, session, u.id):
             return
@@ -1112,7 +1112,7 @@ async def on_pay(m: Message):
         from app.db.models import User
         u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
         if not u:
-            await m.answer("Нажми /start, чтобы завершить онбординг.", reply_markup=kb_main_menu())
+            # removed: start-hint)
             return
 
         # 1) активная подписка?
@@ -1196,7 +1196,7 @@ async def on_pick_plan(cb: CallbackQuery):
 
 # локальные импорты, чтобы не ломать верх файла
 from aiogram import BaseMiddleware
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from typing import Callable, Awaitable, Any, Dict, Tuple, Union
 
 async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool]:
