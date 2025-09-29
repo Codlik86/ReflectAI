@@ -96,9 +96,9 @@ async def _ensure_user_id(tg_id: int) -> int:
         if uid is None:
             r = await s.execute(
                 text("""
-                    INSERT INTO users (tg_id, privacy_level, created_at)
-                    VALUES (:tg, 'ask', NOW())
-                    RETURNING id
+                    INSERT INTO users (tg_id, privacy_level, style_profile, created_at)
+            VALUES (:tg, 'ask', 'default', NOW())
+            RETURNING id
                 """),
                 {"tg": int(tg_id)},
             )
