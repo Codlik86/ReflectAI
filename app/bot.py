@@ -594,11 +594,10 @@ async def on_onb_step2(cb: CallbackQuery):
         pass
     try:
         # скрываем правую клавиатуру отдельным сообщением
-        await cb.message.answer("…", reply_markup=ReplyKeyboardRemove())
+        await cb.message.answer("\u2063", reply_markup=ReplyKeyboardRemove())
     except Exception:
         pass
     await cb.message.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
-
 
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
