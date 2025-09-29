@@ -4,29 +4,30 @@ from __future__ import annotations
 import os
 import decimal
 import uuid
-from typing import Optional, Literal, Dict, Any
+from typing import Optional, Dict, Any
 
 import httpx
 import aiohttp
 
-# ===== Конфиг =====
-# Поддержим обе переменные ключа: YK_SECRET_KEY (боевое имя) и YK_API_KEY (как было у тебя)
-YK_SHOP_ID: str = (os.getenv("YK_SHOP_ID") or "").strip()
+# ===== Конфиг YooKassa =====
+# Поддерживаем оба имени ключа: YK_SECRET_KEY (актуальное) и YK_API_KEY (историческое)
+YK_SHOP_ID: str    = (os.getenv("YK_SHOP_ID") or "").strip()
 YK_SECRET_KEY: str = (os.getenv("YK_SECRET_KEY") or os.getenv("YK_API_KEY") or "").strip()
 
+# Базовый URL API и флаг «боевого» режима
 YK_BASE = "https://api.yookassa.ru/v3"
-IS_REAL = bool(YK_SHOP_ID and YK_SECRET_KEY)  # если нет кредов — считаем, что работаем в mock
+IS_REAL = bool(YK_SHOP_ID and YK_SECRET_KEY)
 
 def _auth_tuple() -> tuple[str, str]:
-    """auth для httpx"""
+    """Пара (login, password) для httpx.BasicAuth."""
     return (YK_SHOP_ID, YK_SECRET_KEY)
 
 def _auth_aio() -> aiohttp.BasicAuth:
-    """auth для aiohttp"""
+    """BasicAuth для aiohttp-сессии."""
     return aiohttp.BasicAuth(login=YK_SHOP_ID, password=YK_SECRET_KEY)
 
 def _amount_str(rub: int) -> str:
-    # 1190 -> "1190.00"
+    """1190 -> '1190.00'"""
     return f"{decimal.Decimal(rub):.2f}"
 
 # ======================================================================
