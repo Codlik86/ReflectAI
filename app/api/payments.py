@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import os
+import base64
+import hmac
+import hashlib
 from typing import Any, Optional, cast
+
 from fastapi import APIRouter, Request, HTTPException, Header
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.core import async_session
 
 router = APIRouter(prefix="/api/payments/yookassa", tags=["payments"])
 
-YK_WEBHOOK_SECRET = os.getenv("YK_WEBHOOK_SECRET", "").strip()
+# Переменные окружения
+YK_WEBHOOK_SECRET = (os.getenv("YK_WEBHOOK_SECRET") or "").strip()   # секрет вебхука (HMAC или пароль Basic)
+YK_SHOP_ID = (os.getenv("YK_SHOP_ID") or "").strip()                 # для Basic-проверки
 
+
+# -----------------------------
+# Вспомогательные функции
+# -----------------------------
 
 def _get(obj: Any, *path: str, default: Any = None) -> Any:
     cur = obj
@@ -43,17 +53,70 @@ def _utcnow():
     return dt.datetime.now(dt.timezone.utc)
 
 
+async def _verify_webhook(
+    request: Request,
+    *,
+    x_hmac: Optional[str],
+    authorization: Optional[str],
+) -> None:
+    """
+    Проверяем подлинность уведомления одним из способов (любой проходной):
+    1) HMAC по «сырым» байтам тела:   заголовок X-Content-HMAC-SHA256
+    2) Basic: Authorization: Basic base64(shopId:secret)
+
+    Если YK_WEBHOOK_SECRET пуст — проверку пропускаем.
+    """
+    if not YK_WEBHOOK_SECRET:
+        return
+
+    # --- 1) HMAC-подпись тела (если заголовок присутствует)
+    if x_hmac:
+        raw = await request.body()
+        digest = hmac.new(
+            YK_WEBHOOK_SECRET.encode("utf-8"),
+            raw,
+            hashlib.sha256,
+        ).hexdigest()
+        # ЮKassa может прислать подпись в hex; на всякий попробуем и base64
+        digest_b64 = base64.b64encode(bytes.fromhex(digest)).decode("ascii")
+        if hmac.compare_digest(x_hmac.strip(), digest) or hmac.compare_digest(x_hmac.strip(), digest_b64):
+            return  # ok
+
+    # --- 2) Basic авторизация
+    if authorization and authorization.startswith("Basic "):
+        try:
+            creds = base64.b64decode(authorization.split(" ", 1)[1]).decode("utf-8")
+            login, pwd = creds.split(":", 1)
+            if (not YK_SHOP_ID) or (login.strip() == YK_SHOP_ID and pwd.strip() == YK_WEBHOOK_SECRET):
+                return  # ok
+        except Exception:
+            pass
+
+    raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+
+# -----------------------------
+# Вебхук
+# -----------------------------
+
 @router.post("/webhook")
 async def yookassa_webhook(
     request: Request,
+    # alias — реальные имена заголовков в HTTP
+    x_content_hmac_sha256: Optional[str] = Header(None, alias="X-Content-HMAC-SHA256"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    # на случай кастомного прокси — совместимость с твоим прежним именем
     x_yookassa_signature: Optional[str] = Header(None),
 ):
-    # --- JSON тела и необязательная проверка подписи
-    body = await request.json()
-    if YK_WEBHOOK_SECRET:
-        sig = (x_yookassa_signature or "").strip()
-        if not sig or sig != YK_WEBHOOK_SECRET:
-            raise HTTPException(status_code=401, detail="bad signature")
+    # --- Подпись: поддерживаем оба заголовка (приоритет у X-Content-HMAC-SHA256)
+    x_hmac = x_content_hmac_sha256 or x_yookassa_signature
+    await _verify_webhook(request, x_hmac=x_hmac, authorization=authorization)
+
+    # --- JSON тела
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid json")
 
     obj = _get(body, "object", default={})
     event = _get(body, "event", default="")
@@ -62,7 +125,7 @@ async def yookassa_webhook(
     status = _get(obj, "status", default="unknown")
     amount_str = _get(obj, "amount", "value", default="0")
     currency = _get(obj, "amount", "currency", default="RUB")
-    pm_id = _get(obj, "payment_method", "id")              # может быть None
+    pm_id = _get(obj, "payment_method", "id")                 # может быть None
     meta_user_id = _get(obj, "metadata", "user_id")
     plan = (_get(obj, "metadata", "plan", default="") or "").lower()
 
@@ -77,9 +140,8 @@ async def yookassa_webhook(
     async with async_session() as _s:
         session = cast(AsyncSession, _s)
         from app.db.models import User, Payment, Subscription  # type: ignore
-        from sqlalchemy import select, update
 
-        # --- находим пользователя (сначала по users.id, если прислали tg_id — пробуем вторым шагом)
+        # --- находим пользователя (сначала по users.id; если прислали tg_id — пробуем вторым шагом)
         u = (await session.execute(select(User).where(User.id == int(meta_user_id)))).scalar_one_or_none()
         if not u:
             try:
@@ -139,7 +201,7 @@ async def yookassa_webhook(
             else:
                 new_until = now + dt.timedelta(days=add_days)
 
-            premium = (new_until is not None) and (new_until > now)
+            premium = new_until > now
 
             if sub:
                 sub.plan = plan or (sub.plan or "month")
@@ -163,8 +225,8 @@ async def yookassa_webhook(
                     status="active",
                     is_auto_renew=True,
                     subscription_until=new_until,
-                    is_premium=premium,           # NOT NULL-safe
-                    tier="basic",                  # NOT NULL-safe
+                    is_premium=premium,   # NOT NULL-safe
+                    tier="basic",         # NOT NULL-safe
                     yk_payment_method_id=pm_id,
                     yk_customer_id=None,
                     created_at=now,

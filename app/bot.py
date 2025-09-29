@@ -443,7 +443,8 @@ async def cb_pay_plans(call: CallbackQuery):
         "• 5 дней бесплатно, далее по тарифу\n\n"
         "⚠️ <i>Важно: подписка с автопродлением. Его можно отключить в любой момент в /pay.</i>\n\n"
         "<b>Выбери план:</b>",
-        reply_markup=_kb_pay_plans()
+        reply_markup=_kb_pay_plans(),
+        parse_mode="HTML",
     )
     await call.answer()
 
@@ -1182,12 +1183,37 @@ async def on_pay(m: Message):
 
 @router.callback_query(F.data.startswith("pay:plan:"))
 async def on_pick_plan(cb: CallbackQuery):
-    plan = cb.data.split(":")[-1]  # week|month|q3|year
+    """
+    Пользователь выбрал тариф. Создаём платёж в YooKassa и даём ссылку.
+    План нормализуем так, чтобы совпадал с тем, что обрабатывает вебхук.
+    """
+    # raw: pay:plan:month | pay:plan:week | pay:plan:q3 | pay:plan:year ...
+    try:
+        raw_plan = cb.data.split(":", 2)[-1].strip().lower()
+    except Exception:
+        await cb.answer("Некорректный запрос", show_alert=True)
+        return
+
+    # Нормализация алиасов, чтобы вебхук понял (см. payments/webhook)
+    PLAN_ALIAS = {
+        "q3": "quarter",
+        "3m": "quarter",
+        "quarter": "quarter",
+        "week": "week",
+        "weekly": "week",
+        "month": "month",
+        "year": "year",
+        "annual": "year",
+        "y": "year",
+        "q": "quarter",
+    }
+    plan = PLAN_ALIAS.get(raw_plan, raw_plan)
+
     if plan not in _PLANS:
         await cb.answer("Неизвестный план", show_alert=True)
         return
 
-    amount, desc = _PLANS[plan]  # amount: int, desc: str
+    amount, desc = _PLANS[plan]  # amount: int (RUB), desc: str
 
     # --- найдём пользователя (из нашей таблицы users) ---
     async for session in get_session():
@@ -1206,7 +1232,7 @@ async def on_pick_plan(cb: CallbackQuery):
                 amount_rub=int(amount),
                 description=desc,
                 metadata={"user_id": int(u.id), "plan": plan},
-                # return_url не указываем — возьмётся из YK_RETURN_URL (ENV)
+                # return_url берётся из YK_RETURN_URL (ENV)
             )
         except Exception:
             pay_url = None
