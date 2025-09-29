@@ -14,7 +14,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
-, ReplyKeyboardRemove)
+ ReplyKeyboardRemove)
 # алиасы для клавиатуры (используются в нескольких местах, в т.ч. deep-link)
 from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
 
