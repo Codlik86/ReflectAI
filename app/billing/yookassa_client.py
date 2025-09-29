@@ -1,46 +1,81 @@
 # app/billing/yookassa_client.py
 from __future__ import annotations
 
-import os, decimal
+import os
+import decimal
 import uuid
 from typing import Optional, Literal, Dict, Any
 
 import httpx
 import aiohttp
 
-# Режимы работы:
-# - Если есть YK_SHOP_ID и YK_API_KEY — шлём реальные запросы в YooKassa
-# - Иначе работаем в mock-режиме (для локальных/стейдж тестов)
-YK_SHOP_ID = os.getenv("YK_SHOP_ID", "").strip()
-YK_API_KEY = os.getenv("YK_API_KEY", "").strip()
+# ===== Конфиг =====
+# Поддержим обе переменные ключа: YK_SECRET_KEY (боевое имя) и YK_API_KEY (как было у тебя)
+YK_SHOP_ID: str = (os.getenv("YK_SHOP_ID") or "").strip()
+YK_SECRET_KEY: str = (os.getenv("YK_SECRET_KEY") or os.getenv("YK_API_KEY") or "").strip()
+
 YK_BASE = "https://api.yookassa.ru/v3"
+IS_REAL = bool(YK_SHOP_ID and YK_SECRET_KEY)  # если нет кредов — считаем, что работаем в mock
 
-# Если нужно — можно подложить заглушки
-IS_REAL = bool(YK_SHOP_ID and YK_API_KEY)
+def _auth_tuple() -> tuple[str, str]:
+    """auth для httpx"""
+    return (YK_SHOP_ID, YK_SECRET_KEY)
 
-Headers = {
-    "Idempotence-Key": "",
-    "Content-Type": "application/json",
-}
-
-def _auth():
-    return (YK_SHOP_ID, YK_API_KEY)
-
-def _amount_str(amount_rub: int) -> str:
-    # Целые рубли -> "1190.00"
-    return f"{amount_rub:.2f}"
-
-YK_API = "https://api.yookassa.ru/v3"
-
-def _auth():
-    shop_id = os.getenv("YK_SHOP_ID", "")
-    secret = os.getenv("YK_SECRET_KEY", "")
-    return aiohttp.BasicAuth(login=shop_id, password=secret)
+def _auth_aio() -> aiohttp.BasicAuth:
+    """auth для aiohttp"""
+    return aiohttp.BasicAuth(login=YK_SHOP_ID, password=YK_SECRET_KEY)
 
 def _amount_str(rub: int) -> str:
-    # '1190' -> '1190.00'
+    # 1190 -> "1190.00"
     return f"{decimal.Decimal(rub):.2f}"
 
+# ======================================================================
+# СИНХРОННАЯ обёртка для бота: вернуть ссылку на оплату (confirmation_url)
+# ======================================================================
+def create_payment_link(
+    *,
+    amount_rub: int,
+    description: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Делает sync-запрос к YooKassa и возвращает confirmation_url.
+    Нужна для вызова из обработчика, где у тебя используется синхронная функция.
+    """
+    payload: Dict[str, Any] = {
+        "amount": {"value": _amount_str(amount_rub), "currency": "RUB"},
+        "capture": True,
+        "description": (description or "")[:128],
+        "metadata": metadata or {},
+        "confirmation": {
+            "type": "redirect",
+            "return_url": os.getenv("YK_RETURN_URL") or "https://t.me/reflectttaibot?start=paid_ok",
+        },
+        "save_payment_method": True,
+    }
+
+    if not IS_REAL:
+        # mock URL для локальных/стейдж-тестов
+        return f"https://example.com/mock/{uuid.uuid4().hex}"
+
+    idem = str(uuid.uuid4())
+    r = httpx.post(
+        f"{YK_BASE}/payments",
+        auth=_auth_tuple(),
+        headers={"Idempotence-Key": idem},
+        json=payload,
+        timeout=30.0,
+    )
+    r.raise_for_status()
+    data = r.json()
+    url = (data.get("confirmation") or {}).get("confirmation_url")
+    if not url:
+        raise RuntimeError("YooKassa: confirmation_url not found")
+    return url
+
+# ======================================================================
+# АСИНХРОННЫЕ функции: создавать платеж и списывать сохранённый метод
+# ======================================================================
 async def create_payment(
     amount_rub: int,
     currency: str = "RUB",
@@ -51,31 +86,36 @@ async def create_payment(
     idem_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Если payment_method_id не передан — создаём платёж с редиректом и
-    save_payment_method=True (ЮKassa попросит сохранить карту).
-    Если передан — повторное списание (автопродление).
+    Если payment_method_id не передан — создаём платёж с редиректом и save_payment_method=True.
+    Если передан — делаем рекуррент по сохранённому способу.
     """
     payload: Dict[str, Any] = {
         "amount": {"value": _amount_str(amount_rub), "currency": currency},
         "capture": bool(capture),
-        "description": description[:128],
+        "description": (description or "")[:128],
         "metadata": metadata or {},
     }
 
     if payment_method_id:
-        # Рекуррентное списание по сохранённому методу
         payload["payment_method_id"] = payment_method_id
     else:
-        # Первый платёж: редирект на страницу оплаты + запрос на сохранение метода
         payload["confirmation"] = {
             "type": "redirect",
             "return_url": os.getenv("YK_RETURN_URL") or "https://t.me/reflectttaibot?start=paid_ok",
         }
         payload["save_payment_method"] = True
 
-    headers = {"Idempotence-Key": idem_key or description or "idem"}
-    async with aiohttp.ClientSession(auth=_auth()) as sess:
-        async with sess.post(f"{YK_API}/payments", json=payload, headers=headers, timeout=60) as r:
+    if not IS_REAL:
+        # MOCK: имитируем ответ YooKassa
+        return {
+            "id": f"mock_pay_{uuid.uuid4().hex[:10]}",
+            "status": "pending",
+            "confirmation": {"type": "redirect", "confirmation_url": f"https://example.com/mock/{uuid.uuid4().hex}"},
+        }
+
+    headers = {"Idempotence-Key": (idem_key or str(uuid.uuid4()))}
+    async with aiohttp.ClientSession(auth=_auth_aio()) as sess:
+        async with sess.post(f"{YK_BASE}/payments", json=payload, headers=headers, timeout=60) as r:
             r.raise_for_status()
             return await r.json()
 
@@ -112,7 +152,7 @@ async def charge_saved_method(
         }
 
     idem = idempotency_key or str(uuid.uuid4())
-    async with httpx.AsyncClient(base_url=YK_BASE, auth=_auth(), timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=YK_BASE, auth=_auth_tuple(), timeout=30.0) as client:
         r = await client.post(
             "/payments",
             headers={"Idempotence-Key": idem},
