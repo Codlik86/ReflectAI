@@ -40,7 +40,8 @@ def create_payment_link(
 ) -> str:
     """
     Делает sync-запрос к YooKassa и возвращает confirmation_url.
-    Нужна для вызова из обработчика, где у тебя используется синхронная функция.
+    В случае ошибки поднимает RuntimeError с кодом и телом ответа,
+    чтобы видеть причину в логах Render.
     """
     payload: Dict[str, Any] = {
         "amount": {"value": _amount_str(amount_rub), "currency": "RUB"},
@@ -55,22 +56,39 @@ def create_payment_link(
     }
 
     if not IS_REAL:
-        # mock URL для локальных/стейдж-тестов
+        # mock для локалки/стейджа
         return f"https://example.com/mock/{uuid.uuid4().hex}"
 
     idem = str(uuid.uuid4())
-    r = httpx.post(
-        f"{YK_BASE}/payments",
-        auth=_auth_tuple(),
-        headers={"Idempotence-Key": idem},
-        json=payload,
-        timeout=30.0,
-    )
-    r.raise_for_status()
+    headers = {
+        "Idempotence-Key": idem,
+        "Content-Type": "application/json",
+        # По опыту иногда помогает явно проставить accept
+        "Accept": "application/json",
+    }
+
+    try:
+        r = httpx.post(
+            f"{YK_BASE}/payments",
+            auth=_auth_tuple(),          # (shop_id, secret_key)
+            headers=headers,
+            json=payload,
+            timeout=30.0,
+        )
+    except Exception as e:
+        # Сетевые/SSL/таймауты — увидим в логах
+        raise RuntimeError(f"YooKassa request failed: {type(e).__name__}: {e}") from e
+
+    # Не используем .raise_for_status(), чтобы включить тело ответа в ошибку
+    if r.status_code // 100 != 2:
+        body_preview = r.text[:800]  # чтобы не зафлудить логи
+        raise RuntimeError(f"YooKassa HTTP {r.status_code}: {body_preview}")
+
     data = r.json()
     url = (data.get("confirmation") or {}).get("confirmation_url")
     if not url:
-        raise RuntimeError("YooKassa: confirmation_url not found")
+        raise RuntimeError(f"YooKassa: confirmation_url not found in response: {data}")
+
     return url
 
 # ======================================================================
