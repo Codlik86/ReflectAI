@@ -5,9 +5,9 @@ import os
 import hashlib
 from typing import Dict, List, Optional
 
-from aiogram import Router, F, Bot
+from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, (
+from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
@@ -16,7 +16,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, (
     KeyboardButton,
 )
 # алиасы для клавиатуры (используются в нескольких местах, в т.ч. deep-link)
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
+from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
 
 # ===== Модули продукта =====
 from app.meditations import get_categories, get_items, get_item
@@ -53,8 +53,6 @@ from app.billing.service import disable_auto_renew, cancel_subscription_now, get
 
 
 router = Router()
-router.message.middleware(GateMiddleware())
-router.callback_query.middleware(GateMiddleware())
 
 # обрабатываем ТОЛЬКО deep-link вида: /start paid_ok | paid_canceled | paid_fail
 @router.message(F.text.regexp(r"^/start\s+paid_(ok|canceled|fail)$"))
@@ -1195,93 +1193,126 @@ async def on_pick_plan(cb: CallbackQuery):
     await cb.answer()
 
 
-# ---------------- Gate: policy -> access -> full ----------------
-from aiogram.dispatcher.middlewares.base import BaseMiddleware
-from aiogram.types import Message, CallbackQuery
+# ===== Gate middleware: блокируем команды до согласия и до старта триала/оплаты =====
 
-async def _user_flags(tg_id: int) -> tuple[bool, bool]:
+# локальные импорты, чтобы не ломать верх файла
+from aiogram import BaseMiddleware
+from aiogram.types import Message, CallbackQuery
+from typing import Callable, Awaitable, Any, Dict, Tuple, Union
+
+async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool]:
     """
-    policy_ok, access_ok
+    Возвращает: (policy_ok, access_ok)
+    policy_ok — принят ли экран правил;
+    access_ok — есть ли доступ (триал или подписка).
     """
     from sqlalchemy import text
-    from app.db.core import async_session  # поправь импорт, если у тебя другой модуль
-    from app.billing.service import check_access
+    from app.db.core import async_session
     # policy
     async with async_session() as s:
         r = await s.execute(text("SELECT id, policy_accepted_at FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
         row = r.first()
         if not row:
-            return (False, False)
+            return False, False
         uid = int(row[0])
         policy_ok = bool(row[1])
-    # access (trial or subscription)
+    # access (trial/subscription)
+    from app.billing.service import check_access
     async with async_session() as s2:
-        access_ok = await check_access(s2, uid)
+        try:
+            access_ok = await check_access(s2, uid)
+        except Exception:
+            access_ok = False
     return policy_ok, access_ok
 
-def _kb_policy_agree() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+async def _gate_send_policy(event: Union[Message, CallbackQuery]) -> None:
+    """Показываем экран с «Принимаю» заново."""
+    import os
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📄 Правила", url=os.getenv("LEGAL_POLICY_URL") or "https://example.com/policy"),
             InlineKeyboardButton(text="🔐 Политика", url=os.getenv("LEGAL_OFFER_URL") or "https://example.com/offer"),
         ],
         [InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")],
     ])
+    text = "Прежде чем мы познакомимся, подтвердим правила и политику. Это нужно, чтобы нам обоим было спокойно и безопасно."
+    await (event.message if isinstance(event, CallbackQuery) else event).answer(text, reply_markup=kb)
 
-async def _send_policy_prompt(bot: Bot, chat_id: int):
-    await bot.send_message(
-        chat_id,
-        "Прежде чем мы познакомимся, подтвердим правила и политику. Это нужно, чтобы нам обоим было спокойно и безопасно.",
-        reply_markup=_kb_policy_agree()
-    )
-
-async def _send_trial_cta(bot: Bot, chat_id: int):
+async def _gate_send_trial_cta(event: Union[Message, CallbackQuery]) -> None:
+    """Показываем CTA триала/тарифов заново."""
     try:
-        await bot.send_message(chat_id, WHAT_NEXT_TEXT, reply_markup=_kb_paywall(True))
-    except NameError:
-        # fallback текст, если константы переедут
-        await bot.send_message(
-            chat_id,
-            "Доступ к разделам открыт по подписке.\nМожно начать 5-дневный пробный период бесплатно, затем — по выбранному плану.",
-        )
+        # используем твои константы, если они есть
+        from app.bot import WHAT_NEXT_TEXT, _kb_paywall  # type: ignore
+        text = WHAT_NEXT_TEXT
+        kb = _kb_paywall(True)
+    except Exception:
+        text = "Доступ к разделам открыт по подписке.\nМожно начать 5-дневный пробный период бесплатно, затем — по выбранному плану."
+        kb = None
+    await (event.message if isinstance(event, CallbackQuery) else event).answer(text, reply_markup=kb)
 
 class GateMiddleware(BaseMiddleware):
     """
-    1) Если policy не принят — пропускаем только /start и onb:*; остальное — повторяем экран политики.
-    2) Если policy принят, но доступа нет — пропускаем только /pay и trial:* / pay:*; остальное — экран триала/тарифов.
+    Логика:
+    1) Пока не принят policy — разрешены только /start и onb:* (остальное — экран policy).
+    2) После policy, но до доступа — разрешены только /pay и trial/pay/plan/tariff/yk:* (остальное — CTA триала).
+    3) Когда доступ открыт — пропускаем всё.
     """
-    async def __call__(self, handler, event, data):
-        bot = data.get("bot")
-        if isinstance(event, Message):
-            tg_id = event.from_user.id
-            txt = event.text or ""
-            policy_ok, access_ok = await _user_flags(tg_id)
+    async def __call__(
+        self,
+        handler: Callable[[Union[Message, CallbackQuery], Dict[str, Any]], Awaitable[Any]],
+        event: Union[Message, CallbackQuery],
+        data: Dict[str, Any]
+    ) -> Any:
+        try:
+            tg_id = getattr(getattr(event, "from_user", None), "id", None)
+            if not tg_id:
+                return await handler(event, data)
+
+            policy_ok, access_ok = await _gate_user_flags(int(tg_id))
+
+            # 1) policy ещё не принят — спамим экранами правил
             if not policy_ok:
-                if txt.startswith("/start"):
-                    return await handler(event, data)
-                await _send_policy_prompt(bot, tg_id)
-                return
+                if isinstance(event, Message):
+                    if (event.text or "").startswith("/start"):
+                        return await handler(event, data)
+                    await _gate_send_policy(event)
+                    return
+                else:
+                    if (event.data or "").startswith("onb:"):
+                        return await handler(event, data)
+                    await _gate_send_policy(event)
+                    return
+
+            # 2) policy принят, но доступа ещё нет — спамим CTA триала/тарифов
             if not access_ok:
-                if txt.startswith("/pay"):
-                    return await handler(event, data)
-                await _send_trial_cta(bot, tg_id)
-                return
+                if isinstance(event, Message):
+                    if (event.text or "").startswith("/pay"):
+                        return await handler(event, data)
+                    await _gate_send_trial_cta(event)
+                    return
+                else:
+                    d = (event.data or "")
+                    if d.startswith(("trial:", "pay:", "plan:", "tariff:", "yk:")):
+                        return await handler(event, data)
+                    await _gate_send_trial_cta(event)
+                    return
+
+            # 3) доступ открыт — пропускаем всё
             return await handler(event, data)
 
-        if isinstance(event, CallbackQuery):
-            tg_id = event.from_user.id
-            data_str = (event.data or "")
-            policy_ok, access_ok = await _user_flags(tg_id)
-            if not policy_ok:
-                if data_str.startswith("onb:"):
-                    return await handler(event, data)
-                await _send_policy_prompt(bot, tg_id)
-                return
-            if not access_ok:
-                # разрешаем коллбеки про триал и оплату
-                if data_str.startswith(("trial:", "pay:", "plan:", "tariff:", "yk:")):
-                    return await handler(event, data)
-                await _send_trial_cta(bot, tg_id)
-                return
+        except Exception:
+            # не блокируем на ошибках (fail-open)
             return await handler(event, data)
 
+# ---- mount GateMiddleware after its definition ----
+def _mount_gate(rtr):
+    rtr.message.middleware(GateMiddleware())
+    rtr.callback_query.middleware(GateMiddleware())
+
+# подключаем мидлварь после того, как класс уже объявлен
+try:
+    _mount_gate(router)
+except Exception:
+    # fail-open: в крайнем случае просто не ставим мидлварь
+    pass
