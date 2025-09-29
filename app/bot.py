@@ -410,15 +410,13 @@ async def cb_trial_start(call: CallbackQuery):
         started, expires = await start_trial_for_user(session, u.id)
         await session.commit()
 
-    # UI после активации триала
+    # UI после активации триала — без каких-либо кнопок
     await call.message.edit_text(
-        f"Триал активирован ✅\n"
-        f"Доступ открыт до {expires.astimezone().strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"Готов продолжать: выбрать «Поговорить», «Разобраться» или «Медитации».",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")]
-        ])
-    )
+    f"Пробный период активирован ✅\n"
+    f"Доступ открыт до {expires.astimezone().strftime('%d.%m.%Y %H:%M')}\n\n"
+    f"Выбери «Поговорить», «Разобраться» или «Медитации».",
+    reply_markup=None,  # убираем inline-кнопки (в т.ч. «Открыть меню»)
+)
     await call.answer()
 
 @router.callback_query(lambda c: c.data == "pay:open")
