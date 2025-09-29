@@ -913,7 +913,11 @@ async def on_help(m: Message):
 
 @router.message(Command("menu"))
 async def on_menu(m: Message):
-    await m.answer("Меню:", reply_markup=kb_main_menu())
+    msg = await m.answer('Меню', reply_markup=kb_main_menu())
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
 # ===== Тон и режим разговора =====
 @router.message(F.text == "💬 Поговорить")
