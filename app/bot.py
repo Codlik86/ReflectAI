@@ -520,14 +520,6 @@ async def cmd_policy(m: Message):
         parts.append("Ссылки не настроены. Добавь переменные окружения POLICY_URL и TERMS_URL.")
     await m.answer("\n".join(parts), disable_web_page_preview=True)
 
-async def _hide_reply_kb(msg: Message):
-    """Скрыть правую reply-клавиатуру «чисто»: отправить скрывающее сообщение и удалить его."""
-    try:
-        tmp = await msg.answer("\u2063", reply_markup=ReplyKeyboardRemove())  # невидимый символ
-        await tmp.delete()
-    except Exception:
-        pass
-
 # ===== Онбординг =====
 ONB_1_TEXT = (
     "Привет! Здесь ты можешь выговориться, разобрать ситуацию и найти опору.\n"
@@ -573,7 +565,7 @@ def kb_onb_step3() -> ReplyKeyboardMarkup:
 async def on_start(m: Message):
     """ШАГ 1: «обложка» + кнопка «Вперёд ➜». Прячем правое меню на входе."""
     try:
-        await _hide_reply_kb(m)
+        await m.answer("…", reply_markup=ReplyKeyboardRemove())
     except Exception:
         pass
 
@@ -597,7 +589,7 @@ async def on_onb_step2(cb: CallbackQuery):
         pass
     try:
         # скрываем правую клавиатуру отдельным сообщением
-        await _hide_reply_kb(cb.message)
+        await cb.message.answer("…", reply_markup=ReplyKeyboardRemove())
     except Exception:
         pass
     await cb.message.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
