@@ -1184,18 +1184,16 @@ async def on_pay(m: Message):
 @router.callback_query(F.data.startswith("pay:plan:"))
 async def on_pick_plan(cb: CallbackQuery):
     """
-    Пользователь выбрал тариф — создаём платёж в YooKassa и отдаём
-    ссылку на оплату. Название плана нормализуем под те, что обрабатывает
-    вебхук (/api/payments/yookassa/webhook).
+    Пользователь выбрал тариф. Создаём платёж в ЮKassa и даём ссылку.
     """
-    # raw формат: pay:plan:month|week|q3|year|...
+    # raw: pay:plan:month | pay:plan:week | pay:plan:q3 | pay:plan:year ...
     try:
         raw_plan = (cb.data or "").split(":", 2)[-1].strip().lower()
     except Exception:
         await cb.answer("Некорректный запрос", show_alert=True)
         return
 
-    # алиасы → канонические имена
+    # Алиасы -> нормализованный план (должен совпадать с тем, что обрабатывает вебхук)
     PLAN_ALIAS = {
         "q3": "quarter",
         "3m": "quarter",
@@ -1214,34 +1212,34 @@ async def on_pick_plan(cb: CallbackQuery):
         await cb.answer("Неизвестный план", show_alert=True)
         return
 
-    amount, desc = _PLANS[plan]  # amount:int (RUB), desc:str
+    amount, desc = _PLANS[plan]  # int RUB, str
 
-    # --- найдём пользователя в БД по tg_id ---
+    # Находим пользователя по tg_id
     async for session in get_session():
         from app.db.models import User
+        u = (await session.execute(
+            select(User).where(User.tg_id == cb.from_user.id)
+        )).scalar_one_or_none()
 
-        user = (
-            await session.execute(select(User).where(User.tg_id == cb.from_user.id))
-        ).scalar_one_or_none()
-
-        if not user:
+        if not u:
             await cb.answer("Нажми /start, чтобы начать.", show_alert=True)
             return
 
-        # --- создаём платёж и берём redirect URL ---
-        pay_url: str | None = None
+        # Пытаемся создать платёж и получить redirect URL
         try:
-            # функция-обёртка из yookassa_client: вернёт URL или None
             pay_url = create_payment_link(
                 amount_rub=int(amount),
                 description=desc,
-                metadata={"user_id": int(user.id), "plan": plan},
-                # return_url берётся из YK_RETURN_URL (ENV)
+                metadata={"user_id": int(u.id), "plan": plan},
+                # return_url берётся из YK_RETURN_URL (ENV), можно не передавать
             )
-        except Exception:
+        except Exception as e:
+            # НЕ глотаем причину — логируем
+            print(f"[pay] create_payment_link raised: {e}")
             pay_url = None
 
     if not pay_url:
+        # если прилетит 401/422 и т.п., подробности будут в логах из yookassa_client.py
         await cb.message.answer("Не удалось сформировать платёж. Попробуй ещё раз позже.")
         await cb.answer()
         return
@@ -1249,8 +1247,7 @@ async def on_pick_plan(cb: CallbackQuery):
     kb = _IKM(inline_keyboard=[[ _IKB(text="Оплатить 💳", url=pay_url) ]])
     await cb.message.answer(
         f"<b>{desc}</b>\nСумма: <b>{amount} ₽</b>\n\nНажми «Оплатить 💳», чтобы перейти к форме.",
-        reply_markup=kb,
-        parse_mode="HTML",
+        reply_markup=kb
     )
     await cb.answer()
 

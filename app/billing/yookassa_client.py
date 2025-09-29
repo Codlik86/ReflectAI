@@ -4,93 +4,89 @@ from __future__ import annotations
 import os
 import decimal
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import httpx
 import aiohttp
 
-# ===== Конфиг YooKassa =====
-# Поддерживаем оба имени ключа: YK_SECRET_KEY (актуальное) и YK_API_KEY (историческое)
-YK_SHOP_ID: str    = (os.getenv("YK_SHOP_ID") or "").strip()
+# ===== Конфиг =====
+# Креды: берём YK_SECRET_KEY (боевое имя). Если в .env остался YK_API_KEY — тоже подхватим.
+YK_SHOP_ID: str = (os.getenv("YK_SHOP_ID") or "").strip()
 YK_SECRET_KEY: str = (os.getenv("YK_SECRET_KEY") or os.getenv("YK_API_KEY") or "").strip()
 
-# Базовый URL API и флаг «боевого» режима
+# Базовый URL ЮKassa
 YK_BASE = "https://api.yookassa.ru/v3"
+
+# Флаг: реальный режим (иначе можно мокать/логировать причину)
 IS_REAL = bool(YK_SHOP_ID and YK_SECRET_KEY)
 
-def _auth_tuple() -> tuple[str, str]:
-    """Пара (login, password) для httpx.BasicAuth."""
+def _auth_tuple() -> Tuple[str, str]:
+    # httpx.BasicAuth совместим с кортежом (user, password)
     return (YK_SHOP_ID, YK_SECRET_KEY)
 
 def _auth_aio() -> aiohttp.BasicAuth:
-    """BasicAuth для aiohttp-сессии."""
     return aiohttp.BasicAuth(login=YK_SHOP_ID, password=YK_SECRET_KEY)
 
 def _amount_str(rub: int) -> str:
-    """1190 -> '1190.00'"""
+    # 1190 -> "1190.00"
     return f"{decimal.Decimal(rub):.2f}"
 
-# ======================================================================
-# СИНХРОННАЯ обёртка для бота: вернуть ссылку на оплату (confirmation_url)
-# ======================================================================
 def create_payment_link(
     *,
     amount_rub: int,
     description: str,
     metadata: Optional[Dict[str, Any]] = None,
-) -> str:
+    return_url: Optional[str] = None,
+    idempotence_key: Optional[str] = None,
+) -> Optional[str]:
     """
-    Делает sync-запрос к YooKassa и возвращает confirmation_url.
-    В случае ошибки поднимает RuntimeError с кодом и телом ответа,
-    чтобы видеть причину в логах Render.
+    Синхронный helper для создания платежа с редиректом.
+    Возвращает URL (confirmation_url) или None при ошибке.
     """
+    if not IS_REAL:
+        print("[yk] IS_REAL = False — нет YK_SHOP_ID или YK_SECRET_KEY. Проверь .env/Render env vars.")
+        return None
+
     payload: Dict[str, Any] = {
-        "amount": {"value": _amount_str(amount_rub), "currency": "RUB"},
+        "amount": {"value": _amount_str(int(amount_rub)), "currency": "RUB"},
         "capture": True,
         "description": (description or "")[:128],
         "metadata": metadata or {},
         "confirmation": {
             "type": "redirect",
-            "return_url": os.getenv("YK_RETURN_URL") or "https://t.me/reflectttaibot?start=paid_ok",
+            "return_url": return_url or os.getenv("YK_RETURN_URL") or "https://t.me/reflectttaibot?start=paid_ok",
         },
+        # просим сохранить платёжный метод для автопродления
         "save_payment_method": True,
     }
 
-    if not IS_REAL:
-        # mock для локалки/стейджа
-        return f"https://example.com/mock/{uuid.uuid4().hex}"
-
-    idem = str(uuid.uuid4())
-    headers = {
-        "Idempotence-Key": idem,
-        "Content-Type": "application/json",
-        # По опыту иногда помогает явно проставить accept
-        "Accept": "application/json",
-    }
-
+    idem = idempotence_key or str(uuid.uuid4())
     try:
-        r = httpx.post(
-            f"{YK_BASE}/payments",
-            auth=_auth_tuple(),          # (shop_id, secret_key)
-            headers=headers,
-            json=payload,
-            timeout=30.0,
-        )
+        with httpx.Client(base_url=YK_BASE, auth=_auth_tuple(), timeout=30.0) as client:
+            r = client.post(
+                "/payments",
+                json=payload,
+                headers={"Idempotence-Key": idem},
+            )
+            if r.status_code >= 400:
+                # напечатаем подробности, чтобы увидеть первопричину
+                try:
+                    print(f"[yk] create_payment_link HTTP {r.status_code}: {r.text}")
+                except Exception:
+                    print(f"[yk] create_payment_link HTTP {r.status_code} (no body)")
+                return None
+
+            data = r.json()
+            conf = (data or {}).get("confirmation") or {}
+            url = conf.get("confirmation_url")
+            if not url:
+                print(f"[yk] no confirmation_url in response: {data}")
+                return None
+            return url
     except Exception as e:
-        # Сетевые/SSL/таймауты — увидим в логах
-        raise RuntimeError(f"YooKassa request failed: {type(e).__name__}: {e}") from e
-
-    # Не используем .raise_for_status(), чтобы включить тело ответа в ошибку
-    if r.status_code // 100 != 2:
-        body_preview = r.text[:800]  # чтобы не зафлудить логи
-        raise RuntimeError(f"YooKassa HTTP {r.status_code}: {body_preview}")
-
-    data = r.json()
-    url = (data.get("confirmation") or {}).get("confirmation_url")
-    if not url:
-        raise RuntimeError(f"YooKassa: confirmation_url not found in response: {data}")
-
-    return url
+        # чтобы не «прятать» ошибку
+        print(f"[yk] create_payment_link exception: {e}")
+        return None
 
 # ======================================================================
 # АСИНХРОННЫЕ функции: создавать платеж и списывать сохранённый метод
