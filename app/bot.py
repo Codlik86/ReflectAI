@@ -410,13 +410,19 @@ async def cb_trial_start(call: CallbackQuery):
         started, expires = await start_trial_for_user(session, u.id)
         await session.commit()
 
-    # UI после активации триала — без каких-либо кнопок
-    await call.message.edit_text(
-    f"Пробный период активирован ✅\n"
-    f"Доступ открыт до {expires.astimezone().strftime('%d.%m.%Y %H:%M')}\n\n"
-    f"Выбери «Поговорить», «Разобраться» или «Медитации».",
-    reply_markup=None,  # убираем inline-кнопки (в т.ч. «Открыть меню»)
-)
+    # уберём у предыдущего сообщения инлайн-кнопки (если были)
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # отправляем новое сообщение С ПРАВОЙ КЛАВИАТУРОЙ
+    await call.message.answer(
+        f"Пробный период активирован ✅\n"
+        f"Доступ открыт до {expires.astimezone().strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"Готов продолжать: выбрать «Поговорить», «Разобраться» или «Медитации».",
+        reply_markup=kb_main_menu(),
+    )
     await call.answer()
 
 @router.callback_query(lambda c: c.data == "pay:open")
@@ -602,6 +608,7 @@ async def on_onb_agree(cb: CallbackQuery):
     """
     tg_id = cb.from_user.id
     uid = await _ensure_user_id(tg_id)
+
     try:
         async with async_session() as s:
             await s.execute(
@@ -611,20 +618,21 @@ async def on_onb_agree(cb: CallbackQuery):
             await s.commit()
     except Exception:
         pass
+
     try:
         await cb.answer("Спасибо! Принял ✅", show_alert=False)
     except Exception:
         pass
 
-    # Скрыть правое меню и показать CTA (только inline-кнопки)
+    # скрыть правую клавиатуру
     try:
-        # невидимый символ, чтобы Telegram принял ReplyKeyboardRemove
-        await cb.message.answer("\u2063", reply_markup=ReplyKeyboardRemove())
+        await cb.message.answer("\u2063", reply_markup=ReplyKeyboardRemove())  # невидимый символ
     except Exception:
         pass
 
+    # показать CTA: триал/тарифы (inline)
     await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=_kb_paywall(True))
-    return  # ничего дальше не шлём (чтобы не всплывали подсказки/меню)
+    return
 
 # ===== Меню/навигация =====
 @router.message(F.text == "🌿 Разобраться")
