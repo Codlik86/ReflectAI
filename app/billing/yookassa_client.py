@@ -1,11 +1,12 @@
 # app/billing/yookassa_client.py
 from __future__ import annotations
 
-import os
+import os, decimal
 import uuid
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict, Any
 
 import httpx
+import aiohttp
 
 # Режимы работы:
 # - Если есть YK_SHOP_ID и YK_API_KEY — шлём реальные запросы в YooKassa
@@ -28,12 +29,6 @@ def _auth():
 def _amount_str(amount_rub: int) -> str:
     # Целые рубли -> "1190.00"
     return f"{amount_rub:.2f}"
-
-# app/billing/yookassa_client.py
-from __future__ import annotations
-import os, decimal
-from typing import Optional, Dict, Any
-import aiohttp
 
 YK_API = "https://api.yookassa.ru/v3"
 
