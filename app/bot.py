@@ -278,7 +278,7 @@ async def cb_sub_cancel_back(call: CallbackQuery):
     # показываем экран /pay с кнопками «Отменить подписку / отключить автопродление»
     await on_pay(call.message)
     await call.answer()
-    
+
 # ===== Универсальный safe_edit (не роняет UX) =====
 async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
     try:
@@ -989,7 +989,7 @@ async def on_settings(m: Message):
 
 @router.callback_query(F.data == "menu:main")
 async def on_menu_main(cb: CallbackQuery):
-    await cb.message.answer("Меню:", reply_markup=kb_main_menu()); await cb.answer()
+    await cb.message.answer("\u2063", reply_markup=kb_main_menu()); await cb.answer()
 
 @router.callback_query(F.data == "menu:settings")
 async def on_menu_settings(cb: CallbackQuery):
