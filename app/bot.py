@@ -683,10 +683,9 @@ async def on_onb_agree(cb: CallbackQuery):
 
     try:
         async with async_session() as s:
-            access_ok = await check_access(s, uid)
-            trial_ok = await is_trial_active(s, uid)
+            access_ok = await check_access(s, uid)     # триал ИЛИ подписка активны?
+            trial_ok  = await is_trial_active(s, uid)  # именно активный триал?
 
-            # --- ВАЖНО: разнести ветки ---
             if access_ok and not trial_ok:
                 # платная подписка активна -> «С чего начнём?» + правая клавиатура
                 text_out = WHAT_NEXT_TEXT
@@ -696,15 +695,26 @@ async def on_onb_agree(cb: CallbackQuery):
                 text_out = WHAT_NEXT_TEXT
                 kb = _kb_paywall(False)
             else:
-                # доступа нет -> выбираем до-/пост-триальный пейвол
-                r = await s.execute(text("SELECT trial_started_at FROM users WHERE id = :uid"), {"uid": uid})
-                trial_started = r.scalar() is not None
-                if trial_started:
-                    text_out = PAYWALL_POST_TEXT
-                    kb = _kb_paywall(False)
-                else:
+                # доступа нет: различаем стартовый и пост-пейвол по «был ли триал или платная подписка»
+                r1 = await s.execute(text("SELECT trial_started_at FROM users WHERE id = :uid"), {"uid": uid})
+                trial_started = r1.scalar() is not None
+
+                r2 = await s.execute(text("""
+                    SELECT 1
+                    FROM subscriptions
+                    WHERE user_id = :uid
+                    LIMIT 1
+                """), {"uid": uid})
+                had_paid = r2.first() is not None
+
+                if (not trial_started) and (not had_paid):
+                    # совсем «чистый» пользователь: стартовый пейвол (кнопка триала)
                     text_out = WHAT_NEXT_TEXT
                     kb = _kb_paywall(True)
+                else:
+                    # триал был ИЛИ платная подписка когда-то была -> короткий пост-пейвол
+                    text_out = PAYWALL_POST_TEXT
+                    kb = _kb_paywall(False)
     except Exception:
         pass
 
@@ -1390,24 +1400,41 @@ async def _gate_send_policy(event: AllowedEvent) -> None:
 async def _gate_send_trial_cta(event: Union[Message, CallbackQuery]) -> None:
     """
     Пейвол в «закрытых» местах:
-    - если триала ещё не было — стартовый (с кнопкой «Начать пробный…»)
-    - если триал уже был — пост-триал (без кнопки пробного)
+    - если триала ещё не было И не было платной подписки — стартовый (кнопка «Начать пробный…»)
+    - иначе (триал уже был ИЛИ платная подписка уже была, но истекла/отключена) — пост-триальный короткий пейвол (только «Оформить подписку»)
     """
     from sqlalchemy import text
     from app.db.core import async_session
 
+    tg_id = getattr(getattr(event, "from_user", None), "id", None)
     show_trial = False
     try:
-        tg_id = getattr(getattr(event, "from_user", None), "id", None)
-        if tg_id:
-            async with async_session() as s:
-                r = await s.execute(
+        async with async_session() as s:
+            # был ли когда-либо триал
+            trial_started = False
+            if tg_id:
+                r1 = await s.execute(
                     text("SELECT trial_started_at FROM users WHERE tg_id = :tg"),
                     {"tg": int(tg_id)},
                 )
-                show_trial = (r.scalar() is None)
+                trial_started = r1.scalar() is not None
+
+            # была ли когда-либо платная подписка (любая запись в subscriptions)
+            had_paid = False
+            if tg_id:
+                r2 = await s.execute(text("""
+                    SELECT 1
+                    FROM subscriptions AS s
+                    JOIN users u ON u.id = s.user_id
+                    WHERE u.tg_id = :tg
+                    LIMIT 1
+                """), {"tg": int(tg_id)})
+                had_paid = r2.first() is not None
+
+            # показываем кнопку триала только если не было НИ триала, НИ платной подписки
+            show_trial = (not trial_started) and (not had_paid)
     except Exception:
-        show_trial = False
+        show_trial = False  # безопасно: короткий пост-пейвол
 
     text_out = WHAT_NEXT_TEXT if show_trial else PAYWALL_POST_TEXT
     kb = _kb_paywall(show_trial)
