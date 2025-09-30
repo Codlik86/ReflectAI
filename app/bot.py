@@ -195,10 +195,10 @@ async def _get_user_by_tg(session, tg_id: int):
     return q.scalar_one_or_none()
 
 def _kb_paywall(show_trial: bool) -> InlineKeyboardMarkup:
-    rows = []
+    rows: list[list[InlineKeyboardButton]] = []
     if show_trial:
-        rows.append([InlineKeyboardButton(text="Начать пробный период ⭐️", callback_data="trial:start")])
-    rows.append([InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:open")])
+        rows.append([InlineKeyboardButton(text="Начать пробный период ⭐", callback_data="trial:start")])
+    rows.append([InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def _enforce_access_or_paywall(msg_or_call, session, user_id: int) -> bool:
@@ -389,15 +389,20 @@ async def kb_privacy_for(chat_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
-# ===== Триал: реальная активация в БД =========================================
+# ===== 5) Триал: реальная активация в БД =====================================
 @router.callback_query(lambda c: c.data == "trial:start")
 async def cb_trial_start(call: CallbackQuery):
+    """
+    Стартуем триал пользователю. Если уже активен — сообщаем.
+    После успешного старта — удаляем CTA и шлём сообщение с ПРАВОЙ клавиатурой.
+    """
     tg_id = call.from_user.id
 
     async for session in get_session():
         from app.db.models import User
         q = await session.execute(select(User).where(User.tg_id == tg_id))
         u = q.scalar_one_or_none()
+
         if not u:
             await call.answer("Нажми /start, чтобы завершить онбординг.", show_alert=True)
             return
@@ -416,16 +421,16 @@ async def cb_trial_start(call: CallbackQuery):
     except Exception:
         pass
 
-    # 2) шлём новое сообщение УЖЕ с правой клавиатурой (главное меню)
+    # 2) шлём новое сообщение с ПРАВОЙ клавиатурой (главное меню)
     text = (
         f"Пробный период активирован ✅\n"
         f"Доступ открыт до {expires.astimezone().strftime('%d.%m.%Y %H:%M')}\n\n"
         f"Готов продолжать: выбрать «Поговорить», «Разобраться» или «Медитации»."
     )
     try:
-        await call.message.answer(text, reply_markup=kb_main_menu())  # <-- правая клавиатура появляется сразу
+        await call.message.answer(text, reply_markup=kb_main_menu())
     except Exception:
-        # запасной вариант: хотя бы без клавиатуры
+        # запасной вариант — без клавиатуры
         await call.message.answer(text)
 
     await call.answer()
@@ -591,6 +596,12 @@ WHAT_NEXT_TEXT = """С чего начнём? 💛
 
 Чтобы открыть все функции, начните пробный период — 5 дней бесплатно. После — можно выбрать удобный план."""
 
+PAYWALL_POST_TEXT = (
+    "Доступ к разделам открыт по подписке.\n"
+    "Ваш пробный период уже закончился. Выберите удобный план — "
+    "автопродление можно отключить в любой момент в /pay."
+)
+
 def kb_onb_step3() -> ReplyKeyboardMarkup:
     # не используем на 3-м шаге: правую клавиатуру прячем до CTA
     return kb_main_menu()
@@ -635,14 +646,18 @@ async def on_onb_step2(cb: CallbackQuery):
 
     await cb.message.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
 
+# ===== 3) Онбординг: согласие с правилами (шаг 3) ============================
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
-    """ШАГ 3: фиксируем согласие и показываем CTA пробного периода/тарифов.
-    Никаких скрытых сообщений, никаких подсказок /start.
     """
+    Фиксируем согласие и сразу показываем корректный CTA (с учётом наличия триала).
+    Никаких пустых сообщений и подсказок /start.
+    """
+    from sqlalchemy import text
     tg_id = cb.from_user.id
     uid = await _ensure_user_id(tg_id)
 
+    # 1) сохраняем согласие
     try:
         async with async_session() as s:
             await s.execute(
@@ -658,9 +673,20 @@ async def on_onb_agree(cb: CallbackQuery):
     except Exception:
         pass
 
-    # Показываем только CTA с inline-кнопками триала/тарифов.
-    # ВАЖНО: не отправляем никаких пустых сообщений для remove-клавиатуры.
-    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=_kb_paywall(True))
+    # 2) решаем, какой пейвол показать (до/после триала)
+    show_trial = True
+    try:
+        async with async_session() as s:
+            r = await s.execute(
+                text("SELECT trial_started_at FROM users WHERE id = :uid"),
+                {"uid": uid},
+            )
+            show_trial = (r.scalar() is None)
+    except Exception:
+        show_trial = True
+
+    text_out = WHAT_NEXT_TEXT if show_trial else PAYWALL_POST_TEXT
+    await cb.message.answer(text_out, reply_markup=_kb_paywall(show_trial))
 
 # ===== Меню/навигация =====
 @router.message(F.text == "🌿 Разобраться")
@@ -1332,17 +1358,37 @@ async def _gate_send_policy(event: Union[Message, CallbackQuery]) -> None:
     text = "Прежде чем мы познакомимся, подтвердим правила и политику. Это нужно, чтобы нам обоим было спокойно и безопасно."
     await (event.message if isinstance(event, CallbackQuery) else event).answer(text, reply_markup=kb)
 
+# ===== 4) Показ CTA: до-триальный vs пост-триальный ==========================
 async def _gate_send_trial_cta(event: Union[Message, CallbackQuery]) -> None:
-    """Показываем CTA триала/тарифов заново."""
+    """
+    Показываем пейвол:
+      - если триала ещё НЕ было -> стартовый (с кнопкой «Начать пробный период»)
+      - если триал уже был     -> пост-триальный (без кнопки триала)
+    Никаких подсказок /start, никаких скрытых сообщений.
+    """
+    from sqlalchemy import text
+    from app.db.core import async_session
+
+    show_trial = False
     try:
-        # используем твои константы, если они есть
-        from app.bot import WHAT_NEXT_TEXT, _kb_paywall  # type: ignore
-        text = WHAT_NEXT_TEXT
-        kb = _kb_paywall(True)
+        tg_id = getattr(getattr(event, "from_user", None), "id", None)
+        if tg_id:
+            async with async_session() as s:
+                r = await s.execute(
+                    text("SELECT trial_started_at FROM users WHERE tg_id = :tg"),
+                    {"tg": int(tg_id)},
+                )
+                # если NULL — триал ещё не запускался
+                show_trial = (r.scalar() is None)
     except Exception:
-        text = "Доступ к разделам открыт по подписке.\nМожно начать 5-дневный пробный период бесплатно, затем — по выбранному плану."
-        kb = None
-    await (event.message if isinstance(event, CallbackQuery) else event).answer(text, reply_markup=kb)
+        # на ошибках — безопасно показываем «стартовый» вариант (хуже не станет)
+        show_trial = True
+
+    text_out = WHAT_NEXT_TEXT if show_trial else PAYWALL_POST_TEXT
+    kb = _kb_paywall(show_trial)
+
+    target = event.message if isinstance(event, CallbackQuery) else event
+    await target.answer(text_out, reply_markup=kb)
 
 class GateMiddleware(BaseMiddleware):
     """
