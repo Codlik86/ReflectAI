@@ -432,11 +432,34 @@ async def cb_trial_start(call: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "pay:open")
 async def cb_pay_open(call: CallbackQuery):
-    await on_pay(call.message)   # переиспользуем твой хэндлер /pay
+    """Открыть список планов (работает и из онбординга)."""
+    # гарантируем наличие пользователя в БД, чтобы дальше не падать в /start
+    try:
+        await _ensure_user_id(call.from_user.id)
+    except Exception:
+        # не блокируем поток — просто продолжаем
+        pass
+
+    await call.message.answer(
+        "Подписка «Помни»\n"
+        "• Все функции без ограничений\n"
+        "• 5 дней бесплатно, далее по тарифу\n\n"
+        "⚠️ <i>Важно: подписка с автопродлением. Его можно отключить в любой момент в /pay.</i>\n\n"
+        "<b>Выбери план:</b>",
+        reply_markup=_kb_pay_plans(),
+        parse_mode="HTML",
+    )
     await call.answer()
 
 @router.callback_query(lambda c: c.data == "pay:plans")
 async def cb_pay_plans(call: CallbackQuery):
+    """Явно показать планы (дубликат для любых мест, в т.ч. онбординг)."""
+    # тоже страхуемся: создадим/найдём пользователя в БД
+    try:
+        await _ensure_user_id(call.from_user.id)
+    except Exception:
+        pass
+
     await call.message.answer(
         "Подписка «Помни»\n"
         "• Все функции без ограничений\n"
