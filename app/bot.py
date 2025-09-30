@@ -611,16 +611,28 @@ async def on_start(m: Message):
 
 @router.callback_query(F.data == "onb:step2")
 async def on_onb_step2(cb: CallbackQuery):
-    """ШАГ 2: согласие с правилами/политикой. Тоже убираем правую клавиатуру."""
+    """ШАГ 2: экран правил/политики.
+    Прячем правую клавиатуру только если политика ещё не принята — без «пустых» пузырей для тех, кто уже всё проходил.
+    """
     try:
         await cb.answer()
     except Exception:
         pass
+
+    # проверим флаги пользователя (функция уже есть в файле)
     try:
-        # скрываем правую клавиатуру отдельным сообщением
-        await cb.message.answer("\u2063", reply_markup=ReplyKeyboardRemove())
+        policy_ok, _ = await _gate_user_flags(int(cb.from_user.id))
     except Exception:
-        pass
+        policy_ok = False  # на всякий случай
+
+    # Только для тех, кто ещё НЕ принял политику — убираем правую клавиатуру
+    if not policy_ok:
+        try:
+            # ничего не печатаем пользователю, просто убираем клавиатуру
+            await cb.message.answer("\u2063", reply_markup=ReplyKeyboardRemove())
+        except Exception:
+            pass
+
     await cb.message.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
 
 @router.callback_query(F.data == "onb:agree")
