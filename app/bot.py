@@ -651,7 +651,8 @@ async def on_onb_step2(cb: CallbackQuery):
 async def on_onb_agree(cb: CallbackQuery):
     """
     ШАГ 3: фиксируем согласие и показываем корректный CTA:
-    - если доступ уже открыт (активный триал/подписка) — «С чего начнём?» + главное меню;
+    - если доступ уже открыт (активный триал/подписка) — «С чего начнём?» + главное меню (для платной);
+      а для активного триала — «С чего начнём?» + КНОПКА «Оформить подписку»
     - если доступа нет и триал не запускался — стартовый пейвол (с кнопкой триала);
     - если доступа нет и триал уже был — послетриальный пейвол (без кнопки триала).
     """
@@ -685,19 +686,23 @@ async def on_onb_agree(cb: CallbackQuery):
             access_ok = await check_access(s, uid)
             trial_ok = await is_trial_active(s, uid)
 
-            if access_ok or trial_ok:
-                # доступ уже открыт -> показываем «С чего начнём?» и правую клавиатуру
+            # --- ВАЖНО: разнести ветки ---
+            if access_ok and not trial_ok:
+                # платная подписка активна -> «С чего начнём?» + правая клавиатура
                 text_out = WHAT_NEXT_TEXT
                 kb = kb_main_menu()
+            elif trial_ok:
+                # активен триал -> «С чего начнём?» + ТОЛЬКО «Оформить подписку»
+                text_out = WHAT_NEXT_TEXT
+                kb = _kb_paywall(False)
             else:
+                # доступа нет -> выбираем до-/пост-триальный пейвол
                 r = await s.execute(text("SELECT trial_started_at FROM users WHERE id = :uid"), {"uid": uid})
                 trial_started = r.scalar() is not None
                 if trial_started:
-                    # триал уже был -> пост-триальный пейвол (без кнопки триала)
                     text_out = PAYWALL_POST_TEXT
                     kb = _kb_paywall(False)
                 else:
-                    # триала не было -> стартовый пейвол (с кнопкой триала)
                     text_out = WHAT_NEXT_TEXT
                     kb = _kb_paywall(True)
     except Exception:
