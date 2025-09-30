@@ -1324,12 +1324,13 @@ async def on_pick_plan(cb: CallbackQuery):
     )
     await cb.answer()
 
-# ===== Gate middleware: блокируем команды до согласия и до старта триала/оплаты =====
-
-# локальные импорты, чтобы не ломать верх файла
+# ===== Gate middleware: единственная версия и однократный mount =====
 from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery
 from typing import Callable, Awaitable, Any, Dict, Tuple, Union
+
+AllowedEvent = Union[Message, CallbackQuery]
+ALLOWED_CB_PREFIXES = ("trial:", "pay:", "plan:", "tariff:", "yk:")
 
 async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool]:
     """
@@ -1339,7 +1340,8 @@ async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool]:
     """
     from sqlalchemy import text
     from app.db.core import async_session
-    # policy
+    from app.billing.service import check_access
+
     async with async_session() as s:
         r = await s.execute(text("SELECT id, policy_accepted_at FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
         row = r.first()
@@ -1347,71 +1349,56 @@ async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool]:
             return False, False
         uid = int(row[0])
         policy_ok = bool(row[1])
-    # access (trial/subscription)
-    from app.billing.service import check_access
+
     async with async_session() as s2:
         try:
             access_ok = await check_access(s2, uid)
         except Exception:
             access_ok = False
+
     return policy_ok, access_ok
 
-async def _gate_send_policy(event: Union[Message, CallbackQuery]) -> None:
-    """
-    Экран правил (шаг 2): показываем только до принятия policy.
-    Никаких пустых сообщений и подсказок.
-    """
-    target = event.message if isinstance(event, CallbackQuery) else event
-    try:
-        await target.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
-    except Exception:
-        pass
 
-# ===== 4) Показ CTA: до-триальный vs пост-триальный ==========================
-async def _gate_send_trial_cta(event: Union[Message, CallbackQuery]) -> None:
+async def _gate_send_policy(event: AllowedEvent) -> None:
+    """Показываем экран с «Принимаю»."""
+    import os
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📄 Правила", url=os.getenv("LEGAL_POLICY_URL") or "https://example.com/policy"),
+            InlineKeyboardButton(text="🔐 Политика", url=os.getenv("LEGAL_OFFER_URL")  or "https://example.com/offer"),
+        ],
+        [InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")],
+    ])
+    text = ("Прежде чем мы познакомимся, подтвердим правила и политику. "
+            "Это нужно, чтобы нам обоим было спокойно и безопасно.")
+    target = event.message if isinstance(event, CallbackQuery) else event
+    await target.answer(text, reply_markup=kb)
+
+
+async def _gate_send_trial_cta(event: AllowedEvent) -> None:
     """
-    Показываем корректный CTA:
-    - если доступ уже открыт (активный триал или подписка) — стартовый экран «С чего начнём?»;
-    - если доступа нет и триал ещё НЕ запускался — стартовый пейвол с кнопкой «Начать триал»;
-    - если доступа нет и триал уже был — послетриальный пейвол (без кнопки триала).
+    Выводим корректный пейвол:
+    - если триала ещё не было — стартовый (с кнопкой «Начать пробный»)
+    - если триал уже был — пост-триал (без кнопки пробного)
     """
     from sqlalchemy import text
     from app.db.core import async_session
-    from app.billing.service import check_access, is_trial_active
 
-    tg_id = getattr(getattr(event, "from_user", None), "id", None)
-    text_out = WHAT_NEXT_TEXT
-    kb = _kb_paywall(True)  # по умолчанию — «до триала»
-
-    if tg_id:
-        try:
+    show_trial = False
+    try:
+        tg_id = getattr(getattr(event, "from_user", None), "id", None)
+        if tg_id:
             async with async_session() as s:
-                # доступ сейчас
-                access_ok = await check_access(s, await _ensure_user_id(int(tg_id)))
-                trial_ok = await is_trial_active(s, await _ensure_user_id(int(tg_id)))
+                r = await s.execute(text("SELECT trial_started_at FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+                show_trial = (r.scalar() is None)
+    except Exception:
+        show_trial = False
 
-                if access_ok or trial_ok:
-                    # доступ уже открыт — показываем «С чего начнём?»
-                    text_out = WHAT_NEXT_TEXT
-                    kb = _kb_paywall(True)  # можно предложить подписку; на «триал» ответ будет «уже активен»
-                else:
-                    # доступа нет — решаем, был ли триал когда-то
-                    r = await s.execute(
-                        text("SELECT trial_started_at FROM users WHERE tg_id = :tg"),
-                        {"tg": int(tg_id)},
-                    )
-                    trial_started = r.scalar() is not None
-                    if trial_started:
-                        # триал был и закончился — послетриальный пейвол
-                        text_out = PAYWALL_POST_TEXT
-                        kb = _kb_paywall(False)  # без кнопки триала
-                    else:
-                        # триала ещё не было — стартовый пейвол
-                        text_out = WHAT_NEXT_TEXT
-                        kb = _kb_paywall(True)
-        except Exception:
-            # fail-open: оставим дефолтный стартовый CTA
-            pass
+    # эти объекты уже есть в твоём файле
+    text_out = WHAT_NEXT_TEXT if show_trial else PAYWALL_POST_TEXT
+    kb = _kb_paywall(show_trial)
 
     target = event.message if isinstance(event, CallbackQuery) else event
     await target.answer(text_out, reply_markup=kb)
@@ -1419,68 +1406,59 @@ async def _gate_send_trial_cta(event: Union[Message, CallbackQuery]) -> None:
 
 class GateMiddleware(BaseMiddleware):
     """
-    Логика:
-      1) Пока не принят policy — разрешаем ТОЛЬКО /start и onb:*.
-         Всё остальное — показываем экран правил (шаг 2).
-      2) После policy, но до доступа — показываем CTA (пейвол), в т.ч. на /start.
-      3) Когда доступ открыт — пропускаем всё.
+    1) Пока не принят policy — разрешены только /start и onb:* (остальное — экран policy).
+    2) После policy, но до доступа — разрешены только /pay и trial/pay/plan/tariff/yk:* (остальное — CTA).
+    3) Когда доступ открыт — пропускаем всё.
     """
     async def __call__(
         self,
-        handler: Callable[[Union[Message, CallbackQuery], Dict[str, Any]], Awaitable[Any]],
-        event: Union[Message, CallbackQuery],
+        handler: Callable[[AllowedEvent, Dict[str, Any]], Awaitable[Any]],
+        event: AllowedEvent,
         data: Dict[str, Any]
     ) -> Any:
         try:
-            from_user = getattr(event, "from_user", None)
-            tg_id = getattr(from_user, "id", None)
+            tg_id = getattr(getattr(event, "from_user", None), "id", None)
             if not tg_id:
                 return await handler(event, data)
 
             policy_ok, access_ok = await _gate_user_flags(int(tg_id))
 
-            # --- 1) policy не принят ---
+            # 1) policy ещё не принят
             if not policy_ok:
-                # /start всегда пропускаем к онбордингу (шаг 1)
                 if isinstance(event, Message):
-                    txt = event.text or ""
-                    if txt.startswith("/start"):
+                    if (event.text or "").startswith("/start"):
                         return await handler(event, data)
-                    # любые прочие сообщения/команды — экран правил (шаг 2)
-                    await _gate_send_policy(event)
-                    return
-                else:
-                    # разрешаем только onb:* (вперёд, принять)
-                    d = (event.data or "")
-                    if d.startswith("onb:"):
+                elif isinstance(event, CallbackQuery):
+                    if (event.data or "").startswith("onb:"):
                         return await handler(event, data)
-                    await _gate_send_policy(event)
-                    return
+                await _gate_send_policy(event)
+                return
 
-            # --- 2) policy принят, но доступа нет -> пейвол (CTA), в т.ч. на /start ---
+            # 2) policy принят, но доступа нет
             if not access_ok:
-                # тут уже НЕ надо показывать онбординг — сразу CTA
+                if isinstance(event, Message):
+                    if (event.text or "").startswith("/pay"):
+                        return await handler(event, data)
+                elif isinstance(event, CallbackQuery):
+                    d = (event.data or "")
+                    if d.startswith(ALLOWED_CB_PREFIXES):
+                        return await handler(event, data)
                 await _gate_send_trial_cta(event)
                 return
 
-            # --- 3) доступ есть — пропускаем всё ---
+            # 3) доступ открыт — пропускаем всё
             return await handler(event, data)
 
         except Exception:
-            # fail-open: на ошибках пропускаем событие
+            # fail-open — не блокируем на исключениях
             return await handler(event, data)
 
-# ---- mount GateMiddleware after its definition ----
-def _mount_gate(rtr):
-    rtr.message.middleware(GateMiddleware())
-    rtr.callback_query.middleware(GateMiddleware())
 
-# подключаем мидлварь после того, как класс уже объявлен
-try:
-    _mount_gate(router)
-except Exception:
-    # fail-open: в крайнем случае просто не ставим мидлварь
-    pass
+# --- Однократный mount, чтобы не было дублей ---
+if not getattr(router, "_gate_mounted", False):
+    router.message.middleware(GateMiddleware())
+    router.callback_query.middleware(GateMiddleware())
+    router._gate_mounted = True
 
 @router.message(Command("about"))
 async def cmd_about(m: Message):
