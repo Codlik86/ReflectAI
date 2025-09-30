@@ -269,10 +269,16 @@ def _kb_confirm(action: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Да, подтвердить", callback_data=f"sub:{action}:yes"),
-            InlineKeyboardButton(text="Назад", callback_data="pay:open"),
+            InlineKeyboardButton(text="Назад", callback_data="sub:cancel_back"),
         ],
     ])
 
+@router.callback_query(lambda c: c.data == "sub:cancel_back")
+async def cb_sub_cancel_back(call: CallbackQuery):
+    # показываем экран /pay с кнопками «Отменить подписку / отключить автопродление»
+    await on_pay(call.message)
+    await call.answer()
+    
 # ===== Универсальный safe_edit (не роняет UX) =====
 async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
     try:
