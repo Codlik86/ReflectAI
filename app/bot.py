@@ -651,7 +651,7 @@ async def on_onb_step2(cb: CallbackQuery):
 async def on_onb_agree(cb: CallbackQuery):
     """
     ШАГ 3: фиксируем согласие и показываем корректный CTA:
-    - если доступ уже открыт (активный триал/подписка) — «С чего начнём?»;
+    - если доступ уже открыт (активный триал/подписка) — «С чего начнём?» + главное меню;
     - если доступа нет и триал не запускался — стартовый пейвол (с кнопкой триала);
     - если доступа нет и триал уже был — послетриальный пейвол (без кнопки триала).
     """
@@ -668,6 +668,7 @@ async def on_onb_agree(cb: CallbackQuery):
             await s.commit()
     except Exception:
         pass
+
     try:
         await cb.answer("Спасибо! Принял ✅", show_alert=False)
     except Exception:
@@ -675,6 +676,7 @@ async def on_onb_agree(cb: CallbackQuery):
 
     # выбираем правильный экран
     from app.billing.service import check_access, is_trial_active
+
     text_out = WHAT_NEXT_TEXT
     kb = _kb_paywall(True)
 
@@ -684,15 +686,18 @@ async def on_onb_agree(cb: CallbackQuery):
             trial_ok = await is_trial_active(s, uid)
 
             if access_ok or trial_ok:
+                # доступ уже открыт -> показываем «С чего начнём?» и правую клавиатуру
                 text_out = WHAT_NEXT_TEXT
-                kb = _kb_paywall(True)
+                kb = kb_main_menu()
             else:
                 r = await s.execute(text("SELECT trial_started_at FROM users WHERE id = :uid"), {"uid": uid})
                 trial_started = r.scalar() is not None
                 if trial_started:
+                    # триал уже был -> пост-триальный пейвол (без кнопки триала)
                     text_out = PAYWALL_POST_TEXT
                     kb = _kb_paywall(False)
                 else:
+                    # триала не было -> стартовый пейвол (с кнопкой триала)
                     text_out = WHAT_NEXT_TEXT
                     kb = _kb_paywall(True)
     except Exception:
@@ -1377,10 +1382,10 @@ async def _gate_send_policy(event: AllowedEvent) -> None:
     await target.answer(text, reply_markup=kb)
 
 
-async def _gate_send_trial_cta(event: AllowedEvent) -> None:
+async def _gate_send_trial_cta(event: Union[Message, CallbackQuery]) -> None:
     """
-    Выводим корректный пейвол:
-    - если триала ещё не было — стартовый (с кнопкой «Начать пробный»)
+    Пейвол в «закрытых» местах:
+    - если триала ещё не было — стартовый (с кнопкой «Начать пробный…»)
     - если триал уже был — пост-триал (без кнопки пробного)
     """
     from sqlalchemy import text
@@ -1391,12 +1396,14 @@ async def _gate_send_trial_cta(event: AllowedEvent) -> None:
         tg_id = getattr(getattr(event, "from_user", None), "id", None)
         if tg_id:
             async with async_session() as s:
-                r = await s.execute(text("SELECT trial_started_at FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+                r = await s.execute(
+                    text("SELECT trial_started_at FROM users WHERE tg_id = :tg"),
+                    {"tg": int(tg_id)},
+                )
                 show_trial = (r.scalar() is None)
     except Exception:
         show_trial = False
 
-    # эти объекты уже есть в твоём файле
     text_out = WHAT_NEXT_TEXT if show_trial else PAYWALL_POST_TEXT
     kb = _kb_paywall(show_trial)
 
