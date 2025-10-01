@@ -51,6 +51,7 @@ from app.billing.yookassa_client import create_payment_link
 from app.billing.service import start_trial_for_user, check_access, is_trial_active
 from app.billing.service import disable_auto_renew, cancel_subscription_now, get_active_subscription_row
 
+from zoneinfo import ZoneInfo
 
 router = Router()
 
@@ -85,8 +86,28 @@ def _require_access_msg(_: Message) -> bool:
     """
     return False
 
-# =============================================================================
+# =============================== Московское время ===============================
+import os
+from zoneinfo import ZoneInfo
 
+BOT_TZ = os.getenv("BOT_TZ", "Europe/Moscow")
+
+def _fmt_local(dt_utc) -> str:
+    """
+    Принимает TZ-aware UTC datetime и форматирует в локальной зоне BOT_TZ.
+    На случай нераспарсенных/naive дат — делает максимально мягкое приведение.
+    """
+    try:
+        tz = ZoneInfo(BOT_TZ)
+        # если вдруг dt без tz — считаем, что это UTC
+        if getattr(dt_utc, "tzinfo", None) is None:
+            from datetime import timezone
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        return dt_utc.astimezone(tz).strftime('%d.%m.%Y %H:%M')
+    except Exception:
+        # запасной вариант — без конвертации, но хотя бы отформатируем
+        return dt_utc.strftime('%d.%m.%Y %H:%M')
+    
 # --- async DB helpers (privacy, users, history) -----------------
 async def _ensure_user_id(tg_id: int) -> int:
     """Вернёт users.id по tg_id, создаст пользователя при отсутствии."""
@@ -232,13 +253,22 @@ async def _access_status_text(session, user_id: int) -> str | None:
     # триал?
     if await is_trial_active(session, user_id):
         until = getattr(u, "trial_expires_at", None)
-        tail = f" до {until.astimezone().strftime('%d.%m.%Y %H:%M')}" if until else ""
+        tail = f" до {_fmt_dt(until)}" if until else ""
         return f"Пробный период активен{tail} ✅\nДоступ ко всем функциям открыт."
     return None
 
+# --- локализация времени для сообщений ---
+from zoneinfo import ZoneInfo
+import os
+
+_TZ = ZoneInfo(os.getenv("BOT_TZ", "Europe/Moscow"))
+
 def _fmt_dt(dt) -> str:
     try:
-        return dt.astimezone().strftime('%d.%m.%Y %H:%M')
+        # если пришёл naive-datetime, считаем, что это UTC
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(_TZ).strftime('%d.%m.%Y %H:%M')
     except Exception:
         return str(dt)
 
@@ -430,7 +460,7 @@ async def cb_trial_start(call: CallbackQuery):
     # 2) шлём новое сообщение с ПРАВОЙ клавиатурой (главное меню)
     text = (
         f"Пробный период активирован ✅\n"
-        f"Доступ открыт до {expires.astimezone().strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"Доступ открыт до {_fmt_local(expires)}\n\n"
         f"Готов продолжать: выбрать «Поговорить», «Разобраться» или «Медитации»."
     )
     try:
