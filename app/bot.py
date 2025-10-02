@@ -58,6 +58,71 @@ from zoneinfo import ZoneInfo
 
 router = Router()
 
+# ========== AUTO-LOGGING В БД (bot_messages) ==========
+from aiogram import BaseMiddleware
+from aiogram.types import Message, CallbackQuery
+
+async def _log_message_by_tg(tg_id: int, role: str, text_: str) -> None:
+    """
+    Лог в bot_messages c учётом users.id.
+    Режем текст до 4000 символов.
+    """
+    try:
+        # уважаем приватность: если выключена — не пишем
+        mode = (await _db_get_privacy(int(tg_id)) or "insights").lower()
+        if mode == "none":
+            return
+
+        uid = await _ensure_user_id(int(tg_id))
+        safe = (text_ or "")[:4000]
+        if not safe:
+            return
+        async with async_session() as s:
+            await s.execute(
+                text("""
+                    INSERT INTO bot_messages (user_id, role, text, created_at)
+                    VALUES (:u, :r, :t, CURRENT_TIMESTAMP)
+                """),
+                {"u": int(uid), "r": role, "t": safe},
+            )
+            await s.commit()
+    except Exception as e:
+        # не роняем обработку
+        print("[log-db] error:", repr(e))
+
+class LogIncomingMiddleware(BaseMiddleware):
+    """
+    Пишем ВСЕ входящие сообщения/колбэки в bot_messages (role='user'),
+    но только если хранение не выключено (/privacy).
+    """
+    async def __call__(self, handler, event, data):
+        try:
+            tg_id = getattr(getattr(event, "from_user", None), "id", None)
+            if tg_id:
+                if isinstance(event, Message):
+                    txt = event.text or event.caption
+                    if txt:
+                        await _log_message_by_tg(int(tg_id), "user", txt)
+                elif isinstance(event, CallbackQuery):
+                    if event.data:
+                        await _log_message_by_tg(int(tg_id), "user", f"[cb] {event.data}")
+        except Exception as e:
+            print("[log-mw] error:", repr(e))
+        return await handler(event, data)
+
+async def send_and_log(message: Message, text_: str, **kwargs):
+    """
+    Хелпер для исходящих реплик бота (role='assistant').
+    Можно использовать точечно, где важно фиксировать ответ.
+    """
+    sent = await message.answer(text_, **kwargs)
+    try:
+        await _log_message_by_tg(message.from_user.id, "assistant", text_)
+    except Exception as e:
+        print("[send-log] error:", repr(e))
+    return sent
+# =======================================================
+
 # обрабатываем ТОЛЬКО deep-link вида: /start paid_ok | paid_canceled | paid_fail
 @router.message(F.text.regexp(r"^/start\s+paid_(ok|canceled|fail)$"))
 async def on_start_payment_deeplink(m: Message):
@@ -1295,11 +1360,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     if not reply:
         reply = "Давай сузим: какой момент здесь для тебя самый болезненный? Два-три предложения."
 
-    await m.answer(reply, reply_markup=kb_main_menu())
-    try:
-        save_bot_message(chat_id, reply)
-    except Exception:
-        pass
+    await send_and_log(m, reply, reply_markup=kb_main_menu())
 
 @router.message(Command("debug_prompt"))
 async def on_debug_prompt(m: Message):
@@ -1621,6 +1682,10 @@ if not getattr(router, "_gate_mounted", False):
     router.message.middleware(GateMiddleware())
     router.callback_query.middleware(GateMiddleware())
     router._gate_mounted = True
+
+# Логирование входящих после Gate (чтобы не писать экраны-перехваты)
+router.message.middleware(LogIncomingMiddleware())
+router.callback_query.middleware(LogIncomingMiddleware())
 
 @router.message(Command("about"))
 async def cmd_about(m: Message):
