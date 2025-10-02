@@ -325,7 +325,11 @@ BANNED_PHRASES = [
     "я понимаю, как ты себя чувствуешь",
     "важно дать себе время и пространство",
     "не забывай заботиться о себе",
-    "если тебе нужно, можешь обратиться к друзьям"
+    "если тебе нужно, можешь обратиться к друзьям",
+    "как ты себя чувствуешь",         # ← добавили
+    "это может быть сложно",          # общак
+    "это нормально чувствовать",
+    "помни, что ты заслуживаешь счастья",
 ]
 
 def _has_banned_phrases(text_: str) -> bool:
@@ -1274,20 +1278,41 @@ async def on_tone_pick(cb: CallbackQuery):
 
 # ===== LLM-помощник =====
 def _style_overlay(style_key: str | None) -> str:
-    if not style_key or style_key == "default":
-        return ("Начинай с наблюдения или уточнения, без клише. "
-                "Если уместно — мини-план 2–5 пунктов или 2–4 абзаца пояснения. "
-                "Всегда 1 вопрос/вилка в конце.")
-    if style_key == "friend":
-        return ("Разговорно и по-простому. Без клише «понимаю/держись». "
-                "Можно мини-план, если человеку нужна структура. В конце — вопрос/вилка.")
-    if style_key == "therapist":
-        return ("Психологичный, но конкретный: проясняй фокус, объясняй кратко, "
-                "давай 1 небольшой шаг или мини-план. Без лекций и штампов.")
-    if style_key == "18plus":
-        return ("Можно смелее формулировки (без грубости). Конкретика, при необходимости мини-план. "
-                "Финал — вопрос/вилка.")
-    return ""
+    """
+    Возвращает оверлей к TALK_SYSTEM_PROMPT.
+    Даёт вариативность микростиля и закрепляет анти-шаблонные правила:
+    — без списков по умолчанию;
+    — один конкретный уточняющий вопрос;
+    — живой, связный текст без общих концовок.
+    """
+    base_rules = (
+        "Пиши живо и по-человечески, без клише. "
+        "Без списков/нумерации по умолчанию; если пользователь явно просит «план/что делать», можно дать до 3 кратких пунктов. "
+        "В конце — один конкретный уточняющий вопрос по детали ИЛИ мягкая вилка по теме (но не общая фраза «как ты себя чувствуешь?»). "
+        "Не повторяй слова пользователя дословно, не обнуляй тему."
+    )
+
+    microstyles = {
+        "default": (
+            "Тон спокойный и тёплый. 1–3 абзаца по 1–3 предложения. "
+            "Начинай с наблюдения/уточнения или краткого вывода; без «понимаю/это сложно»."
+        ),
+        "friend": (
+            "Разговорнее и проще, но без панибратства. Короткие, конкретные фразы, теплота без патетики. "
+            "Допускается лёгкая ирония, если уместно и безопасно."
+        ),
+        "therapist": (
+            "Психологичный, проясняющий, но без лекций. Аккуратно называй чувства/потребности как гипотезы, не факты. "
+            "Если просят практику — дай микро-шаг на 10–30 минут."
+        ),
+        "18plus": (
+            "Можно смелее формулировки (без грубости). Конкретика, минимум воды. "
+            "Финал — чёткий фокус/вилка по теме."
+        ),
+    }
+
+    text = base_rules + " " + microstyles.get(style_key or "default", microstyles["default"])
+    return text
 
 async def _answer_with_llm(m: Message, user_text: str):
     chat_id = m.chat.id
@@ -1302,15 +1327,40 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
 
-    # 2) История (старые → новые)
+    # 2) История (старые → новые) — БЕРЁМ ИЗ БД, если хранение не выключено
     history_msgs: List[dict] = []
     try:
-        recent = get_recent_messages(chat_id, limit=70)
-        for r in recent:
-            role = "assistant" if r["role"] == "bot" else "user"
-            history_msgs.append({"role": role, "content": r["text"]})
+        privacy = (await _db_get_privacy(m.chat.id) or "insights").lower()
+        if privacy != "none":
+            uid = await _ensure_user_id(m.from_user.id)
+            async with async_session() as s:
+                rows = (await s.execute(
+                    text("""
+                        SELECT role, text
+                        FROM bot_messages
+                        WHERE user_id = :uid
+                        ORDER BY id DESC
+                        LIMIT 60
+                    """),
+                    {"uid": uid},
+                )).mappings().all()
+            # переворачиваем: старые -> новые
+            rows = list(reversed(rows))
+            for r in rows:
+                role = "assistant" if r["role"] == "bot" else "user"
+                history_msgs.append({"role": role, "content": r["text"]})
+        else:
+            # приватность выключена → историю не тащим
+            history_msgs = []
     except Exception:
-        pass
+        # запасной путь — ин-мемори (если остался)
+        try:
+            recent = get_recent_messages(m.chat.id, limit=40)
+            for r in recent:
+                role = "assistant" if r["role"] == "bot" else "user"
+                history_msgs.append({"role": role, "content": r["text"]})
+        except Exception:
+            history_msgs = []
 
     # 3) RAG-контекст (опционально)
     rag_ctx = ""
@@ -1332,6 +1382,14 @@ async def _answer_with_llm(m: Message, user_text: str):
             sum_block = "— Полезные заметки из прошлых разговоров (используй по необходимости):\n" + "\n".join(lines)
     except Exception:
         sum_block = ""
+    
+    # --- Guard: списки только по запросу пользователя ---
+    allow_lists = _wants_structure(user_text)  # у тебя эта функция уже есть
+    list_guard = (
+    "По умолчанию пиши связным текстом, без списков и нумерации. "
+    + ("Если просят «что делать/план/как поступить», можно дать максимум 3 коротких пункта." if allow_lists
+       else "Сейчас списки и нумерация не нужны.")
+)
 
     # 5) Сбор финального prompt/messages
     messages = [{"role": "system", "content": sys_prompt}]
@@ -1339,6 +1397,11 @@ async def _answer_with_llm(m: Message, user_text: str):
         messages.append({"role": "system", "content": f"Фактический контекст по теме:\n{rag_ctx}"})
     if sum_block:
         messages.append({"role": "system", "content": sum_block})
+    messages += history_msgs
+    messages.append({"role": "user", "content": user_text})
+    # добавляем анти-списки
+    messages.append({"role": "system", "content": list_guard})
+
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
@@ -1349,6 +1412,9 @@ async def _answer_with_llm(m: Message, user_text: str):
 
     LLM_MAX_TOKENS = 480
 
+    # Лёгкая вариативность температуры (0.72–0.90) детерминированно от текста
+    temp_base = 0.72 + (abs(hash(user_text)) % 19) / 100.0  # 0.72–0.90
+
     def _needs_regen(text_: str) -> bool:
         return not text_ or _looks_templatey(text_) or _too_similar_to_recent(chat_id, text_)
 
@@ -1357,21 +1423,23 @@ async def _answer_with_llm(m: Message, user_text: str):
         reply = await chat_with_style(
             messages=messages,
             style_hint=None,
-            temperature=0.85,
+            temperature=temp_base,
             max_tokens=LLM_MAX_TOKENS,
         )
     except TypeError:
-        reply = await chat_with_style(messages, temperature=0.85, max_tokens=LLM_MAX_TOKENS)
+        reply = await chat_with_style(messages, temperature=temp_base, max_tokens=LLM_MAX_TOKENS)
     except Exception:
         reply = ""
 
     # Переписываем при «шаблонности»
     if _needs_regen(reply):
         fixer_system = (
-            "Перепиши ответ живее, без клише и общих слов.\n"
-            "Формат: начни с наблюдения/уточнения или короткого вывода (не с «понимаю/это сложно»), "
-            "пиши конкретно и по делу. Допускаются 2–4 коротких абзаца ИЛИ 2–5 пунктов, если это помогает. "
-            "Один мягкий вопрос/вилка в конце. Избегай фраз из чёрного списка: "
+            "Перепиши ответ живо и по-человечески, без клише и общих концовок. "
+            "Без списков/нумерации по умолчанию; если пользователь просил план/шаги — оставь не более 3 очень коротких пунктов. "
+            "Текст 1–3 абзаца по 1–3 предложения. "
+            "Начни с наблюдения/уточнения или короткого вывода (не «понимаю/это сложно»). "
+            "В конце — один конкретный уточняющий вопрос по детали из последних сообщений ИЛИ мягкая вилка по теме. "
+            "Запрещено завершать общими фразами наподобие «как ты себя чувствуешь?», «это важно/сложно», «ты заслуживаешь счастья»."
             + "; ".join(BANNED_PHRASES) + "."
         )
         refine_msgs = [
@@ -1381,11 +1449,11 @@ async def _answer_with_llm(m: Message, user_text: str):
         try:
             better = await chat_with_style(
                 messages=refine_msgs,
-                temperature=0.8,
+                temperature=min(0.92, max(0.70, temp_base + 0.06)),
                 max_tokens=LLM_MAX_TOKENS,
             )
         except TypeError:
-            better = await chat_with_style(refine_msgs, temperature=0.8, max_tokens=LLM_MAX_TOKENS)
+            better = await chat_with_style(refine_msgs, temperature=min(0.92, max(0.70, temp_base + 0.06)), max_tokens=LLM_MAX_TOKENS)
         except Exception:
             better = ""
         if better and not _needs_regen(better):
