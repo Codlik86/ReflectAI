@@ -262,50 +262,48 @@ import re
 from sqlalchemy import text as _pg
 
 _TIME_NUM = re.compile(r"(\d+)")
-def _pick_window(txt: str) -> tuple[int,int,int]:
-    """Возвращает (hours, days, weeks) из текста запроса. Если не нашли — дефолт 3 часа."""
+
+def _pick_window(txt: str) -> tuple[int, int, int, int]:
+    """
+    Возвращает (minutes, hours, days, weeks). По умолчанию 10 минут.
+    Поддерживает: 'мин', 'мину', 'час', 'дн', 'недел'.
+    """
     t = (txt or "").lower()
-    hours = days = weeks = 0
-    if "недел" in t:
-        m = _TIME_NUM.search(t)
-        weeks = int(m.group(1)) if m else 1
-    elif "дн" in t:  # день/дня/дней
-        m = _TIME_NUM.search(t)
-        days = int(m.group(1)) if m else 1
-    elif "час" in t or "ч" == t.strip() or "часа" in t or "часов" in t:
-        m = _TIME_NUM.search(t)
-        hours = int(m.group(1)) if m else 3
+    mins = hours = days = weeks = 0
+    # порядок важен: сначала минуты, потом остальное
+    if "мин" in t or "мину" in t:
+        m = _TIME_NUM.search(t); mins = int(m.group(1)) if m else 10
+    elif "час" in t:
+        m = _TIME_NUM.search(t); hours = int(m.group(1)) if m else 3
+    elif "дн" in t:
+        m = _TIME_NUM.search(t); days = int(m.group(1)) if m else 1
+    elif "недел" in t:
+        m = _TIME_NUM.search(t); weeks = int(m.group(1)) if m else 1
     else:
-        # общая формулировка "что было раньше/до этого?" — дадим короткий recall за 3 часа
-        hours = 3
-    return hours, days, weeks
+        # «о чём было раньше/только что?» — берём 10 минут
+        mins = 10
+    return mins, hours, days, weeks
 
 def _looks_like_memory_question(txt: str) -> bool:
     t = (txt or "").lower()
-    return (
-        "помнишь" in t
-        or "что мы говорили" in t
-        or "о чем мы говорили" in t
-        or "о чём мы говорили" in t
-        or "что я говорил" in t
-        or "что я писал" in t
-        or "что было раньше" in t
-        or "напомни" in t
-    )
+    keys = [
+        "помнишь", "что мы говорили", "о чем мы говорили", "о чём мы говорили",
+        "что я говорил", "что я писал", "что я спрашивал",
+        "о чем я только что", "о чём я только что",
+        "что было раньше", "напомни", "мы обсуждали", "о чем мы там говорили",
+        "мин назад", "час назад", "день назад", "неделю назад", "вчера", "сегодня"
+    ]
+    return any(k in t for k in keys)
 
 async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
-    """
-    Если это вопрос «что мы обсуждали X назад», достаём историю из БД и отвечаем сразу,
-    не гоняя LLM. Возвращает True, если ответили сами.
-    """
     if not _looks_like_memory_question(user_text):
         return False
 
     uid = await _ensure_user_id(m.from_user.id)
-    h, d, w = _pick_window(user_text)
-    # формируем интервал как строку для безопасной подстановки
-    total_hours = h + d * 24 + w * 7 * 24
-    interval_txt = f"{total_hours} hours"
+    mins, h, d, w = _pick_window(user_text)
+    total_minutes = mins + h*60 + d*24*60 + w*7*24*60
+    if total_minutes <= 0: total_minutes = 10
+    interval_txt = f"{total_minutes} minutes"
 
     async with async_session() as s:
         rows = (await s.execute(_pg("""
@@ -314,38 +312,16 @@ async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
             WHERE user_id = :uid
               AND created_at >= NOW() - (:ival::text)::interval
             ORDER BY id ASC
-            LIMIT 60
+            LIMIT 80
         """), {"uid": int(uid), "ival": interval_txt})).mappings().all()
 
     if not rows:
         await send_and_log(
             m,
-            "Пока не вижу у нас в истории свежих сообщений за указанный период. "
-            "Если подскажешь, о какой теме шла речь, продолжим оттуда.",
+            "За этот промежуток ничего не вижу в истории. Подскажи тему — подхвачу.",
             reply_markup=kb_main_menu(),
         )
         return True
-
-    # Сжимаем в «человеческий» пересказ: возьмём последние 6 реплик
-    tail = rows[-6:]
-    lines = []
-    for r in tail:
-        who = "ты" if (r["role"] or "").lower() == "user" else "я"
-        text_cut = (r["text"] or "").strip().replace("\n", " ")
-        if len(text_cut) > 160:
-            text_cut = text_cut[:157] + "…"
-        when = _fmt_dt(r["created_at"])
-        lines.append(f"{when} — {who}: {text_cut}")
-
-    header = (
-        f"Как я помню, за последние {total_hours if total_hours<48 else (total_hours//24)} "
-        f"{'час.' if total_hours<48 else 'дн.'} мы обсуждали:\n"
-    )
-    hint = "\nХочешь продолжить с того же места или уточнишь, что именно поднять?"
-
-    await send_and_log(m, header + "• " + "\n• ".join(lines) + hint, reply_markup=kb_main_menu())
-    return True
-# ---------------------------------------------------------------------------
     
 # --- DB message logger (строго 'user' | 'bot' под CHECK-constraint) ---------
 async def _db_log_user_message(tg_id: int, text_: str) -> None:
@@ -1579,10 +1555,12 @@ async def _answer_with_llm(m: Message, user_text: str):
     # --- Guard: списки только по запросу пользователя ---
     allow_lists = _wants_structure(user_text)  # у тебя эта функция уже есть
     list_guard = (
-    "По умолчанию пиши связным текстом, без списков и нумерации. "
-    + ("Если просят «что делать/план/как поступить», можно дать максимум 3 коротких пункта." if allow_lists
-       else "Сейчас списки и нумерация не нужны.")
-)
+        "По умолчанию пиши связным текстом, без списков и нумерации. "
+        + ("Если просят «что делать/план/как поступить», можно дать максимум 3 коротких пункта."
+           if allow_lists else "Сейчас списки и нумерация не нужны.")
+    )
+    # ⬇️ ключевая правка: впаиваем guard в system prompt
+    sys_prompt = sys_prompt + "\n\n" + list_guard
 
     # 5) Сбор финального prompt/messages
     messages = [{"role": "system", "content": sys_prompt}]
@@ -1597,9 +1575,8 @@ async def _answer_with_llm(m: Message, user_text: str):
     # Текущее сообщение пользователя
     messages.append({"role": "user", "content": user_text})
 
-    # Анти-списки/анти-клише гвард
-    messages.append({"role": "system", "content": list_guard})
-
+    # ❌ удалено: отдельный system с list_guard больше не добавляем
+    # messages.append({"role": "system", "content": list_guard})
 
     if chat_with_style is None:
         # резервный ответ, если адаптер не подключён
@@ -1655,7 +1632,7 @@ async def _answer_with_llm(m: Message, user_text: str):
         if better and not _needs_regen(better):
             reply = better
     
-        # --- Lead-diversity guard: не повторяем начало последних ответов бота ---
+    # --- Lead-diversity guard: не повторяем начало последних ответов бота ---
     try:
         lead = _lead_span(reply)
         recent_leads = await _recent_bot_leads(m.from_user.id, k=6)  # 3–6 последних
