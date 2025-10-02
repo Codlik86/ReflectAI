@@ -216,6 +216,41 @@ async def _purge_user_history(tg_id: int) -> int:
         r = await s.execute(text("DELETE FROM bot_messages WHERE user_id = :u"), {"u": int(uid)})
         await s.commit()
         return int(getattr(r, "rowcount", 0) or 0)
+    
+# --- DB message logger (строго 'user' | 'bot' под CHECK-constraint) ---------
+async def _db_log_user_message(tg_id: int, text_: str) -> None:
+    try:
+        uid = await _ensure_user_id(tg_id)
+        async with async_session() as s:
+            await s.execute(
+                text("""
+                    INSERT INTO bot_messages (user_id, role, text, created_at)
+                    VALUES (:uid, 'user', :txt, CURRENT_TIMESTAMP)
+                """),
+                {"uid": int(uid), "txt": (text_ or "")[:5000]},
+            )
+            await s.commit()
+    except Exception as e:
+        print("[log-db] user err:", repr(e))
+
+async def _db_log_bot_message(tg_id: int, text_: str) -> None:
+    """
+    ВАЖНО: пишем role='bot' (НЕ 'assistant'), иначе упадем в CHECK bot_messages_role_check.
+    """
+    try:
+        uid = await _ensure_user_id(tg_id)
+        async with async_session() as s:
+            await s.execute(
+                text("""
+                    INSERT INTO bot_messages (user_id, role, text, created_at)
+                    VALUES (:uid, 'bot', :txt, CURRENT_TIMESTAMP)
+                """),
+                {"uid": int(uid), "txt": (text_ or "")[:5000]},
+            )
+            await s.commit()
+    except Exception as e:
+        print("[log-db] bot err:", repr(e))
+# ---------------------------------------------------------------------------
 
 # --- Summaries helpers (fetch texts by ids, purge all for user) ---
 from sqlalchemy import text as _sql_text
@@ -1277,7 +1312,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     except Exception:
         pass
 
-    # 3) RAG-контекст (опционально, из внешних источников)
+    # 3) RAG-контекст (опционально)
     rag_ctx = ""
     if rag_search is not None:
         try:
@@ -1285,32 +1320,31 @@ async def _answer_with_llm(m: Message, user_text: str):
         except Exception:
             rag_ctx = ""
 
-    # 4) Долгая память: заметки из саммарей пользователя (daily/weekly/topic)
-    #    ищем релевантные саммари в Qdrant и подтягиваем тексты из БД
+    # 4) Долгая память: релевантные саммари пользователя
     sum_block = ""
     try:
         uid = await _ensure_user_id(m.from_user.id)  # users.id
-        hits = await search_summaries(user_id=uid, query=user_text, top_k=4)  # [{'summary_id', 'kind', ...}]
+        hits = await search_summaries(user_id=uid, query=user_text, top_k=4)
         ids = [int(h["summary_id"]) for h in hits] if hits else []
         items = await _fetch_summary_texts_by_ids(ids)
         if items:
-            # делаем компактный блок
             lines = [f"• [{it['period']}] {it['text']}" for it in items]
-            sum_block = "— Полезные заметки из прошлых разговоров (пригодится, но не обязательно):\n" + "\n".join(lines)
+            sum_block = "— Полезные заметки из прошлых разговоров (используй по необходимости):\n" + "\n".join(lines)
     except Exception:
         sum_block = ""
 
-    # 5) Сбор финальных messages
+    # 5) Сбор финального prompt/messages
     messages = [{"role": "system", "content": sys_prompt}]
     if rag_ctx:
-        messages.append({"role": "system", "content": f"Фактический контекст по теме (используй по необходимости):\n{rag_ctx}"})
+        messages.append({"role": "system", "content": f"Фактический контекст по теме:\n{rag_ctx}"})
     if sum_block:
         messages.append({"role": "system", "content": sum_block})
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
     if chat_with_style is None:
-        await m.answer("Я тебя слышу. Сейчас подключаюсь…")
+        # резервный ответ, если адаптер не подключён
+        await send_and_log(m, "Я тебя слышу. Сейчас подключаюсь…", reply_markup=kb_main_menu())
         return
 
     LLM_MAX_TOKENS = 480
@@ -1331,12 +1365,12 @@ async def _answer_with_llm(m: Message, user_text: str):
     except Exception:
         reply = ""
 
-    # Переписываем при шаблонности
+    # Переписываем при «шаблонности»
     if _needs_regen(reply):
         fixer_system = (
             "Перепиши ответ живее, без клише и общих слов.\n"
             "Формат: начни с наблюдения/уточнения или короткого вывода (не с «понимаю/это сложно»), "
-            "пиши конкретно, по делу. Допускается 2–4 коротких абзаца ИЛИ 2–5 пунктов, если это помогает. "
+            "пиши конкретно и по делу. Допускаются 2–4 коротких абзаца ИЛИ 2–5 пунктов, если это помогает. "
             "Один мягкий вопрос/вилка в конце. Избегай фраз из чёрного списка: "
             + "; ".join(BANNED_PHRASES) + "."
         )
@@ -1360,6 +1394,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     if not reply:
         reply = "Давай сузим: какой момент здесь для тебя самый болезненный? Два-три предложения."
 
+    # ВАЖНО: отправляем через send_and_log, чтобы роль в БД была 'bot'
     await send_and_log(m, reply, reply_markup=kb_main_menu())
 
 @router.message(Command("debug_prompt"))
@@ -1381,7 +1416,7 @@ async def on_text(m: Message):
     if _require_access_msg(m.message if hasattr(m, "message") else m): return
     chat_id = m.chat.id
     try:
-        save_user_message(chat_id, m.text or "")
+        await _db_log_user_message(m.from_user.id, m.text or "")
     except Exception:
         pass
 
