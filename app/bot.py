@@ -257,6 +257,96 @@ async def _purge_user_history(tg_id: int) -> int:
         await s.commit()
         return int(getattr(r, "rowcount", 0) or 0)
     
+# --- Memory Q hook: "что мы говорили X часов/дней/недель назад?" ----------
+import re
+from sqlalchemy import text as _pg
+
+_TIME_NUM = re.compile(r"(\d+)")
+def _pick_window(txt: str) -> tuple[int,int,int]:
+    """Возвращает (hours, days, weeks) из текста запроса. Если не нашли — дефолт 3 часа."""
+    t = (txt or "").lower()
+    hours = days = weeks = 0
+    if "недел" in t:
+        m = _TIME_NUM.search(t)
+        weeks = int(m.group(1)) if m else 1
+    elif "дн" in t:  # день/дня/дней
+        m = _TIME_NUM.search(t)
+        days = int(m.group(1)) if m else 1
+    elif "час" in t or "ч" == t.strip() or "часа" in t or "часов" in t:
+        m = _TIME_NUM.search(t)
+        hours = int(m.group(1)) if m else 3
+    else:
+        # общая формулировка "что было раньше/до этого?" — дадим короткий recall за 3 часа
+        hours = 3
+    return hours, days, weeks
+
+def _looks_like_memory_question(txt: str) -> bool:
+    t = (txt or "").lower()
+    return (
+        "помнишь" in t
+        or "что мы говорили" in t
+        or "о чем мы говорили" in t
+        or "о чём мы говорили" in t
+        or "что я говорил" in t
+        or "что я писал" in t
+        or "что было раньше" in t
+        or "напомни" in t
+    )
+
+async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
+    """
+    Если это вопрос «что мы обсуждали X назад», достаём историю из БД и отвечаем сразу,
+    не гоняя LLM. Возвращает True, если ответили сами.
+    """
+    if not _looks_like_memory_question(user_text):
+        return False
+
+    uid = await _ensure_user_id(m.from_user.id)
+    h, d, w = _pick_window(user_text)
+    # формируем интервал как строку для безопасной подстановки
+    total_hours = h + d * 24 + w * 7 * 24
+    interval_txt = f"{total_hours} hours"
+
+    async with async_session() as s:
+        rows = (await s.execute(_pg("""
+            SELECT role, text, created_at
+            FROM bot_messages
+            WHERE user_id = :uid
+              AND created_at >= NOW() - (:ival::text)::interval
+            ORDER BY id ASC
+            LIMIT 60
+        """), {"uid": int(uid), "ival": interval_txt})).mappings().all()
+
+    if not rows:
+        await send_and_log(
+            m,
+            "Пока не вижу у нас в истории свежих сообщений за указанный период. "
+            "Если подскажешь, о какой теме шла речь, продолжим оттуда.",
+            reply_markup=kb_main_menu(),
+        )
+        return True
+
+    # Сжимаем в «человеческий» пересказ: возьмём последние 6 реплик
+    tail = rows[-6:]
+    lines = []
+    for r in tail:
+        who = "ты" if (r["role"] or "").lower() == "user" else "я"
+        text_cut = (r["text"] or "").strip().replace("\n", " ")
+        if len(text_cut) > 160:
+            text_cut = text_cut[:157] + "…"
+        when = _fmt_dt(r["created_at"])
+        lines.append(f"{when} — {who}: {text_cut}")
+
+    header = (
+        f"Как я помню, за последние {total_hours if total_hours<48 else (total_hours//24)} "
+        f"{'час.' if total_hours<48 else 'дн.'} мы обсуждали:\n"
+    )
+    hint = "\nХочешь продолжить с того же места или уточнишь, что именно поднять?"
+
+    await send_and_log(m, header + "• " + "\n• ".join(lines) + hint, reply_markup=kb_main_menu())
+    return True
+# ---------------------------------------------------------------------------
+    
 # --- DB message logger (строго 'user' | 'bot' под CHECK-constraint) ---------
 async def _db_log_user_message(tg_id: int, text_: str) -> None:
     try:
@@ -1433,6 +1523,14 @@ async def _answer_with_llm(m: Message, user_text: str):
     chat_id = m.chat.id
     mode = CHAT_MODE.get(chat_id, "talk")
     style_key = USER_TONE.get(chat_id, "default")
+
+    # 0) Быстрый ответ на «что мы говорили X назад?» без LLM
+    try:
+        if await _maybe_answer_memory_question(m, user_text):
+            return
+    except Exception:
+        # не ломаем основной поток, даже если что-то пошло не так
+        pass
 
     # 1) System prompt
     sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
