@@ -65,7 +65,7 @@ from aiogram.types import Message, CallbackQuery
 async def _log_message_by_tg(tg_id: int, role: str, text_: str) -> None:
     """
     Лог в bot_messages c учётом users.id.
-    Режем текст до 4000 символов.
+    Режем текст до 4000 символов. Роль жёстко приводим к {'user','bot'}.
     """
     try:
         # уважаем приватность: если выключена — не пишем
@@ -77,17 +77,21 @@ async def _log_message_by_tg(tg_id: int, role: str, text_: str) -> None:
         safe = (text_ or "")[:4000]
         if not safe:
             return
+
+        # важный момент: приводим к допустимым ролям
+        r = (role or "").lower()
+        role_norm = "user" if r == "user" else "bot"
+
         async with async_session() as s:
             await s.execute(
                 text("""
                     INSERT INTO bot_messages (user_id, role, text, created_at)
                     VALUES (:u, :r, :t, CURRENT_TIMESTAMP)
                 """),
-                {"u": int(uid), "r": role, "t": safe},
+                {"u": int(uid), "r": role_norm, "t": safe},
             )
             await s.commit()
     except Exception as e:
-        # не роняем обработку
         print("[log-db] error:", repr(e))
 
 class LogIncomingMiddleware(BaseMiddleware):
@@ -110,18 +114,25 @@ class LogIncomingMiddleware(BaseMiddleware):
             print("[log-mw] error:", repr(e))
         return await handler(event, data)
 
-async def send_and_log(message: Message, text_: str, **kwargs):
+async def send_and_log(
+    message: Message,
+    text_: str,
+    **kwargs
+):
     """
-    Хелпер для исходящих реплик бота (role='assistant').
-    Можно использовать точечно, где важно фиксировать ответ.
+    Отправка ответа пользователю + запись в bot_messages как role='bot'.
     """
+    # по умолчанию выключим предпросмотр ссылок (можно переопределить в kwargs)
+    kwargs.setdefault("disable_web_page_preview", True)
+
     sent = await message.answer(text_, **kwargs)
     try:
-        await _log_message_by_tg(message.from_user.id, "assistant", text_)
+        await _log_message_by_tg(message.from_user.id, "bot", text_)
+        # или можно вызвать прямой логгер:
+        # await _db_log_bot_message(message.from_user.id, text_)
     except Exception as e:
         print("[send-log] error:", repr(e))
     return sent
-# =======================================================
 
 # обрабатываем ТОЛЬКО deep-link вида: /start paid_ok | paid_canceled | paid_fail
 @router.message(F.text.regexp(r"^/start\s+paid_(ok|canceled|fail)$"))
@@ -194,6 +205,35 @@ async def _ensure_user_id(tg_id: int) -> int:
             uid = r.scalar_one()
             await s.commit()
         return int(uid)
+    
+# --- История диалога из БД (для устойчивой памяти) ---
+from sqlalchemy import text as _t
+
+async def _load_history_from_db(tg_id: int, *, limit: int = 120, hours: int = 24*30) -> list[dict]:
+    """
+    Возвращает историю диалога пользователя за последние `hours` часов,
+    в формате messages OpenAI: [{"role":"user|assistant","content": "..."}]
+    Порядок: старые -> новые.
+    """
+    uid = await _ensure_user_id(tg_id)
+    async with async_session() as s:
+        rows = (await s.execute(
+            _t("""
+                SELECT role, text
+                FROM bot_messages
+                WHERE user_id = :uid
+                  AND created_at >= NOW() - (:hours::text || ' hours')::interval
+                ORDER BY id ASC
+                LIMIT :lim
+            """),
+            {"uid": int(uid), "hours": int(hours), "lim": int(limit)}
+        )).mappings().all()
+
+    msgs: list[dict] = []
+    for r in rows:
+        role = "assistant" if (r["role"] or "").lower() == "bot" else "user"
+        msgs.append({"role": role, "content": r["text"] or ""})
+    return msgs
 
 async def _db_get_privacy(tg_id: int) -> str:
     async with async_session() as s:
@@ -1327,35 +1367,15 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
 
-    # 2) История (старые → новые) — БЕРЁМ ИЗ БД, если хранение не выключено
+    # 2) История (старые → новые): сначала пытаемся взять из БД, fallback — оперативная memory.py
     history_msgs: List[dict] = []
     try:
-        privacy = (await _db_get_privacy(m.chat.id) or "insights").lower()
-        if privacy != "none":
-            uid = await _ensure_user_id(m.from_user.id)
-            async with async_session() as s:
-                rows = (await s.execute(
-                    text("""
-                        SELECT role, text
-                        FROM bot_messages
-                        WHERE user_id = :uid
-                        ORDER BY id DESC
-                        LIMIT 60
-                    """),
-                    {"uid": uid},
-                )).mappings().all()
-            # переворачиваем: старые -> новые
-            rows = list(reversed(rows))
-            for r in rows:
-                role = "assistant" if r["role"] == "bot" else "user"
-                history_msgs.append({"role": role, "content": r["text"]})
-        else:
-            # приватность выключена → историю не тащим
-            history_msgs = []
+        # Глубину можно подкрутить: limit=160, hours=24*90, если нужно больше
+        history_msgs = await _load_history_from_db(m.from_user.id, limit=140, hours=24*60)
     except Exception:
-        # запасной путь — ин-мемори (если остался)
+        # на всякий случай не падаем — используем in-memory как запасной вариант
         try:
-            recent = get_recent_messages(m.chat.id, limit=40)
+            recent = get_recent_messages(chat_id, limit=70)
             for r in recent:
                 role = "assistant" if r["role"] == "bot" else "user"
                 history_msgs.append({"role": role, "content": r["text"]})
@@ -1397,13 +1417,16 @@ async def _answer_with_llm(m: Message, user_text: str):
         messages.append({"role": "system", "content": f"Фактический контекст по теме:\n{rag_ctx}"})
     if sum_block:
         messages.append({"role": "system", "content": sum_block})
+
+    # История (старые -> новые)
     messages += history_msgs
+
+    # Текущее сообщение пользователя
     messages.append({"role": "user", "content": user_text})
-    # добавляем анти-списки
+
+    # Анти-списки/анти-клише гвард
     messages.append({"role": "system", "content": list_guard})
 
-    messages += history_msgs
-    messages.append({"role": "user", "content": user_text})
 
     if chat_with_style is None:
         # резервный ответ, если адаптер не подключён
