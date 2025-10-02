@@ -37,34 +37,41 @@ except Exception:
 
 # --- Embeddings
 def _get_embedder():
-    # 1) OpenAI
-    if EMBED_PROVIDER == "openai":
+    """
+    Возвращает callable embed(texts: list[str]) -> list[list[float]].
+    Предпочитаем провайдера из EMBED_PROVIDER.
+    EMBED_PROVIDER: 'openai', 'sbert' или 'openai|sbert' (по умолчанию).
+    """
+    import os
+
+    provider = (os.getenv("EMBED_PROVIDER", "openai|sbert") or "").lower()
+
+    # 1) OpenAI путь — используем, если провайдер включает 'openai' и ключ задан
+    if "openai" in provider and (os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY".lower())):
+        from .llm_adapter import embed_texts as _openai_embed  # функция, которая зовет text-embedding-3-small
+        return _openai_embed
+
+    # 2) SBERT — только если явно разрешён
+    if "sbert" in provider:
         try:
-            from openai import OpenAI  # type: ignore
-            client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL or None)
-            model = EMBED_MODEL
+            from sentence_transformers import SentenceTransformer  # type: ignore
+            model_name = os.getenv("SBERT_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+            _m = SentenceTransformer(model_name)
 
-            def _emb(texts: List[str]) -> List[List[float]]:
-                res = client.embeddings.create(model=model, input=texts)
-                return [d.embedding for d in res.data]
-
-            return _emb
+            def _sbert_embed(texts):
+                # возвращаем list[list[float]]
+                import numpy as np
+                embs = _m.encode(texts, convert_to_numpy=True, normalize_embeddings=False)
+                return embs.tolist() if isinstance(embs, np.ndarray) else [e.tolist() for e in embs]
+            return _sbert_embed
         except Exception:
+            # если не установлен — просто игнорируем и падаем в общий RuntimeError ниже
             pass
-    # 2) sentence-transformers (SBERT)
-    try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
-        m = SentenceTransformer(SBERT_MODEL)
 
-        def _emb(texts: List[str]) -> List[List[float]]:
-            return m.encode(texts, normalize_embeddings=False).tolist()
-
-        return _emb
-    except Exception:
-        raise RuntimeError(
-            "No embedding provider available. "
-            "Укажи OPENAI_API_KEY (и OPENAI_BASE_URL если прокси) или установи sentence-transformers."
-        )
+    raise RuntimeError(
+        "No embedding provider available. Укажи EMBED_PROVIDER=openai (и OPENAI_API_KEY/OPENAI_BASE_URL) "
+        "или установи sentence-transformers и EMBED_PROVIDER=sbert."
+    )
 
 _EMBED = _get_embedder()
 
