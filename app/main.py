@@ -59,6 +59,9 @@ app.include_router(admin_api.router)          # /api/admin/*
 from app.site.admin_ui import router as admin_ui_router
 app.include_router(admin_ui_router)     # /admin (HTML)
 
+from app.site.summaries_api import router as summaries_router
+app.include_router(summaries_router)
+
 # ==== Мини-лендинг для модерации YooKassa ====
 
 PROJECT_NAME = os.getenv("PROJECT_NAME", "Помни")

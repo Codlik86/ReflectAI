@@ -41,6 +41,9 @@ try:
 except Exception:
     rag_search = None
 
+# RAG summaries (долгая память)
+from app.rag_summaries import search_summaries, delete_user_summaries
+
 # БД (async)
 from sqlalchemy import text
 from app.db.core import async_session
@@ -148,7 +151,55 @@ async def _purge_user_history(tg_id: int) -> int:
         r = await s.execute(text("DELETE FROM bot_messages WHERE user_id = :u"), {"u": int(uid)})
         await s.commit()
         return int(getattr(r, "rowcount", 0) or 0)
-# ----------------------------------------------------------------
+
+# --- Summaries helpers (fetch texts by ids, purge all for user) ---
+from sqlalchemy import text as _sql_text
+
+async def _fetch_summary_texts_by_ids(ids: List[int]) -> List[dict]:
+    """Возвращает тексты саммарей в порядке ids."""
+    if not ids:
+        return []
+    async with async_session() as s:
+        rows = (await s.execute(_sql_text("""
+            SELECT id, kind, period_start, period_end, text
+            FROM dialog_summaries
+            WHERE id = ANY(:ids)
+        """), {"ids": ids})).mappings().all()
+    by_id = {r["id"]: r for r in rows}
+    out: List[dict] = []
+    for i in ids:
+        r = by_id.get(i)
+        if not r:
+            continue
+        out.append({
+            "id": r["id"],
+            "kind": r["kind"],
+            "period": f"{_fmt_dt(r['period_start'])} — {_fmt_dt(r['period_end'])}",
+            "text": r["text"],
+        })
+    return out
+
+async def _purge_user_summaries_all(tg_id: int) -> int:
+    """Удаляет ВСЕ саммари пользователя (БД + Qdrant). Возвращает кол-во удалённых записей из БД."""
+    # получаем users.id
+    async with async_session() as s:
+        r = await s.execute(_sql_text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+        uid = r.scalar()
+        if not uid:
+            return 0
+        # сначала удаляем векторы (не критично, если упадёт)
+        try:
+            await delete_user_summaries(int(uid))
+        except Exception:
+            pass
+        # затем чистим БД
+        res = await s.execute(_sql_text("DELETE FROM dialog_summaries WHERE user_id = :uid"), {"uid": int(uid)})
+        await s.commit()
+        try:
+            return int(getattr(res, "rowcount", 0) or 0)
+        except Exception:
+            return 0
+# -----------------------------------------------------------------
 
 # ===== Онбординг: ссылки и картинки =====
 POLICY_URL = os.getenv("POLICY_URL", "").strip()
@@ -1053,12 +1104,25 @@ async def on_privacy_toggle(cb: CallbackQuery):
 
 @router.callback_query(F.data == "privacy:clear")
 async def on_privacy_clear(cb: CallbackQuery):
+    # 1) чистим историю сообщений
     try:
-        count = await _purge_user_history(cb.from_user.id)
+        msg_count = await _purge_user_history(cb.from_user.id)
     except Exception:
-        await cb.answer("Не получилось очистить историю", show_alert=True); return
+        await cb.answer("Не получилось очистить историю", show_alert=True)
+        return
+
+    # 2) чистим саммари (БД + Qdrant)
+    try:
+        sum_count = await _purge_user_summaries_all(cb.from_user.id)
+    except Exception:
+        sum_count = 0  # не критично для UX
+
     await cb.answer("История удалена ✅", show_alert=True)
-    text_ = f"Готово. Что дальше?\n\nУдалено записей: {count}."
+    text_ = (
+        "Готово. Что дальше?\n\n"
+        f"Удалено записей диалога: {msg_count}.\n"
+        f"Удалено саммарей: {sum_count}."
+    )
     rm = await kb_privacy_for(cb.message.chat.id)
     await _safe_edit(cb.message, text_, reply_markup=rm)
 
@@ -1148,7 +1212,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     except Exception:
         pass
 
-    # 3) RAG-контекст (опционально)
+    # 3) RAG-контекст (опционально, из внешних источников)
     rag_ctx = ""
     if rag_search is not None:
         try:
@@ -1156,9 +1220,27 @@ async def _answer_with_llm(m: Message, user_text: str):
         except Exception:
             rag_ctx = ""
 
+    # 4) Долгая память: заметки из саммарей пользователя (daily/weekly/topic)
+    #    ищем релевантные саммари в Qdrant и подтягиваем тексты из БД
+    sum_block = ""
+    try:
+        uid = await _ensure_user_id(m.from_user.id)  # users.id
+        hits = await search_summaries(user_id=uid, query=user_text, top_k=4)  # [{'summary_id', 'kind', ...}]
+        ids = [int(h["summary_id"]) for h in hits] if hits else []
+        items = await _fetch_summary_texts_by_ids(ids)
+        if items:
+            # делаем компактный блок
+            lines = [f"• [{it['period']}] {it['text']}" for it in items]
+            sum_block = "— Полезные заметки из прошлых разговоров (пригодится, но не обязательно):\n" + "\n".join(lines)
+    except Exception:
+        sum_block = ""
+
+    # 5) Сбор финальных messages
     messages = [{"role": "system", "content": sys_prompt}]
     if rag_ctx:
         messages.append({"role": "system", "content": f"Фактический контекст по теме (используй по необходимости):\n{rag_ctx}"})
+    if sum_block:
+        messages.append({"role": "system", "content": sum_block})
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
