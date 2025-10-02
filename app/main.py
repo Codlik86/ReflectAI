@@ -3,7 +3,6 @@ import os
 import asyncio
 from contextlib import suppress
 
-# Подхватываем .env до чтения переменных
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -17,17 +16,27 @@ from aiogram.enums import ParseMode
 from aiogram.types import Update, BotCommand
 from aiogram.exceptions import TelegramRetryAfter
 
+# схемы/миграции
 from .memory_schema import (
     ensure_memory_schema_async,
     ensure_users_policy_column_async,
     ensure_users_created_at_column_async,
 )
+
+# основной бот-роутер
 from .bot import router as bot_router
 
-# --- внешние роутеры ---
-from app.legal import router as legal_router
-from app.api import payments as payments_api         # /api/payments/yookassa/webhook
-from app.api import admin as admin_api               # /api/admin/*
+# внешние/внутренние API-роутеры
+from app.legal import router as legal_router               # /requisites, /legal/*
+from app.api import payments as payments_api               # /api/payments/yookassa/webhook
+from app.api import admin as admin_api                     # /api/admin/*
+
+# админка (HTML)
+from app.site.admin_ui import router as admin_ui_router    # /admin
+
+# НОВОЕ: API для саммари и maintenance
+from app.site.summaries_api import router as summaries_router      # /api/summaries/*
+from app.maintenance import router as maintenance_router           # /api/admin/maintenance/summarize
 
 # --- ENV ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -51,16 +60,16 @@ dp.include_router(bot_router)
 
 app = FastAPI(title="ReflectAI webhook")
 
-# Регистрируем сторонние роутеры (после создания app и ПОСЛЕ импортов)
-app.include_router(legal_router)              # /, /requisites, /legal/*
-app.include_router(payments_api.router)       # /api/payments/yookassa/webhook
-app.include_router(admin_api.router)          # /api/admin/*
+# --------- Роутеры FastAPI ----------
+app.include_router(legal_router)                        # /requisites, /legal/*
+app.include_router(payments_api.router, prefix="")      # /api/payments/yookassa/webhook
+app.include_router(admin_api.router,    prefix="")      # /api/admin/*
+app.include_router(admin_ui_router)                     # /admin (HTML)
 
-from app.site.admin_ui import router as admin_ui_router
-app.include_router(admin_ui_router)     # /admin (HTML)
-
-from app.site.summaries_api import router as summaries_router
-app.include_router(summaries_router)
+# НОВОЕ: подключаем API для саммари и maintenance
+app.include_router(summaries_router,       prefix="/api")                    # /api/summaries/*
+app.include_router(maintenance_router,     prefix="/api/admin/maintenance")  # /api/admin/maintenance/summarize
+# -------------------------------------
 
 # ==== Мини-лендинг для модерации YooKassa ====
 
@@ -69,8 +78,8 @@ PUBLIC_BOT_URL = os.getenv("PUBLIC_BOT_URL", "https://t.me/reflectttaibot")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "selflect@proton.me")
 LEGAL_OFFER_URL = os.getenv("LEGAL_OFFER_URL", "")
 LEGAL_POLICY_URL = os.getenv("LEGAL_POLICY_URL", "")
-INN_SELFEMP = os.getenv("INN_SELFEMP", "")          # ИНН самозанятого
-OWNER_FULL_NAME = os.getenv("OWNER_FULL_NAME", "")  # ФИО самозанятого
+INN_SELFEMP = os.getenv("INN_SELFEMP", "")
+OWNER_FULL_NAME = os.getenv("OWNER_FULL_NAME", "")
 
 def _page(title: str, body: str) -> str:
     return f"""<!doctype html><meta charset="utf-8">
@@ -170,12 +179,10 @@ async def health_head():
 
 @app.on_event("startup")
 async def on_startup():
-    # Доп. проверки старых таблиц (async)
     await ensure_memory_schema_async()
     await ensure_users_policy_column_async()
     await ensure_users_created_at_column_async()
 
-    # Вебхук
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         ok = await bot.set_webhook(
@@ -187,7 +194,6 @@ async def on_startup():
     except Exception as e:
         print("[startup] set_webhook ERROR:", repr(e))
 
-    # Команды
     try:
         await bot.set_my_commands([
             BotCommand(command="start",        description="▶️ Старт"),
@@ -204,7 +210,6 @@ async def on_startup():
     except Exception as e:
         print("[startup] set_my_commands ERROR:", repr(e))
 
-    # Watchdog
     if not getattr(app.state, "webhook_watchdog", None):
         app.state.webhook_watchdog = asyncio.create_task(_webhook_watchdog())
         print("[startup] webhook watchdog started")
@@ -219,7 +224,6 @@ async def on_shutdown():
         except asyncio.CancelledError:
             pass
 
-# === сам вебхук (безопасный) ===
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(
     request: Request,
