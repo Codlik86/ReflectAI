@@ -394,6 +394,80 @@ def _too_similar_to_recent(chat_id: int, candidate: str, *, lookback: int = 8, t
 def _looks_templatey(text_: str) -> bool:
     return _has_banned_phrases(text_)
 
+# --- Анти-однообразные начала (lead) ---------------------------------
+
+BAD_LEAD_PATTERNS = (
+    "понимаю", "к сожалению", "это сложн", "важно", "попробуй", "помни",
+    "давай", "знаешь", "мне жаль", "знаю, что", "иногда", "часто", "бывает",
+)
+
+import re
+from difflib import SequenceMatcher
+
+def _lead_span(text: str, *, max_chars: int = 80) -> str:
+    """Первая фраза/предложение ответа, нормализованное для сравнения."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    # берем первое предложение или первую строку
+    m = re.match(r"^(.+?[.!?…])", t)
+    span = m.group(1) if m else t.split("\n", 1)[0]
+    return span[:max_chars].lower()
+
+def _is_bad_lead(lead: str) -> bool:
+    """Одно слово/междометие/клишированное начало."""
+    if not lead:
+        return True
+    first_word = lead.split()[0]
+    if len(first_word) <= 2:  # «мм», «эх», односложности
+        return True
+    return any(lead.startswith(p) for p in BAD_LEAD_PATTERNS)
+
+def _lead_too_similar(a: str, b: str, thr: float = 0.72) -> bool:
+    """Похожи ли два начала (по смыслу/форме)."""
+    if not a or not b:
+        return False
+    # быстрые проверки префикса
+    if a.startswith(b[:10]) or b.startswith(a[:10]):
+        return True
+    # мягкая метрика похожести
+    return SequenceMatcher(None, a, b).ratio() >= thr
+
+async def _recent_bot_leads(tg_id: int, k: int = 6) -> list[str]:
+    """Последние k начальных фраз бота из БД для этого пользователя."""
+    uid = await _ensure_user_id(tg_id)
+    async with async_session() as s:
+        rows = (await s.execute(_t("""
+            SELECT text
+            FROM bot_messages
+            WHERE user_id = :uid AND role = 'bot'
+            ORDER BY id DESC
+            LIMIT :lim
+        """), {"uid": int(uid), "lim": int(k)})).scalars().all()
+    return [_lead_span(r) for r in rows if r]
+
+async def _rewrite_lead_unique(draft: str, ban_starts: list[str], style_key: str) -> str:
+    """Переписывает только 1–2 первых предложения, избегая перечисленных начал."""
+    ban_txt = "; ".join(sorted(set(ban_starts)))[:220]
+    sys = (
+        "Перепиши только первые 1–2 предложения, чтобы начало звучало свежо, по-человечески и без клише. "
+        f"Нельзя начинать фразами: {ban_txt}. "
+        "Остальную часть ответа оставь как есть. Не добавляй списки. "
+        "Вопрос в конце не меняй, если он уместен."
+    )
+    # чуть подкрепим микростилем
+    sys += "\n\n" + (_style_overlay(style_key) or "")
+    msgs = [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": (draft or "")[:1000]},
+    ]
+    try:
+        return await chat_with_style(messages=msgs, temperature=0.82, max_tokens=420)
+    except TypeError:
+        return await chat_with_style(msgs, temperature=0.82, max_tokens=420)
+    except Exception:
+        return ""
+
 # --- «дневничковая» длина: когда можно расписать подробнее
 STRUCTURE_KEYWORDS = [
     "что делать", "как поступить", "план", "шаги", "структур",
@@ -1330,6 +1404,7 @@ def _style_overlay(style_key: str | None) -> str:
         "Без списков/нумерации по умолчанию; если пользователь явно просит «план/что делать», можно дать до 3 кратких пунктов. "
         "В конце — один конкретный уточняющий вопрос по детали ИЛИ мягкая вилка по теме (но не общая фраза «как ты себя чувствуешь?»). "
         "Не повторяй слова пользователя дословно, не обнуляй тему."
+        "Не начинай ответ с одиночного слова или клишированной формулы (“Понимаю,” “Важно,” “Это сложная тема,” “Измена — …”). Начинай с конкретного наблюдения, уточнения по последним словам пользователя или короткого вывода по сути."
     )
 
     microstyles = {
@@ -1481,7 +1556,26 @@ async def _answer_with_llm(m: Message, user_text: str):
             better = ""
         if better and not _needs_regen(better):
             reply = better
+    
+        # --- Lead-diversity guard: не повторяем начало последних ответов бота ---
+    try:
+        lead = _lead_span(reply)
+        recent_leads = await _recent_bot_leads(m.from_user.id, k=6)  # 3–6 последних
+        dup_within_two = any(_lead_too_similar(lead, r) for r in recent_leads[:2])  # «точно не такой же следующий и через один»
+        dup_recent      = any(_lead_too_similar(lead, r) for r in recent_leads[:5])
 
+        if _is_bad_lead(lead) or dup_within_two or dup_recent:
+            # собираем стоп-начала: фиксированные + динамика из последних реплик
+            dynamic_bans = [r.split()[0] for r in recent_leads if r]
+            ban_starts = list(BAD_LEAD_PATTERNS) + dynamic_bans
+            alt = await _rewrite_lead_unique(reply, ban_starts, style_key)
+            alt_lead = _lead_span(alt)
+            # принимаем альтернативу, если она не клише и не повтор
+            if alt and not _is_bad_lead(alt_lead) and not any(_lead_too_similar(alt_lead, r) for r in recent_leads[:5]):
+                reply = alt
+    except Exception:
+        pass
+    
     if not reply:
         reply = "Давай сузим: какой момент здесь для тебя самый болезненный? Два-три предложения."
 
