@@ -56,6 +56,7 @@ WATCHDOG_INTERVAL_SEC = int(os.getenv("WEBHOOK_WATCHDOG_SEC", "60"))
 # aiogram 3.x
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+from app.mw_log_messages import LogUserMessagesMiddleware
 dp.include_router(bot_router)
 
 app = FastAPI(title="ReflectAI webhook")

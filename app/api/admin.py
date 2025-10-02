@@ -734,3 +734,16 @@ async def admin_set_until_in(
         "minutes": body.minutes,
         "subscription_until": new_until,
     }
+
+# --- DEBUG: какие подключены база/хост и сколько записей в bot_messages
+@router.get("/diag/db")
+async def diag_db():
+    from sqlalchemy import text as sql
+    from app.db.core import async_session
+    async with async_session() as s:
+        dbname = (await s.execute(sql("select current_database()"))).scalar_one()
+        now    = (await s.execute(sql("select now() at time zone 'UTC'"))).scalar_one()
+        cnt    = (await s.execute(sql("select count(*) from bot_messages"))).scalar_one()
+        users  = (await s.execute(sql("select count(*) from users"))).scalar_one()
+    return {"db": dbname, "utc_now": str(now), "bot_messages": cnt, "users": users}
+
