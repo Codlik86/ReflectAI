@@ -36,7 +36,6 @@ from app.site.admin_ui import router as admin_ui_router    # /admin
 
 # НОВОЕ: API для саммари и maintenance
 from app.site.summaries_api import router as summaries_router      # /api/summaries/*
-from app.maintenance import router as maintenance_router           # /api/admin/maintenance/summarize
 
 # --- ENV ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -69,8 +68,6 @@ app.include_router(admin_ui_router)                     # /admin (HTML)
 
 # НОВОЕ: подключаем API для саммари и maintenance
 app.include_router(summaries_router,       prefix="/api")                    # /api/summaries/*
-app.include_router(maintenance_router,     prefix="/api/admin/maintenance")  # /api/admin/maintenance/summarize
-# -------------------------------------
 
 # ==== Мини-лендинг для модерации YooKassa ====
 
