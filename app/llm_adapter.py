@@ -222,3 +222,32 @@ async def chat_with_style(
     if user:
         msgs.append({"role": "user", "content": user})
     return await chat(messages=msgs, temperature=temperature, **kwargs)
+
+# --- Embeddings via OpenAI ---
+from typing import List
+import os
+import httpx
+
+_OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+_OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    """
+    Синхронная обертка над OpenAI /embeddings.
+    Возвращает список векторов такой же длины, как входной список `texts`.
+    """
+    if not _OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+
+    url = f"{_OPENAI_BASE_URL}/embeddings"
+    headers = {"Authorization": f"Bearer {_OPENAI_API_KEY}"}
+    payload = {"model": _OPENAI_EMBED_MODEL, "input": texts}
+
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    # Порядок сохраняется 1:1 с входом
+    return [item["embedding"] for item in data["data"]]
