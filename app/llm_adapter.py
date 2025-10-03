@@ -201,16 +201,18 @@ async def chat_with_style(
 
     # 2) Если нам передали messages, аккуратно добавим/заменим system
     if messages is not None:
-        msgs: List[Dict[str, str]] = []
-        system_found = False
-        for m in messages:
-            if m.get("role") == "system" and not system_found:
-                msgs.append({"role": "system", "content": sys})
-                system_found = True
-            else:
-                msgs.append(m)
-        if not system_found:
-            msgs.insert(0, {"role": "system", "content": sys})
+        msgs: List[Dict[str, str]] = list(messages)
+        need_inject = bool(system or style_text)  # <— ВАЖНО: подменяем только если что-то реально хотим инжектить
+        if need_inject:
+            system_found = False
+            new_msgs: List[Dict[str, str]] = []
+            for m in msgs:
+                if not system_found and m.get("role") == "system":
+                    new_msgs.append({"role": "system", "content": sys})
+                    system_found = True
+                else:
+                    new_msgs.append(m)
+            msgs = new_msgs
 
         # Подмешиваем RAG-контекст отдельным system-сообщением в хвост
         msgs = _append_rag_context(msgs, rag_ctx)
