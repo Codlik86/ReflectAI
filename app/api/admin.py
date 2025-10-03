@@ -28,12 +28,21 @@ async def get_session_dep():
     async with async_session() as s:
         yield s
 
-auth = HTTPBearer()
+auth = HTTPBearer(auto_error=False)  # не падать сразу, проверим второй вариант
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+ADMIN_API_SECRET = os.getenv("ADMIN_API_SECRET", "").strip()
 
-def require_admin(creds: HTTPAuthorizationCredentials = Depends(auth)) -> None:
-    if not ADMIN_TOKEN or creds.credentials != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def require_admin(
+    creds: HTTPAuthorizationCredentials | None = Depends(auth),
+    request: Request = None,
+) -> None:
+    # Вариант 1: Bearer <ADMIN_TOKEN>
+    if ADMIN_TOKEN and creds and creds.credentials == ADMIN_TOKEN:
+        return
+    # Вариант 2: X-Admin-Secret: <ADMIN_API_SECRET>
+    if ADMIN_API_SECRET and request and request.headers.get("X-Admin-Secret") == ADMIN_API_SECRET:
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -54,6 +63,10 @@ def _plan_days(plan: Optional[str]) -> int:
     if not plan:
         return 30
     return PLAN_TO_DAYS.get(plan.lower(), 30)
+
+@router.get("/summaries/ping", dependencies=[Depends(require_admin)])
+async def summaries_ping():
+    return {"ok": True, "where": "/api/admin/summaries/*"}
 
 @router.get("/ping", dependencies=[Depends(require_admin)])
 async def ping() -> dict:
@@ -747,3 +760,96 @@ async def diag_db():
         users  = (await s.execute(sql("select count(*) from users"))).scalar_one()
     return {"db": dbname, "utc_now": str(now), "bot_messages": cnt, "users": users}
 
+# === Summaries bridge (/api/admin/summaries/*) ===
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import text as _sql
+from app.db.core import async_session as _summ_sess
+from app.memory_summarizer import make_daily, rollup_weekly, rollup_topic_month
+
+def _utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+@router.post("/summaries/daily", dependencies=[Depends(require_admin)])
+async def admin_summaries_daily():
+    """
+    Дневные саммари за прошедшие сутки (UTC) всем пользователям, у кого были сообщения.
+    """
+    day_utc = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    next_day = day_utc + timedelta(days=1)
+
+    async with _summ_sess() as s:
+        uids = (await s.execute(
+            _sql("SELECT DISTINCT user_id FROM bot_messages WHERE created_at >= :st AND created_at < :en"),
+            {"st": day_utc, "en": next_day}
+        )).scalars().all()
+
+    ok, err = 0, 0
+    for uid in uids:
+        try:
+            await make_daily(int(uid), day_utc)
+            ok += 1
+        except Exception as e:
+            print("[/api/admin/summaries/daily]", uid, "->", repr(e))
+            err += 1
+    return {"ok": True, "processed": ok, "errors": err, "day": day_utc.isoformat()}
+
+@router.post("/summaries/weekly", dependencies=[Depends(require_admin)])
+async def admin_summaries_weekly():
+    """
+    Недельная сводка: прошлая неделя (Пн–Вс, UTC) по имеющимся daily.
+    """
+    now = _utc()
+    # старт прошедшей недели (Пн 00:00 UTC)
+    week_today = now - timedelta(days=now.weekday())  # Пн этой недели
+    prev_week_start = (week_today - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    async with _summ_sess() as s:
+        uids = (await s.execute(
+            _sql("""
+                SELECT DISTINCT user_id
+                FROM dialog_summaries
+                WHERE kind='daily' AND period_start >= :st AND period_end <= :en
+            """),
+            {"st": prev_week_start, "en": prev_week_start + timedelta(days=7)}
+        )).scalars().all()
+
+    ok, err = 0, 0
+    for uid in uids:
+        try:
+            await rollup_weekly(int(uid), prev_week_start)
+            ok += 1
+        except Exception as e:
+            print("[/api/admin/summaries/weekly]", uid, "->", repr(e))
+            err += 1
+    return {"ok": True, "processed": ok, "errors": err, "week_start": prev_week_start.isoformat()}
+
+@router.post("/summaries/monthly", dependencies=[Depends(require_admin)])
+async def admin_summaries_monthly():
+    """
+    Месячная тематическая выжимка: прошедший месяц.
+    """
+    now = _utc()
+    this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    prev_month_end = this_month_start - timedelta(seconds=1)
+    prev_month_start = prev_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # кандидаты — у кого были daily/weekly в том месяце
+    async with _summ_sess() as s:
+        uids = (await s.execute(
+            _sql("""
+                SELECT DISTINCT user_id
+                FROM dialog_summaries
+                WHERE period_start >= :st AND period_end <= :en
+            """),
+            {"st": prev_month_start, "en": this_month_start}
+        )).scalars().all()
+
+    ok, err = 0, 0
+    for uid in uids:
+        try:
+            await rollup_topic_month(int(uid), prev_month_start)
+            ok += 1
+        except Exception as e:
+            print("[/api/admin/summaries/monthly]", uid, "->", repr(e))
+            err += 1
+    return {"ok": True, "processed": ok, "errors": err, "month_start": prev_month_start.isoformat()}
