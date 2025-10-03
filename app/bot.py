@@ -56,6 +56,8 @@ from app.billing.service import disable_auto_renew, cancel_subscription_now, get
 
 from zoneinfo import ZoneInfo
 
+from collections import deque
+
 router = Router()
 
 # ========== AUTO-LOGGING В БД (bot_messages) ==========
@@ -66,22 +68,25 @@ async def _log_message_by_tg(tg_id: int, role: str, text_: str) -> None:
     """
     Лог в bot_messages c учётом users.id.
     Режем текст до 4000 символов. Роль жёстко приводим к {'user','bot'}.
+    Когда приватность = 'none' — пишем только в эфемерный буфер (без БД).
     """
     try:
-        # уважаем приватность: если выключена — не пишем
         mode = (await _db_get_privacy(int(tg_id)) or "insights").lower()
-        if mode == "none":
-            return
 
         uid = await _ensure_user_id(int(tg_id))
         safe = (text_ or "")[:4000]
         if not safe:
             return
 
-        # важный момент: приводим к допустимым ролям
         r = (role or "").lower()
         role_norm = "user" if r == "user" else "bot"
 
+        if mode == "none":
+            # приватность отключена — сохраняем только в оперативный буфер
+            _buf_push(int(tg_id), role_norm, safe)
+            return
+
+        # приватность включена — пишем в БД
         async with async_session() as s:
             await s.execute(
                 text("""
@@ -91,6 +96,10 @@ async def _log_message_by_tg(tg_id: int, role: str, text_: str) -> None:
                 {"u": int(uid), "r": role_norm, "t": safe},
             )
             await s.commit()
+
+        # и дублируем в короткий буфер (не обяз., но удобно)
+        _buf_push(int(tg_id), role_norm, safe)
+
     except Exception as e:
         print("[log-db] error:", repr(e))
 
@@ -190,10 +199,33 @@ from sqlalchemy import text as _t
 async def _load_history_from_db(tg_id: int, *, limit: int = 120, hours: int = 24*30) -> list[dict]:
     """
     Возвращает историю диалога пользователя за последние `hours` часов,
-    в формате messages OpenAI: [{"role":"user|assistant","content": "..."}]
+    в формате OpenAI messages: [{"role":"user|assistant","content": "..."}]
     Порядок: старые -> новые.
+
+    Поведение:
+    - Если приватность = "none" — возвращаем историю из оперативного буфера процесса (in-memory).
+    - Если приватность включена — берём из БД и в конце домешиваем до 10 последних из буфера,
+      чтобы нивелировать возможную миллисекундную задержку записи в БД.
     """
     uid = await _ensure_user_id(tg_id)
+
+    # 0) режим приватности
+    try:
+        mode = (await _db_get_privacy(int(tg_id)) or "insights").lower()
+    except Exception:
+        mode = "insights"
+
+    # 1) приватность выключена — только оперативный буфер (без обращения к БД)
+    if mode == "none":
+        # используем уже импортированный get_recent_messages(chat_id, limit)
+        buf = get_recent_messages(int(tg_id), limit=min(limit, 120)) or []
+        out: list[dict] = []
+        for r in buf:
+            role = "assistant" if (r.get("role") == "bot") else "user"
+            out.append({"role": role, "content": r.get("text") or ""})
+        return out
+
+    # 2) приватность включена — читаем историю из БД
     async with async_session() as s:
         rows = (await s.execute(
             _t("""
@@ -211,6 +243,23 @@ async def _load_history_from_db(tg_id: int, *, limit: int = 120, hours: int = 24
     for r in rows:
         role = "assistant" if (r["role"] or "").lower() == "bot" else "user"
         msgs.append({"role": role, "content": r["text"] or ""})
+
+    # 3) опционально: домешиваем до 10 свежих из оперативного буфера (если вдруг БД отстала на миллисекунды)
+    try:
+        tail_raw = get_recent_messages(int(tg_id), limit=10) or []
+        if tail_raw:
+            seen = {(m["role"], m["content"]) for m in msgs}
+            for r in tail_raw:
+                role = "assistant" if (r.get("role") == "bot") else "user"
+                content = r.get("text") or ""
+                key = (role, content)
+                if key not in seen:
+                    msgs.append({"role": role, "content": content})
+                    seen.add(key)
+    except Exception:
+        # если буфер недоступен — просто возвращаем БД-историю
+        pass
+
     return msgs
 
 async def _db_get_privacy(tg_id: int) -> str:
@@ -226,14 +275,27 @@ async def _db_set_privacy(tg_id: int, mode: str) -> None:
         await s.commit()
 
 async def _purge_user_history(tg_id: int) -> int:
-    async with async_session() as s:
-        r = await s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
-        uid = r.scalar()
-        if not uid:
-            return 0
-        r = await s.execute(text("DELETE FROM bot_messages WHERE user_id = :u"), {"u": int(uid)})
-        await s.commit()
-        return int(getattr(r, "rowcount", 0) or 0)
+    """
+    Удаляет историю в БД (если пользователь есть) и всегда очищает эфемерный буфер.
+    Возвращает число удалённых записей из БД.
+    """
+    deleted = 0
+    try:
+        async with async_session() as s:
+            r = await s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+            uid = r.scalar()
+            if uid:
+                res = await s.execute(text("DELETE FROM bot_messages WHERE user_id = :u"), {"u": int(uid)})
+                await s.commit()
+                try:
+                    deleted = int(getattr(res, "rowcount", 0) or 0)
+                except Exception:
+                    deleted = 0
+    except Exception:
+        deleted = 0
+    # всегда чистим оперативный буфер
+    RECENT_BUFFER.pop(int(tg_id), None)
+    return deleted
     
 # --- Memory Q hook: "что мы говорили X часов/дней/недель назад?" ----------
 import re
@@ -396,6 +458,31 @@ def get_onb_image(key: str) -> str:
 # ===== Глобальные состояния чата (в памяти процесса) =====
 CHAT_MODE: Dict[int, str] = {}        # chat_id -> "talk" | "work" | "reflection"
 USER_TONE: Dict[int, str] = {}        # chat_id -> "default" | "friend" | "therapist" | "18plus"
+
+# ===== Эфемерный буфер диалога, когда приватность = none =====
+# chat_id -> deque([{"role": "user|assistant", "content": "..."}])
+RECENT_BUFFER: Dict[int, deque] = {}
+BUFFER_MAX = 120  # сколько сообщений держим в памяти процесса
+
+def _buf_push(chat_id: int, role: str, text_: str) -> None:
+    if not chat_id or not text_:
+        return
+    q = RECENT_BUFFER.get(chat_id)
+    if q is None:
+        q = deque(maxlen=BUFFER_MAX)
+        RECENT_BUFFER[chat_id] = q
+    # нормализуем роль под OpenAI-схему
+    role_norm = "assistant" if (role or "").lower() == "bot" else "user"
+    q.append({"role": role_norm, "content": (text_ or "").strip()})
+
+def _buf_get(chat_id: int, limit: int = 90) -> List[dict]:
+    q = RECENT_BUFFER.get(chat_id)
+    if not q:
+        return []
+    # возвращаем старые -> новые
+    items = list(q)[-int(limit):]
+    return items
+
 
 # --- paywall helpers ---
 async def _get_user_by_tg(session, tg_id: int):
@@ -1367,14 +1454,24 @@ async def _answer_with_llm(m: Message, user_text: str):
     try:
         uid = await _ensure_user_id(m.from_user.id)
         hits = await search_summaries(user_id=uid, query=user_text, top_k=4)
-        ids = [int(h["summary_id"]) for h in hits] if hits else []
+        ids = [int(h["summary_id"]) for h in (hits or []) if "summary_id" in h]
         items = await _fetch_summary_texts_by_ids(ids)
+
         if items:
-            lines = [f"• [{it['period']}] {it['text']}" for it in items]
-            sum_block = (
-                "Заметки из прошлых разговоров (можно учесть при ответе по мере уместности):\n"
-                + "\n".join(lines)
-            )
+            # — ограничим длину каждого саммари и общий блок, чтобы не «съедать» контекст
+            def _short(s: str, n: int = 260) -> str:
+                s = (s or "").strip().replace("\r", " ").replace("\n", " ")
+                return s if len(s) <= n else (s[: n - 1] + "…")
+
+            lines = [f"• [{it['period']}] {_short(it.get('text', ''))}" for it in items]
+            sum_text = "\n".join(lines).strip()
+
+            # общий хард-лимит на блок саммарей
+            MAX_SUMMARY_BLOCK = 900
+            if len(sum_text) > MAX_SUMMARY_BLOCK:
+                sum_text = sum_text[: MAX_SUMMARY_BLOCK - 1] + "…"
+
+        sum_block = "Заметки из прошлых разговоров (учитывай по мере уместности):\n" + sum_text
     except Exception:
         sum_block = ""
 
@@ -1395,8 +1492,8 @@ async def _answer_with_llm(m: Message, user_text: str):
         return
 
     # слегка варьируем температуру в предсказуемых пределах, чтобы речь была живой
-    temp = 0.78 + (abs(hash(user_text)) % 9) / 100.0  # 0.78–0.86
-    LLM_MAX_TOKENS = 480
+    temp = 0.72 + (abs(hash(user_text)) % 9) / 100.0  # 0.72–0.80
+    LLM_MAX_TOKENS = 720
 
     try:
         reply = await chat_with_style(

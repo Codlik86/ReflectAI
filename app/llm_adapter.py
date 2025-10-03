@@ -10,12 +10,12 @@ llm_adapter.py
 --------------
 Асинхронный адаптер к OpenAI-совместимому /chat/completions API.
 
-Ключевые возможности:
+Возможности:
 - Класс LLMAdapter с методом complete_chat(...)
-- Модульные функции chat(...) / complete_chat(...) на синглтоне
-- Обёртка chat_with_style(...), аккуратно подмешивающая style/style_hint в system
-- Поддержка подмешивания RAG-контекста (rag_ctx) отдельным system-сообщением
-- Безопасные дефолты: модель и базовый URL берутся из окружения:
+- Функции chat(...) / complete_chat(...) на синглтоне
+- Обёртка chat_with_style(...): подмешивает style/style_hint в system
+- Опциональное подмешивание RAG-контекста отдельным system-сообщением
+- Конфиги из ENV:
     OPENAI_API_KEY
     OPENAI_BASE_URL (например, https://api.proxyapi.ru/openai/v1)
     CHAT_MODEL (по умолчанию gpt-4o-mini)
@@ -47,7 +47,7 @@ class LLMAdapter:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"
                 },
-                timeout=60.0,
+                timeout=90.0,  # ↑ запас по времени
             )
         return self._client
 
@@ -85,40 +85,56 @@ class LLMAdapter:
         if not msg_list:
             raise ValueError("Нет сообщений для complete_chat(...)")
 
+        # Базовый payload + предсказуемый дефолт response_format
+        response_format = kwargs.pop("response_format", {"type": "text"})
         payload: Dict[str, Any] = {
             "model": model or self.model,
             "messages": msg_list,
             "temperature": float(temperature),
+            "response_format": response_format,
         }
         if top_p is not None:
             payload["top_p"] = top_p
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
 
-        # Pass-through other opts (e.g., response_format, stop, n, penalties)
+        # Pass-through (stop, n, penalties и т.п.)
         for k, v in kwargs.items():
-            if k in ("stop", "presence_penalty", "frequency_penalty", "response_format", "n"):
+            if k in ("stop", "presence_penalty", "frequency_penalty", "n"):
                 payload[k] = v
 
         client = await self._get_client()
         url = "/chat/completions"  # OpenAI-compatible path
 
-        try:
-            r = await client.post(url, json=payload)
-            r.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            text = e.response.text
-            raise RuntimeError(f"LLM HTTP error {e.response.status_code}: {text}") from e
-        except Exception as e:
-            raise RuntimeError(f"LLM request failed: {e}") from e
+        # Устойчивые ретраи для 429/5xx + лёгкий бэкофф
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                r = await client.post(url, json=payload)
+                r.raise_for_status()
+                data = r.json()
+                # Expected OpenAI-like schema
+                return data["choices"][0]["message"]["content"].strip()
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status in (429, 500, 502, 503, 504) and attempt < 2:
+                    import asyncio, random
+                    await asyncio.sleep(0.6 * (attempt + 1) + random.random() * 0.3)
+                    last_err = e
+                    continue
+                raise RuntimeError(f"LLM HTTP error {status}: {e.response.text}") from e
+            except Exception as e:
+                if attempt < 2:
+                    import asyncio, random
+                    await asyncio.sleep(0.5 * (attempt + 1) + random.random() * 0.2)
+                    last_err = e
+                    continue
+                raise RuntimeError(f"LLM request failed: {e}") from e
 
-        data = r.json()
-        # Expected OpenAI-like schema
-        try:
-            return data["choices"][0]["message"]["content"].strip()
-        except Exception:
-            # Fallback to raw text for debugging
-            return json.dumps(data, ensure_ascii=False)
+        # На всякий случай (сюда не дойдём при raise выше)
+        if last_err:
+            raise RuntimeError(f"LLM request failed after retries: {last_err}")
+        raise RuntimeError("LLM request failed for unknown reasons")
 
 
 # --- Module-level singleton & helpers (so chat_with_style can call them) ---
@@ -149,7 +165,7 @@ async def chat(
 
 
 async def complete_chat(*args, **kwargs) -> str:
-    # Совместимость с поиском имени в chat_with_style
+    # Совместимость с поиском имени
     return await chat(*args, **kwargs)
 
 
@@ -163,7 +179,7 @@ def _inject_style_into_system(system_text: Optional[str], style_hint: Optional[s
             base = base + "\n\n" + style_hint.strip()
         else:
             base = style_hint.strip()
-    return base or "Ты — тёплый русскоязычный собеседник и друг. Общайся на «ты», без диагнозов и медицинских рекомендаций."
+    return base or "Ты — тёплый русскоязычный собеседник и друг. Общайся на «ты», без диагнозов и советов о лекарствах."
 
 
 def _append_rag_context(msgs: List[Dict[str, str]], rag_ctx: Optional[str]) -> List[Dict[str, str]]:
@@ -202,7 +218,8 @@ async def chat_with_style(
     # 2) Если нам передали messages, аккуратно добавим/заменим system
     if messages is not None:
         msgs: List[Dict[str, str]] = list(messages)
-        need_inject = bool(system or style_text)  # <— ВАЖНО: подменяем только если что-то реально хотим инжектить
+        need_inject = bool(system or style_text)
+
         if need_inject:
             system_found = False
             new_msgs: List[Dict[str, str]] = []
@@ -213,6 +230,9 @@ async def chat_with_style(
                 else:
                     new_msgs.append(m)
             msgs = new_msgs
+            # если system так и не встретился — аккуратно добавим его в начало
+            if not system_found:
+                msgs = [{"role": "system", "content": sys}] + msgs
 
         # Подмешиваем RAG-контекст отдельным system-сообщением в хвост
         msgs = _append_rag_context(msgs, rag_ctx)
@@ -225,18 +245,15 @@ async def chat_with_style(
         msgs.append({"role": "user", "content": user})
     return await chat(messages=msgs, temperature=temperature, **kwargs)
 
-# --- Embeddings via OpenAI ---
-from typing import List
-import os
-import httpx
 
+# --- Embeddings via OpenAI ---
 _OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 _OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 _OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """
-    Синхронная обертка над OpenAI /embeddings.
+    Синхронная обёртка над OpenAI /embeddings.
     Возвращает список векторов такой же длины, как входной список `texts`.
     """
     if not _OPENAI_API_KEY:
