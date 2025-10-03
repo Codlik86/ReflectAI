@@ -22,7 +22,7 @@ from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as 
 from app.meditations import get_categories, get_items, get_item
 from app.memory import save_user_message, save_bot_message, get_recent_messages
 from app.exercises import TOPICS, EXERCISES
-from app.prompts import SYSTEM_PROMPT, STYLE_SUFFIXES
+from app.prompts import SYSTEM_PROMPT, STYLE_SUFFIXES, LENGTH_HINTS
 try:
     # В новом prompts.py REFLECTIVE_SUFFIX не обязателен — пусть остаётся дефолт.
     from app.prompts import REFLECTIVE_SUFFIX  # если добавишь в будущем — подхватится
@@ -1399,24 +1399,28 @@ async def on_tone_pick(cb: CallbackQuery):
 async def _answer_with_llm(m: Message, user_text: str):
     """
     Приоритеты:
-    1) Полностью полагаемся на промпты из app/prompts.py (TALK_SYSTEM_PROMPT / SYSTEM_PROMPT).
-    2) Сверху к системному промпту подмешиваем RAG (reflectai_corpus_v2) отдельным system-сообщением.
-    3) Подмешиваем «долгую память» (daily/weekly/monthly summaries) отдельным system-сообщением.
-    4) История диалога из БД (по умолчанию ~90 последних сообщений за длительный период), затем текущее сообщение.
-    5) Никаких дополнительных «оверлеев», лист-гуардов и перегенераций в bot.py — стиль/ограничения живут в prompts.py.
+    1) Полностью полагаемся на промпты из app/prompts.py (SYSTEM_PROMPT).
+    2) Сверху к системному промпту подмешиваем: выбранный тон, (опц.) рефлексию, хинт по длине ответа.
+    3) Подмешиваем RAG (reflectai_corpus_v2) отдельным system-сообщением.
+    4) Подмешиваем «долгую память» (daily/weekly/monthly summaries) отдельным system-сообщением.
+    5) История диалога из БД (~90 последних за длительный период), затем текущее сообщение.
     """
+
+    # Локальные импорты, чтобы не править верх файла
+    import random
+    from app.prompts import LENGTH_HINTS
 
     chat_id = m.chat.id
     mode = CHAT_MODE.get(chat_id, "talk")
 
-    # 0) Быстрый спец-ответ на запросы «что мы говорили X назад/недавно…»
+    # 0) Спец-ответ на запросы «что мы говорили X назад/недавно…»
     try:
         if await _maybe_answer_memory_question(m, user_text):
             return
     except Exception:
         pass  # не мешаем основному потоку
 
-    # 1) Единый SYSTEM_PROMPT + тоновый суффикс + (опц.) рефлексия
+    # 1) SYSTEM_PROMPT + тон + (опц.) рефлексия
     style = USER_TONE.get(chat_id, "default")  # "default" | "friend" | "therapist" | "18plus"
     sys_prompt = SYSTEM_PROMPT
     tone_suffix = STYLE_SUFFIXES.get(style, "")
@@ -1425,10 +1429,30 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
 
+    # 1.1) Вариативность объёма ответа (микро/короткий/средний/глубокий)
+    def _pick_length_profile(ut: str, turns: int) -> str:
+        t = (ut or "").lower()
+        # Запросы «что делать / план / разложи / подробно»
+        if any(k in t for k in ("что делать", "план", "структур", "разложи", "подробн", "как сделать", "шаг")):
+            return "deep" if "подроб" in t or "план" in t else "medium"
+        # Быстрые «успокой / паническая атака / тревога / дыхание / прямо сейчас»
+        if any(k in t for k in ("паническ", "тревог", "успокой", "дышан", "прямо сейчас", "помоги сейчас")):
+            return "micro" if "прямо сейчас" in t or "паническ" in t else "short"
+        # По умолчанию — мягкая вариативность + чуть глубже на 1-м и 5–6-м ходах
+        base = [("micro", 0.15), ("short", 0.45), ("medium", 0.30), ("deep", 0.10)]
+        if turns in (0, 1, 5, 6):
+            base = [("micro", 0.10), ("short", 0.40), ("medium", 0.35), ("deep", 0.15)]
+        r = random.random()
+        acc = 0.0
+        for key, p in base:
+            acc += p
+            if r <= acc:
+                return key
+        return "short"
+
     # 2) История беседы из БД (старые -> новые)
     history_msgs: List[dict] = []
     try:
-        # можно поднять/опустить лимит по твоему желанию (здесь 90)
         history_msgs = await _load_history_from_db(m.from_user.id, limit=90, hours=24*90)
     except Exception:
         # запасной вариант: in-memory
@@ -1440,7 +1464,17 @@ async def _answer_with_llm(m: Message, user_text: str):
         except Exception:
             history_msgs = []
 
-    # 3) RAG-контекст (reflectai_corpus_v2) — вторым слоем после системного промпта
+    # 1.2) Применяем хинт по длине (после того как знаем номер хода)
+    try:
+        turn_idx = len(history_msgs)  # сколько сообщений уже в переписке (перед текущим юзер-сообщением)
+    except Exception:
+        turn_idx = 0
+    length_key = _pick_length_profile(user_text, turn_idx)
+    len_hint = LENGTH_HINTS.get(length_key, "")
+    if len_hint:
+        sys_prompt += "\n\n" + len_hint
+
+    # 3) RAG-контекст — отдельным system-сообщением
     rag_ctx = ""
     if rag_search is not None:
         try:
@@ -1454,29 +1488,27 @@ async def _answer_with_llm(m: Message, user_text: str):
     try:
         uid = await _ensure_user_id(m.from_user.id)
         hits = await search_summaries(user_id=uid, query=user_text, top_k=4)
-        ids = [int(h["summary_id"]) for h in (hits or []) if "summary_id" in h]
+        ids = [int(h.get("summary_id")) for h in (hits or []) if str(h.get("summary_id", "")).isdigit()]
         items = await _fetch_summary_texts_by_ids(ids)
 
         if items:
-            # — ограничим длину каждого саммари и общий блок, чтобы не «съедать» контекст
+            # ограничим длину каждого саммари и общий блок, чтобы не «съедать» контекст
             def _short(s: str, n: int = 260) -> str:
                 s = (s or "").strip().replace("\r", " ").replace("\n", " ")
                 return s if len(s) <= n else (s[: n - 1] + "…")
 
             lines = [f"• [{it['period']}] {_short(it.get('text', ''))}" for it in items]
             sum_text = "\n".join(lines).strip()
-
-            # общий хард-лимит на блок саммарей
             MAX_SUMMARY_BLOCK = 900
             if len(sum_text) > MAX_SUMMARY_BLOCK:
                 sum_text = sum_text[: MAX_SUMMARY_BLOCK - 1] + "…"
 
-        sum_block = "Заметки из прошлых разговоров (учитывай по мере уместности):\n" + sum_text
+            sum_block = "Заметки из прошлых разговоров (учитывай по мере уместности):\n" + sum_text
     except Exception:
         sum_block = ""
 
     # 5) Сбор сообщений для LLM
-    # ВАЖНО: порядок — system стиль -> system RAG -> system summaries -> история -> текущее сообщение
+    # Порядок: system стиль -> system RAG -> system summaries -> история -> текущее сообщение
     messages: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt}]
     if rag_ctx:
         messages.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
@@ -1486,14 +1518,15 @@ async def _answer_with_llm(m: Message, user_text: str):
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
-    # 6) Вызов LLM (без дополнительных «надстроек» — промпт рулит стилем)
+    # 6) Вызов LLM
     if chat_with_style is None:
         await send_and_log(m, "Я тебя слышу. Сейчас подключаюсь…", reply_markup=kb_main_menu())
         return
 
-    # слегка варьируем температуру в предсказуемых пределах, чтобы речь была живой
-    temp = 0.72 + (abs(hash(user_text)) % 9) / 100.0  # 0.72–0.80
-    LLM_MAX_TOKENS = 720
+    # Живая речь: температура слегка варьируется детерминированно от текста и длины истории
+    seed = f"{user_text}|{turn_idx}"
+    temp = 0.66 + (abs(hash(seed)) % 17) / 100.0  # 0.66–0.82
+    LLM_MAX_TOKENS = 480
 
     try:
         reply = await chat_with_style(
@@ -1508,7 +1541,7 @@ async def _answer_with_llm(m: Message, user_text: str):
         reply = ""
 
     if not reply or not reply.strip():
-        reply = "Хочу понять суть поточнее. Что в этой ситуации сейчас болит сильнее всего — один-два предложения?"
+        reply = "Хочу понять точнее. Что в этой ситуации сейчас болит сильнее всего — одно-два предложения?"
 
     # 7) Отправляем и логируем как 'bot' (для устойчивой памяти)
     await send_and_log(m, reply, reply_markup=kb_main_menu())
