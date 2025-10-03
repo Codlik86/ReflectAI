@@ -546,6 +546,62 @@ def _fmt_dt(dt) -> str:
         return dt.astimezone(_TZ).strftime('%d.%m.%Y %H:%M')
     except Exception:
         return str(dt)
+    
+# === Length hint picker + "one-question" post-filter =======================
+
+def _pick_len_hint(user_text: str, mode: str) -> str:
+    """
+    Возвращает ключ из LENGTH_HINTS: 'micro' | 'short' | 'medium' | 'deep'
+    Логика:
+      — 'deep' при явном запросе «подробно/план/структура/инструкция»;
+      — по длине текста: <=50 символов -> micro; <=220 -> short; иначе -> medium;
+      — в режиме reflection избегаем 'deep', если нет явной просьбы.
+    """
+    t = (user_text or "").lower()
+    deep_keywords = ("подроб", "деталь", "развернут", "план", "структур", "пошаг", "инструкц")
+
+    if any(k in t for k in deep_keywords):
+        return "deep"
+
+    n = len(t.strip())
+    if n <= 50:
+        return "micro"
+    if n <= 220:
+        return "short"
+
+    # длинное сообщение — средний разбор по умолчанию
+    if mode == "reflection":
+        return "medium"
+    return "medium"
+
+
+def _enforce_single_question(text: str) -> str:
+    """
+    Оставляет максимум один вопросительный знак (последний по тексту).
+    Остальные '?' превращаются в точки. Схлопывает '??' -> '?'.
+    """
+    if not text:
+        return text
+
+    # схлопнуть повторы
+    while "??" in text:
+        text = text.replace("??", "?")
+
+    last_q = text.rfind("?")
+    if last_q == -1:
+        return text
+
+    # заменить все предыдущие '?' на '.'
+    chars = list(text)
+    for i, ch in enumerate(chars):
+        if ch == "?" and i != last_q:
+            chars[i] = "."
+    out = "".join(chars)
+
+    # небольшой косметический трим пробелов перед знаками
+    out = out.replace(" .", ".").replace(" ,", ",")
+    return out
+
 
 async def _get_active_subscription(session, user_id: int):
     # минимально: читаем любую активную подписку с максимальным сроком
@@ -1429,6 +1485,13 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
 
+    # NEW: авто-подсказка по длине ответа
+    try:
+        len_key = _pick_len_hint(user_text, mode)
+        sys_prompt += "\n\n" + LENGTH_HINTS.get(len_key, "")
+    except Exception:
+        pass
+
     # 1.1) Вариативность объёма ответа (микро/короткий/средний/глубокий)
     def _pick_length_profile(ut: str, turns: int) -> str:
         t = (ut or "").lower()
@@ -1541,8 +1604,14 @@ async def _answer_with_llm(m: Message, user_text: str):
         reply = ""
 
     if not reply or not reply.strip():
-        reply = "Хочу понять точнее. Что в этой ситуации сейчас болит сильнее всего — одно-два предложения?"
+        reply = "Хочу понять суть поточнее. Что в этой ситуации сейчас болит сильнее всего — один-два предложения?"
 
+    # NEW: пост-фильтр — максимум один вопрос
+    try:
+        reply = _enforce_single_question(reply)
+    except Exception:
+        pass
+    
     # 7) Отправляем и логируем как 'bot' (для устойчивой памяти)
     await send_and_log(m, reply, reply_markup=kb_main_menu())
 
