@@ -1572,32 +1572,29 @@ async def _answer_with_llm(m: Message, user_text: str):
             sum_block = "— Полезные заметки из прошлых разговоров (используй по необходимости):\n" + "\n".join(lines)
     except Exception:
         sum_block = ""
-    
+
     # --- Guard: списки только по запросу пользователя ---
-    allow_lists = _wants_structure(user_text)  # у тебя эта функция уже есть
+    allow_lists = _wants_structure(user_text)
     list_guard = (
         "По умолчанию пиши связным текстом, без списков и нумерации. "
         + ("Если просят «что делать/план/как поступить», можно дать максимум 3 коротких пункта."
            if allow_lists else "Сейчас списки и нумерация не нужны.")
     )
-    # ⬇️ ключевая правка: впаиваем guard в system prompt
+    # впаиваем guard в system prompt
     sys_prompt = sys_prompt + "\n\n" + list_guard
 
-    # 5) Сбор финального prompt/messages
-    messages = [{"role": "system", "content": sys_prompt}]
+    # 5) Сбор итоговых messages БЕЗ первого system — он передаётся отдельным аргументом
+    msgs: List[dict] = []
     if rag_ctx:
-        messages.append({"role": "system", "content": f"Фактический контекст по теме:\n{rag_ctx}"})
+        msgs.append({"role": "system", "content": f"Фактический контекст по теме:\n{rag_ctx}"})
     if sum_block:
-        messages.append({"role": "system", "content": sum_block})
+        msgs.append({"role": "system", "content": sum_block})
 
     # История (старые -> новые)
-    messages += history_msgs
+    msgs += history_msgs
 
     # Текущее сообщение пользователя
-    messages.append({"role": "user", "content": user_text})
-
-    # ❌ удалено: отдельный system с list_guard больше не добавляем
-    # messages.append({"role": "system", "content": list_guard})
+    msgs.append({"role": "user", "content": user_text})
 
     if chat_with_style is None:
         # резервный ответ, если адаптер не подключён
@@ -1612,16 +1609,18 @@ async def _answer_with_llm(m: Message, user_text: str):
     def _needs_regen(text_: str) -> bool:
         return not text_ or _looks_templatey(text_) or _too_similar_to_recent(chat_id, text_)
 
-    # Первая попытка
+    # Первая попытка — ВАЖНО: передаём system=sys_prompt, а в messages нет первого system
     try:
         reply = await chat_with_style(
-            messages=messages,
+            system=sys_prompt,
+            messages=msgs,
             style_hint=None,
             temperature=temp_base,
             max_tokens=LLM_MAX_TOKENS,
         )
     except TypeError:
-        reply = await chat_with_style(messages, temperature=temp_base, max_tokens=LLM_MAX_TOKENS)
+        # совместимость на случай другой сигнатуры
+        reply = await chat_with_style(msgs, temperature=temp_base, max_tokens=LLM_MAX_TOKENS)
     except Exception:
         reply = ""
 
@@ -1637,22 +1636,26 @@ async def _answer_with_llm(m: Message, user_text: str):
             + "; ".join(BANNED_PHRASES) + "."
         )
         refine_msgs = [
-            {"role": "system", "content": fixer_system},
             {"role": "user", "content": f"Черновик ответа (перепиши в духе требований):\n\n{reply or '(пусто)'}"},
         ]
         try:
             better = await chat_with_style(
+                system=fixer_system,                    # системные правила для перезаписи
                 messages=refine_msgs,
                 temperature=min(0.92, max(0.70, temp_base + 0.06)),
                 max_tokens=LLM_MAX_TOKENS,
             )
         except TypeError:
-            better = await chat_with_style(refine_msgs, temperature=min(0.92, max(0.70, temp_base + 0.06)), max_tokens=LLM_MAX_TOKENS)
+            better = await chat_with_style(
+                [{"role": "system", "content": fixer_system}] + refine_msgs,
+                temperature=min(0.92, max(0.70, temp_base + 0.06)),
+                max_tokens=LLM_MAX_TOKENS,
+            )
         except Exception:
             better = ""
         if better and not _needs_regen(better):
             reply = better
-    
+
     # --- Lead-diversity guard: не повторяем начало последних ответов бота ---
     try:
         lead = _lead_span(reply)
@@ -1671,7 +1674,7 @@ async def _answer_with_llm(m: Message, user_text: str):
                 reply = alt
     except Exception:
         pass
-    
+
     if not reply:
         reply = "Давай сузим: какой момент здесь для тебя самый болезненный? Два-три предложения."
 
