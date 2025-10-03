@@ -266,12 +266,13 @@ _TIME_NUM = re.compile(r"(\d+)")
 def _pick_window(txt: str) -> tuple[int, int, int, int]:
     """
     Возвращает (minutes, hours, days, weeks). По умолчанию 10 минут.
-    Поддерживает: 'мин', 'мину', 'час', 'дн', 'недел'.
+    Поддерживает: 'мин', 'мину', 'час', 'дн', 'недел', 'недавн'.
     """
     t = (txt or "").lower()
     mins = hours = days = weeks = 0
-    # порядок важен: сначала минуты, потом остальное
-    if "мин" in t or "мину" in t:
+    if "недавн" in t:           # «недавно»
+        hours = 3
+    elif "мин" in t or "мину" in t:
         m = _TIME_NUM.search(t); mins = int(m.group(1)) if m else 10
     elif "час" in t:
         m = _TIME_NUM.search(t); hours = int(m.group(1)) if m else 3
@@ -280,7 +281,6 @@ def _pick_window(txt: str) -> tuple[int, int, int, int]:
     elif "недел" in t:
         m = _TIME_NUM.search(t); weeks = int(m.group(1)) if m else 1
     else:
-        # «о чём было раньше/только что?» — берём 10 минут
         mins = 10
     return mins, hours, days, weeks
 
@@ -290,19 +290,22 @@ def _looks_like_memory_question(txt: str) -> bool:
         "помнишь", "что мы говорили", "о чем мы говорили", "о чём мы говорили",
         "что я говорил", "что я писал", "что я спрашивал",
         "о чем я только что", "о чём я только что",
-        "что было раньше", "напомни", "мы обсуждали", "о чем мы там говорили",
-        "мин назад", "час назад", "день назад", "неделю назад", "вчера", "сегодня"
+        "что было раньше", "мы обсуждали", "о чем мы там говорили",
+        "мин назад", "час назад", "день назад", "неделю назад", "вчера", "сегодня",
+        "прошлый раз", "последний раз", "недавно"
     ]
     return any(k in t for k in keys)
 
 async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
+    """Если пользователь спрашивает «что мы говорили X назад/недавно», отдаём пересказ без LLM."""
     if not _looks_like_memory_question(user_text):
         return False
 
     uid = await _ensure_user_id(m.from_user.id)
     mins, h, d, w = _pick_window(user_text)
     total_minutes = mins + h*60 + d*24*60 + w*7*24*60
-    if total_minutes <= 0: total_minutes = 10
+    if total_minutes <= 0:
+        total_minutes = 10
     interval_txt = f"{total_minutes} minutes"
 
     async with async_session() as s:
@@ -312,7 +315,7 @@ async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
             WHERE user_id = :uid
               AND created_at >= NOW() - (:ival::text)::interval
             ORDER BY id ASC
-            LIMIT 80
+            LIMIT 120
         """), {"uid": int(uid), "ival": interval_txt})).mappings().all()
 
     if not rows:
@@ -322,6 +325,24 @@ async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
             reply_markup=kb_main_menu(),
         )
         return True
+
+    # Сжимаем «диалог» в компактный пересказ
+    def _short(s: str, n: int = 220) -> str:
+        s = (s or "").strip().replace("\n", " ")
+        return s if len(s) <= n else s[:n - 1] + "…"
+
+    parts = []
+    for r in rows[-14:]:  # берём последние 14 реплик, чтобы не раздувать
+        who = "ты" if (r["role"] or "").lower() == "user" else "я"
+        when = _fmt_dt(r["created_at"])
+        parts.append(f"{when} — {who}: {_short(r['text'])}")
+
+    header = "Коротко, что было в недавнем разговоре:\n"
+    body = "\n".join(parts)
+    tail = "\n\nПродолжим с этого места или поменяем тему?"
+
+    await send_and_log(m, header + body + tail, reply_markup=kb_main_menu())
+    return True
     
 # --- DB message logger (строго 'user' | 'bot' под CHECK-constraint) ---------
 async def _db_log_user_message(tg_id: int, text_: str) -> None:
@@ -1675,10 +1696,6 @@ async def on_debug_prompt(m: Message):
 async def on_text(m: Message):
     if _require_access_msg(m.message if hasattr(m, "message") else m): return
     chat_id = m.chat.id
-    try:
-        await _db_log_user_message(m.from_user.id, m.text or "")
-    except Exception:
-        pass
 
     if CHAT_MODE.get(chat_id, "talk") in ("talk", "reflection"):
         await _answer_with_llm(m, m.text or ""); return
