@@ -164,28 +164,6 @@ def _require_access_msg(_: Message) -> bool:
     Отключаем этот хук, чтобы он не блокировал обработчики.
     """
     return False
-
-# =============================== Московское время ===============================
-import os
-from zoneinfo import ZoneInfo
-
-BOT_TZ = os.getenv("BOT_TZ", "Europe/Moscow")
-
-def _fmt_local(dt_utc) -> str:
-    """
-    Принимает TZ-aware UTC datetime и форматирует в локальной зоне BOT_TZ.
-    На случай нераспарсенных/naive дат — делает максимально мягкое приведение.
-    """
-    try:
-        tz = ZoneInfo(BOT_TZ)
-        # если вдруг dt без tz — считаем, что это UTC
-        if getattr(dt_utc, "tzinfo", None) is None:
-            from datetime import timezone
-            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
-        return dt_utc.astimezone(tz).strftime('%d.%m.%Y %H:%M')
-    except Exception:
-        # запасной вариант — без конвертации, но хотя бы отформатируем
-        return dt_utc.strftime('%d.%m.%Y %H:%M')
     
 # --- async DB helpers (privacy, users, history) -----------------
 async def _ensure_user_id(tg_id: int) -> int:
@@ -352,41 +330,6 @@ async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
     await send_and_log(m, header + body + tail, reply_markup=kb_main_menu())
     return True
     
-# --- DB message logger (строго 'user' | 'bot' под CHECK-constraint) ---------
-async def _db_log_user_message(tg_id: int, text_: str) -> None:
-    try:
-        uid = await _ensure_user_id(tg_id)
-        async with async_session() as s:
-            await s.execute(
-                text("""
-                    INSERT INTO bot_messages (user_id, role, text, created_at)
-                    VALUES (:uid, 'user', :txt, CURRENT_TIMESTAMP)
-                """),
-                {"uid": int(uid), "txt": (text_ or "")[:5000]},
-            )
-            await s.commit()
-    except Exception as e:
-        print("[log-db] user err:", repr(e))
-
-async def _db_log_bot_message(tg_id: int, text_: str) -> None:
-    """
-    ВАЖНО: пишем role='bot' (НЕ 'assistant'), иначе упадем в CHECK bot_messages_role_check.
-    """
-    try:
-        uid = await _ensure_user_id(tg_id)
-        async with async_session() as s:
-            await s.execute(
-                text("""
-                    INSERT INTO bot_messages (user_id, role, text, created_at)
-                    VALUES (:uid, 'bot', :txt, CURRENT_TIMESTAMP)
-                """),
-                {"uid": int(uid), "txt": (text_ or "")[:5000]},
-            )
-            await s.commit()
-    except Exception as e:
-        print("[log-db] bot err:", repr(e))
-# ---------------------------------------------------------------------------
-
 # --- Summaries helpers (fetch texts by ids, purge all for user) ---
 from sqlalchemy import text as _sql_text
 
@@ -453,127 +396,6 @@ def get_onb_image(key: str) -> str:
 # ===== Глобальные состояния чата (в памяти процесса) =====
 CHAT_MODE: Dict[int, str] = {}        # chat_id -> "talk" | "work" | "reflection"
 USER_TONE: Dict[int, str] = {}        # chat_id -> "default" | "friend" | "therapist" | "18plus"
-
-# --- Анти-штампы и эвристики «шаблонности»
-BANNED_PHRASES = [
-    "это, безусловно, очень трудная ситуация",
-    "важно дать себе время и пространство",
-    "не забывай заботиться о себе",
-    "это может быть сложно",
-    "это нормально чувствовать",
-    "помни, что ты заслуживаешь счастья",
-]
-# короткие подстроки, которые ловят все варианты фразы
-BANNED_SUBSTRINGS = [
-    "как ты себя",            # ловит «как ты себя чувствуешь» + хвосты
-    "что ты сейчас чувствуешь"
-]
-
-def _has_banned_phrases(text_: str) -> bool:
-    t = (text_ or "").lower()
-    return any(p in t for p in BANNED_PHRASES) or any(s in t for s in BANNED_SUBSTRINGS)
-
-def _jaccard(a: str, b: str) -> float:
-    sa = set(a.lower().split())
-    sb = set(b.lower().split())
-    if not sa or not sb:
-        return 0.0
-    return len(sa & sb) / len(sa | sb)
-
-def _too_similar_to_recent(chat_id: int, candidate: str, *, lookback: int = 8, thr: float = 0.62) -> bool:
-    try:
-        recent = get_recent_messages(chat_id, limit=lookback * 2)
-        prev_bot = [m["text"] for m in recent if m["role"] == "bot"][-lookback:]
-    except Exception:
-        prev_bot = []
-    return any(_jaccard(candidate, old) >= thr for old in prev_bot)
-
-def _looks_templatey(text_: str) -> bool:
-    return _has_banned_phrases(text_)
-
-# --- Анти-однообразные начала (lead) ---------------------------------
-
-BAD_LEAD_PATTERNS = (
-    "понимаю", "к сожалению", "это сложн", "важно", "попробуй", "помни",
-    "давай", "знаешь", "мне жаль", "знаю, что", "иногда", "часто", "бывает",
-)
-
-import re
-from difflib import SequenceMatcher
-
-def _lead_span(text: str, *, max_chars: int = 80) -> str:
-    """Первая фраза/предложение ответа, нормализованное для сравнения."""
-    t = (text or "").strip()
-    if not t:
-        return ""
-    # берем первое предложение или первую строку
-    m = re.match(r"^(.+?[.!?…])", t)
-    span = m.group(1) if m else t.split("\n", 1)[0]
-    return span[:max_chars].lower()
-
-def _is_bad_lead(lead: str) -> bool:
-    """Одно слово/междометие/клишированное начало."""
-    if not lead:
-        return True
-    first_word = lead.split()[0]
-    if len(first_word) <= 2:  # «мм», «эх», односложности
-        return True
-    return any(lead.startswith(p) for p in BAD_LEAD_PATTERNS)
-
-def _lead_too_similar(a: str, b: str, thr: float = 0.72) -> bool:
-    """Похожи ли два начала (по смыслу/форме)."""
-    if not a or not b:
-        return False
-    # быстрые проверки префикса
-    if a.startswith(b[:10]) or b.startswith(a[:10]):
-        return True
-    # мягкая метрика похожести
-    return SequenceMatcher(None, a, b).ratio() >= thr
-
-async def _recent_bot_leads(tg_id: int, k: int = 6) -> list[str]:
-    """Последние k начальных фраз бота из БД для этого пользователя."""
-    uid = await _ensure_user_id(tg_id)
-    async with async_session() as s:
-        rows = (await s.execute(_t("""
-            SELECT text
-            FROM bot_messages
-            WHERE user_id = :uid AND role = 'bot'
-            ORDER BY id DESC
-            LIMIT :lim
-        """), {"uid": int(uid), "lim": int(k)})).scalars().all()
-    return [_lead_span(r) for r in rows if r]
-
-async def _rewrite_lead_unique(draft: str, ban_starts: list[str], style_key: str) -> str:
-    """Переписывает только 1–2 первых предложения, избегая перечисленных начал."""
-    ban_txt = "; ".join(sorted(set(ban_starts)))[:220]
-    sys = (
-        "Перепиши только первые 1–2 предложения, чтобы начало звучало свежо, по-человечески и без клише. "
-        f"Нельзя начинать фразами: {ban_txt}. "
-        "Остальную часть ответа оставь как есть. Не добавляй списки. "
-        "Вопрос в конце не меняй, если он уместен."
-    )
-    # чуть подкрепим микростилем
-    sys += "\n\n" + (_style_overlay(style_key) or "")
-    msgs = [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": (draft or "")[:1000]},
-    ]
-    try:
-        return await chat_with_style(messages=msgs, temperature=0.82, max_tokens=420)
-    except TypeError:
-        return await chat_with_style(msgs, temperature=0.82, max_tokens=420)
-    except Exception:
-        return ""
-
-# --- «дневничковая» длина: когда можно расписать подробнее
-STRUCTURE_KEYWORDS = [
-    "что делать", "как поступить", "план", "шаги", "структур",
-    "объясни", "разложи", "почему", "как справиться", "помоги разобраться",
-]
-
-def _wants_structure(user_text: str) -> bool:
-    t = (user_text or "").lower()
-    return (len(t) >= 240) or any(k in t for k in STRUCTURE_KEYWORDS)
 
 # --- paywall helpers ---
 async def _get_user_by_tg(session, tg_id: int):
@@ -826,7 +648,7 @@ async def cb_trial_start(call: CallbackQuery):
     # 2) шлём новое сообщение с ПРАВОЙ клавиатурой (главное меню)
     text = (
         f"Пробный период активирован ✅\n"
-        f"Доступ открыт до {_fmt_local(expires)}\n\n"
+        f"Доступ открыт до {_fmt_dt(expires)}\n\n"
         f"Готов продолжать: выбрать «Поговорить», «Разобраться» или «Медитации»."
     )
     try:
@@ -1487,90 +1309,56 @@ async def on_tone_pick(cb: CallbackQuery):
     await cb.answer("Стиль обновлён ✅", show_alert=False)
     await _safe_edit(cb.message, f"Тон общения установлен: <b>{style}</b> ✅", reply_markup=kb_settings())
 
-# ===== LLM-помощник =====
-def _style_overlay(style_key: str | None) -> str:
-    """
-    Возвращает оверлей к TALK_SYSTEM_PROMPT.
-    Даёт вариативность микростиля и закрепляет анти-шаблонные правила:
-    — без списков по умолчанию;
-    — один конкретный уточняющий вопрос;
-    — живой, связный текст без общих концовок.
-    """
-    base_rules = (
-        "Пиши живо и по-человечески, без клише. "
-        "Без списков/нумерации по умолчанию; если пользователь явно просит «план/что делать», можно дать до 3 кратких пунктов. "
-        "В конце — один конкретный уточняющий вопрос по детали ИЛИ мягкая вилка по теме (но не общая фраза «как ты себя чувствуешь?»). "
-        "Не повторяй слова пользователя дословно, не обнуляй тему."
-        "Не начинай ответ с одиночного слова или клишированной формулы (“Понимаю,” “Важно,” “Это сложная тема,” “Измена — …”). Начинай с конкретного наблюдения, уточнения по последним словам пользователя или короткого вывода по сути."
-    )
-
-    microstyles = {
-        "default": (
-            "Тон спокойный и тёплый. 1–3 абзаца по 1–3 предложения. "
-            "Начинай с наблюдения/уточнения или краткого вывода; без «понимаю/это сложно»."
-        ),
-        "friend": (
-            "Разговорнее и проще, но без панибратства. Короткие, конкретные фразы, теплота без патетики. "
-            "Допускается лёгкая ирония, если уместно и безопасно."
-        ),
-        "therapist": (
-            "Психологичный, проясняющий, но без лекций. Аккуратно называй чувства/потребности как гипотезы, не факты. "
-            "Если просят практику — дай микро-шаг на 10–30 минут."
-        ),
-        "18plus": (
-            "Можно смелее формулировки (без грубости). Конкретика, минимум воды. "
-            "Финал — чёткий фокус/вилка по теме."
-        ),
-    }
-
-    text = base_rules + " " + microstyles.get(style_key or "default", microstyles["default"])
-    return text
-
 async def _answer_with_llm(m: Message, user_text: str):
+    """
+    Приоритеты:
+    1) Полностью полагаемся на промпты из app/prompts.py (TALK_SYSTEM_PROMPT / SYSTEM_PROMPT).
+    2) Сверху к системному промпту подмешиваем RAG (reflectai_corpus_v2) отдельным system-сообщением.
+    3) Подмешиваем «долгую память» (daily/weekly/monthly summaries) отдельным system-сообщением.
+    4) История диалога из БД (по умолчанию ~90 последних сообщений за длительный период), затем текущее сообщение.
+    5) Никаких дополнительных «оверлеев», лист-гуардов и перегенераций в bot.py — стиль/ограничения живут в prompts.py.
+    """
+
     chat_id = m.chat.id
     mode = CHAT_MODE.get(chat_id, "talk")
-    style_key = USER_TONE.get(chat_id, "default")
 
-    # 0) Быстрый ответ на «что мы говорили X назад?»
+    # 0) Быстрый спец-ответ на запросы «что мы говорили X назад/недавно…»
     try:
         if await _maybe_answer_memory_question(m, user_text):
             return
     except Exception:
-        pass
+        pass  # не мешаем основному потоку
 
-    # 1) System
+    # 1) Базовый системный промпт строго из prompts.py
     sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
-    overlay = _style_overlay(style_key)
-    if overlay:
-        sys_prompt += "\n\n" + overlay
     if mode == "reflection" and REFLECTIVE_SUFFIX:
-        sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
+        sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
 
-    # 2) История (старые → новые), берём «хвост» и без system-вставок
+    # 2) История беседы из БД (старые -> новые)
     history_msgs: List[dict] = []
     try:
-        history_msgs = await _load_history_from_db(m.from_user.id, limit=120, hours=24*60)
+        # можно поднять/опустить лимит по твоему желанию (здесь 90)
+        history_msgs = await _load_history_from_db(m.from_user.id, limit=90, hours=24*90)
     except Exception:
+        # запасной вариант: in-memory
         try:
-            recent = get_recent_messages(chat_id, limit=70)
+            recent = get_recent_messages(chat_id, limit=90)
             for r in recent:
                 role = "assistant" if r["role"] == "bot" else "user"
                 history_msgs.append({"role": role, "content": r["text"]})
         except Exception:
             history_msgs = []
-    # подрежем хвостом на всякий случай
-    if len(history_msgs) > 80:
-        history_msgs = history_msgs[-80:]
 
-    # 3) RAG
+    # 3) RAG-контекст (reflectai_corpus_v2) — вторым слоем после системного промпта
     rag_ctx = ""
     if rag_search is not None:
         try:
-            rag_ctx = await rag_search(user_text, k=6, max_chars=900, lang="ru")
+            # k/max_chars можно подстроить; lang="ru" оставляем
+            rag_ctx = await rag_search(user_text, k=6, max_chars=1000, lang="ru")
         except Exception:
             rag_ctx = ""
 
-    # 4) Долгая память (саммари)
+    # 4) Долгая память (саммари): daily/weekly/monthly — как мягкий «прошлый опыт»
     sum_block = ""
     try:
         uid = await _ensure_user_id(m.from_user.id)
@@ -1579,128 +1367,50 @@ async def _answer_with_llm(m: Message, user_text: str):
         items = await _fetch_summary_texts_by_ids(ids)
         if items:
             lines = [f"• [{it['period']}] {it['text']}" for it in items]
-            sum_block = "Полезные заметки из прошлых разговоров:\n" + "\n".join(lines)
+            sum_block = (
+                "Заметки из прошлых разговоров (можно учесть при ответе по мере уместности):\n"
+                + "\n".join(lines)
+            )
     except Exception:
         sum_block = ""
 
-    # 5) Guard против списков «по умолчанию»  (как у тебя есть)
-    allow_lists = _wants_structure(user_text)
-    list_guard = (
-    "По умолчанию пиши связным текстом, без списков и нумерации. "
-    + ("Если просят «что делать/план/как поступить», можно дать максимум 3 коротких пункта."
-       if allow_lists else "Сейчас списки и нумерация не нужны.")
-    )
-
-    # ⬇ НОВЫЙ якорь контекста
-    context_guard = (
-    "Опирайся на последние 3–5 сообщений и формулируй первый ход мысли по КЛЮЧЕВЫМ словам из последней реплики "
-    "(например, «измена мужа», «злость и отчаяние»). Не задавай общих вопросов типа «как ты себя чувствуешь?». "
-    "Первое предложение должно явно продолжать текущую тему, без вступительных клише."
-    )
-
-    sys_prompt += "\n\n" + list_guard + "\n\n" + context_guard
-
-    # 6) Соберём итоговые messages (без system) + текущий юзерский текст
-    msgs: List[dict] = []
-    msgs += history_msgs
-    msgs.append({"role": "user", "content": user_text})
-
-    # RAG и саммари дадим через rag_ctx, чтобы адаптер сам корректно подмешал
-    rag_bundle = ""
+    # 5) Сбор сообщений для LLM
+    # ВАЖНО: порядок — system стиль -> system RAG -> system summaries -> история -> текущее сообщение
+    messages: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt}]
     if rag_ctx:
-        rag_bundle += f"{rag_ctx}\n"
+        messages.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
     if sum_block:
-        rag_bundle += f"{sum_block}"
+        messages.append({"role": "system", "content": sum_block})
 
+    messages += history_msgs
+    messages.append({"role": "user", "content": user_text})
+
+    # 6) Вызов LLM (без дополнительных «надстроек» — промпт рулит стилем)
     if chat_with_style is None:
         await send_and_log(m, "Я тебя слышу. Сейчас подключаюсь…", reply_markup=kb_main_menu())
         return
 
+    # слегка варьируем температуру в предсказуемых пределах, чтобы речь была живой
+    temp = 0.78 + (abs(hash(user_text)) % 9) / 100.0  # 0.78–0.86
     LLM_MAX_TOKENS = 480
-    # Варируем температуру повыше — меньше штампов
-    temp_base = 0.80 + (abs(hash(user_text)) % 11) / 100.0  # 0.80–0.90
 
-    def _needs_regen(text_: str) -> bool:
-        banned = _looks_templatey(text_) or ("как ты себя чувствуешь" in (text_ or "").lower())
-        return (not text_) or banned or _too_similar_to_recent(chat_id, text_)
-
-    # === Первая попытка
     try:
         reply = await chat_with_style(
-            system=sys_prompt,
-            messages=msgs,
-            rag_ctx=rag_bundle or None,
-            style_hint=None,
-            temperature=temp_base,
+            messages=messages,
+            temperature=temp,
             max_tokens=LLM_MAX_TOKENS,
         )
     except TypeError:
-        reply = await chat_with_style(msgs, temperature=temp_base, max_tokens=LLM_MAX_TOKENS)
+        # на случай старой сигнатуры
+        reply = await chat_with_style(messages, temperature=temp, max_tokens=LLM_MAX_TOKENS)
     except Exception:
         reply = ""
 
-    # === Антишаблонный реген (до двух попыток)
-    def _fixer_system() -> str:
-        return (
-            "Перепиши ответ живо и по-человечески, без клише и общих концовок. "
-            "Запрещено спрашивать «как ты себя чувствуешь?» и любые его варианты. "
-            "Без списков/нумерации по умолчанию; если пользователь просил план/шаги — оставь не более 3 очень коротких пунктов. "
-            "Текст 1–3 абзаца по 1–3 предложения. "
-            "Начни с наблюдения/уточнения по последним словам пользователя или короткого вывода (НЕ «понимаю/это сложно»). "
-            "В конце — один конкретный уточняющий вопрос по детали ИЛИ мягкая вилка по теме. "
-            "Нельзя использовать фразы: " + "; ".join(BANNED_PHRASES) + "."
-        )
+    if not reply or not reply.strip():
+        reply = "Хочу понять суть поточнее. Что в этой ситуации сейчас болит сильнее всего — один-два предложения?"
 
-    if _needs_regen(reply):
-        for attempt in (0, 1):
-            refine_msgs = [{"role": "user", "content": f"Черновик (перепиши в духе требований):\n\n{reply or '(пусто)'}"}]
-            try:
-                better = await chat_with_style(
-                    system=_fixer_system(),
-                    messages=refine_msgs,
-                    temperature=min(0.94, max(0.72, temp_base + 0.06 + 0.02 * attempt)),
-                    max_tokens=LLM_MAX_TOKENS,
-                )
-            except Exception:
-                better = ""
-            if better and not _needs_regen(better):
-                reply = better
-                break
-
-    # --- Lead-diversity guard
-    try:
-        lead = _lead_span(reply)
-        recent_leads = await _recent_bot_leads(m.from_user.id, k=6)
-        dup_within_two = any(_lead_too_similar(lead, r) for r in recent_leads[:2])
-        dup_recent      = any(_lead_too_similar(lead, r) for r in recent_leads[:5])
-
-        if _is_bad_lead(lead) or dup_within_two or dup_recent:
-            dynamic_bans = [r.split()[0] for r in recent_leads if r]
-            ban_starts = list(BAD_LEAD_PATTERNS) + dynamic_bans + ["привет", "здравствуй"]
-            alt = await _rewrite_lead_unique(reply, ban_starts, style_key)
-            alt_lead = _lead_span(alt)
-            if alt and not _is_bad_lead(alt_lead) and not any(_lead_too_similar(alt_lead, r) for r in recent_leads[:5]):
-                reply = alt
-    except Exception:
-        pass
-
-    if not reply:
-        reply = "Давай сузим: какой момент здесь для тебя самый болезненный? Два-три предложения."
-
+    # 7) Отправляем и логируем как 'bot' (для устойчивой памяти)
     await send_and_log(m, reply, reply_markup=kb_main_menu())
-
-@router.message(Command("debug_prompt"))
-async def on_debug_prompt(m: Message):
-    mode = CHAT_MODE.get(m.chat.id, "talk")
-    style_key = USER_TONE.get(m.chat.id, "default")
-    sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
-    overlay = _style_overlay(style_key)
-    if overlay:
-        sys_prompt += "\n\n" + overlay
-    if mode == "reflection" and REFLECTIVE_SUFFIX:
-        sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
-    preview = sys_prompt[:1200]
-    await m.answer(f"<b>mode</b>: {mode}\n<b>tone</b>: {style_key}\n\n<code>{preview}</code>")
 
 # ===== Текстовые сообщения =====
 @router.message(F.text & ~F.text.startswith("/"))
