@@ -22,10 +22,10 @@ from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as 
 from app.meditations import get_categories, get_items, get_item
 from app.memory import save_user_message, save_bot_message, get_recent_messages
 from app.exercises import TOPICS, EXERCISES
-from app.prompts import SYSTEM_PROMPT as BASE_PROMPT
-from app.prompts import TALK_SYSTEM_PROMPT as TALK_PROMPT
+from app.prompts import SYSTEM_PROMPT, STYLE_SUFFIXES
 try:
-    from app.prompts import REFLECTIVE_SUFFIX  # опционально
+    # В новом prompts.py REFLECTIVE_SUFFIX не обязателен — пусть остаётся дефолт.
+    from app.prompts import REFLECTIVE_SUFFIX  # если добавишь в будущем — подхватится
 except Exception:
     REFLECTIVE_SUFFIX = "\n\n(Режим рефлексии: мягко замедляй темп, задавай вопросы, помогающие осмыслению.)"
 
@@ -1329,10 +1329,14 @@ async def _answer_with_llm(m: Message, user_text: str):
     except Exception:
         pass  # не мешаем основному потоку
 
-    # 1) Базовый системный промпт строго из prompts.py
-    sys_prompt = TALK_PROMPT if mode in ("talk", "reflection") else BASE_PROMPT
+    # 1) Единый SYSTEM_PROMPT + тоновый суффикс + (опц.) рефлексия
+    style = USER_TONE.get(chat_id, "default")  # "default" | "friend" | "therapist" | "18plus"
+    sys_prompt = SYSTEM_PROMPT
+    tone_suffix = STYLE_SUFFIXES.get(style, "")
+    if tone_suffix:
+        sys_prompt += "\n\n" + tone_suffix
     if mode == "reflection" and REFLECTIVE_SUFFIX:
-        sys_prompt = sys_prompt + "\n\n" + REFLECTIVE_SUFFIX
+        sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
 
     # 2) История беседы из БД (старые -> новые)
     history_msgs: List[dict] = []
