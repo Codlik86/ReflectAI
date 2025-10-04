@@ -1463,7 +1463,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     """
 
     # Локальные импорты, чтобы не править верх файла
-    import random
+    import random, re
     from app.prompts import LENGTH_HINTS
 
     chat_id = m.chat.id
@@ -1484,6 +1484,9 @@ async def _answer_with_llm(m: Message, user_text: str):
         sys_prompt += "\n\n" + tone_suffix
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
+
+    # Жёсткая фиксация языка (исправляет редкие вкрапления иероглифов/иностр. токенов)
+    sys_prompt += "\n\nОтвечай строго на русском языке. Не используй иностранные слова и символы без явного запроса."
 
     # ЯВНАЯ подсказка длины по словам-триггерам (перекрывает общий picker)
     try:
@@ -1621,6 +1624,33 @@ async def _answer_with_llm(m: Message, user_text: str):
     # NEW: пост-фильтр — максимум один вопрос
     try:
         reply = _enforce_single_question(reply)
+    except Exception:
+        pass
+
+    # --- Автоперегенерация, если в выдаче есть CJK-символы (чинит случайные «整理» и т.п.) ---
+    try:
+        _CJK_RE = re.compile(r'[\u3400-\u9FFF]')
+        if _CJK_RE.search(reply or "") and chat_with_style is not None:
+            sys_prompt_ru = sys_prompt + "\n\nОтвечай строго на русском. Исключи любые иероглифы и иностранные слова."
+            messages_ru: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt_ru}]
+            if rag_ctx:
+                messages_ru.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
+            if sum_block:
+                messages_ru.append({"role": "system", "content": sum_block})
+            messages_ru += history_msgs
+            messages_ru.append({"role": "user", "content": user_text})
+
+            try:
+                reply2 = await chat_with_style(messages=messages_ru, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+            except TypeError:
+                reply2 = await chat_with_style(messages_ru, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+            except Exception:
+                reply2 = ""
+            if reply2 and reply2.strip():
+                try:
+                    reply = _enforce_single_question(reply2)
+                except Exception:
+                    reply = reply2
     except Exception:
         pass
 
