@@ -26,6 +26,9 @@ from .memory_schema import (
 # основной бот-роутер
 from .bot import router as bot_router
 
+# создание коллекции qdrant
+from app.qdrant_client import ensure_qdrant_ready
+
 # внешние/внутренние API-роутеры
 from app.legal import router as legal_router               # /requisites, /legal/*
 from app.api import payments as payments_api               # /api/payments/yookassa/webhook
@@ -180,6 +183,8 @@ async def on_startup():
     await ensure_memory_schema_async()
     await ensure_users_policy_column_async()
     await ensure_users_created_at_column_async()
+
+    ensure_qdrant_ready()  # гарантируем коллекции и индекс user_id в Qdrant
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
