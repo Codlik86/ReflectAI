@@ -54,7 +54,6 @@ def _build_client() -> QdrantClient:
         )
     except Exception:
         # Фолбэк на ручную сборку host/port (на случай очень «сырых» URL)
-        from urllib.parse import urlparse
         u = urlparse(QDRANT_URL if "://" in QDRANT_URL else "http://" + QDRANT_URL)
         host = u.hostname or QDRANT_URL
         port = u.port or (443 if u.scheme == "https" else 6333)
@@ -100,6 +99,41 @@ def _collection_exists_safe(client: QdrantClient, name: str) -> bool:
         return False
 
 
+def _ensure_user_id_index(client: QdrantClient, collection: str) -> None:
+    """
+    Создаёт payload-индекс по полю user_id (integer) для заданной коллекции.
+    Безопасно: не падает, если индекс уже есть или версия клиента иная.
+    """
+    try:
+        # Попытка через enum типа
+        schema_enum = getattr(qm, "PayloadSchemaType", None)
+        if schema_enum is not None:
+            client.create_payload_index(
+                collection_name=collection,
+                field_name="user_id",
+                field_schema=schema_enum.INTEGER,
+                wait=True,
+            )
+            return
+        # Фолбэк: явный словарь-схема
+        client.create_payload_index(
+            collection_name=collection,
+            field_name="user_id",
+            field_schema={"type": "integer"},
+            wait=True,
+        )
+    except Exception as e:
+        # Обычно приходит AlreadyExists / BadRequest при повторном создании — игнорируем.
+        msg = str(e)
+        if "already exists" in msg.lower():
+            return
+        # Если коллекции ещё нет — её создадут выше, после чего снова вызовут этот метод.
+        if "not found" in msg.lower():
+            return
+        # Логируем предупреждение, но не валим процесс.
+        print(f"[qdrant] ensure user_id index warning: {e}")
+
+
 def get_collection_name() -> str:
     return QDRANT_COLLECTION
 
@@ -131,10 +165,12 @@ def ensure_collection() -> bool:
 def ensure_summaries_collection() -> bool:
     """
     Гарантирует, что коллекция саммарей создана. Используем именованный вектор "text".
+    Также гарантируем payload-индекс по user_id (integer) для быстрых фильтров.
     Возвращает True при успехе, False при ошибке.
     """
     try:
         client = get_client()
+        created_now = False
         if not _collection_exists_safe(client, QDRANT_SUMMARIES_COLLECTION):
             # Именованный вектор: {"text": VectorParams(...)}
             named_cfg = {"text": qm.VectorParams(size=EMBED_DIM, distance=qm.Distance.COSINE)}
@@ -142,10 +178,24 @@ def ensure_summaries_collection() -> bool:
                 collection_name=QDRANT_SUMMARIES_COLLECTION,
                 vectors_config=named_cfg,
             )
+            created_now = True
+
+        # В любом случае убедимся, что есть индекс по user_id
+        _ensure_user_id_index(client, QDRANT_SUMMARIES_COLLECTION)
         return True
     except Exception as e:
         print(f"[qdrant] ensure_summaries_collection WARNING: {e}")
         return False
+
+
+def ensure_qdrant_ready() -> bool:
+    """
+    Хелпер для инициализации всего нужного: обе коллекции + индекс.
+    Можно вызывать из старта приложения.
+    """
+    ok1 = ensure_collection()
+    ok2 = ensure_summaries_collection()
+    return ok1 and ok2
 
 
 def ping_qdrant() -> bool:
@@ -162,7 +212,7 @@ def ping_qdrant() -> bool:
 
 
 __all__ = [
-    "get_client", "ensure_collection", "ensure_summaries_collection", "close_client",
+    "get_client", "ensure_collection", "ensure_summaries_collection", "ensure_qdrant_ready", "close_client",
     "get_collection_name", "get_summaries_collection_name",
     "QDRANT_COLLECTION", "QDRANT_SUMMARIES_COLLECTION",
     "QDRANT_URL", "QDRANT_API_KEY", "EMBED_DIM", "ping_qdrant"
