@@ -1485,10 +1485,19 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
 
-    # NEW: авто-подсказка по длине ответа
+    # ЯВНАЯ подсказка длины по словам-триггерам (перекрывает общий picker)
     try:
-        len_key = _pick_len_hint(user_text, mode)
-        sys_prompt += "\n\n" + LENGTH_HINTS.get(len_key, "")
+        t = (user_text or "").lower()
+        need_deep = any(x in t for x in ["разложи подробно", "подробно", "план", "что делать по шагам", "структурируй", "инструкция"])
+        need_medium = any(x in t for x in ["объясни", "поясни", "структурируй", "как это работает", "почему"])
+
+        if need_deep:
+            sys_prompt += "\n\n" + LENGTH_HINTS["deep"]
+        elif need_medium:
+            sys_prompt += "\n\n" + LENGTH_HINTS["medium"]
+        else:
+            # по умолчанию подсказываем короткий формат, остальное дорегулируем ниже
+            sys_prompt += "\n\n" + LENGTH_HINTS["short"]
     except Exception:
         pass
 
@@ -1541,8 +1550,11 @@ async def _answer_with_llm(m: Message, user_text: str):
     rag_ctx = ""
     if rag_search is not None:
         try:
-            # k/max_chars можно подстроить; lang="ru" оставляем
-            rag_ctx = await rag_search(user_text, k=6, max_chars=1000, lang="ru")
+            # адаптивный k/max_chars от длины запроса
+            qlen = len((user_text or "").split())
+            k = 3 if qlen < 8 else 6 if qlen < 20 else 8
+            max_chars = 600 if qlen < 8 else 1000 if qlen < 30 else 1400
+            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ru")
         except Exception:
             rag_ctx = ""
 
@@ -1611,7 +1623,53 @@ async def _answer_with_llm(m: Message, user_text: str):
         reply = _enforce_single_question(reply)
     except Exception:
         pass
-    
+
+    # --- Анти-повторы стартовых формул: мягкая перегенерация при совпадении ---
+    try:
+        # берём/создаём in-memory LRU в модуле
+        store = globals().setdefault("LAST_OPENERS", {})
+        from collections import deque as _dq
+        if chat_id not in store:
+            store[chat_id] = _dq(maxlen=3)
+
+        def _extract_opener_local(text: str) -> str:
+            line = (text or "").strip().split("\n", 1)[0]
+            return line[:60].lower()
+
+        opener = _extract_opener_local(reply)
+        seen = store.get(chat_id)
+        opener_seen = opener in seen
+
+        if opener_seen and chat_with_style is not None:
+            # аккуратный хинт: переписать ПЕРВУЮ строку без клише/повторов
+            sys_prompt_r = sys_prompt + "\n\n(Перепиши первую строку без клише и повторов, начни с наблюдения по сути ситуации.)"
+
+            messages_r: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt_r}]
+            if rag_ctx:
+                messages_r.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
+            if sum_block:
+                messages_r.append({"role": "system", "content": sum_block})
+            messages_r += history_msgs
+            messages_r.append({"role": "user", "content": user_text})
+
+            try:
+                reply_r = await chat_with_style(messages=messages_r, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+            except TypeError:
+                reply_r = await chat_with_style(messages_r, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+            except Exception:
+                reply_r = ""
+
+            if reply_r and reply_r.strip():
+                try:
+                    reply = _enforce_single_question(reply_r)
+                except Exception:
+                    reply = reply_r
+
+        # обновляем LRU
+        seen.append(_extract_opener_local(reply))
+    except Exception:
+        pass
+
     # 7) Отправляем и логируем как 'bot' (для устойчивой памяти)
     await send_and_log(m, reply, reply_markup=kb_main_menu())
 
