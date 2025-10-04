@@ -37,46 +37,38 @@ _client: QdrantClient | None = None
 
 def _build_client() -> QdrantClient:
     """
-    Создаём клиента с умным парсингом QDRANT_URL.
-    Поддерживаем:
-      - url=http(s)://host:6333 (REST) + optional gRPC на 6334
-      - prefer_grpc=True: включаем gRPC, если доступен; иначе используем REST
+    Создаём клиента, максимально доверяя библиотеке разбор URL.
+    Поддерживает https://host:6333, http://host:6333 и т.д.
     """
     if not QDRANT_URL:
         raise RuntimeError("QDRANT_URL is not set")
 
-    u = urlparse(QDRANT_URL)
-    if not u.scheme:
-        u = urlparse("http://" + QDRANT_URL)
-
-    host = u.hostname or QDRANT_URL
-    port = u.port or (443 if u.scheme == "https" else 6333)
-    https = (u.scheme == "https")
-    grpc_port = QDRANT_GRPC_PORT
-
-    if PREFER_GRPC:
-        try:
-            return QdrantClient(
-                host=host,
-                port=port,
-                grpc_port=grpc_port,
-                api_key=QDRANT_API_KEY,
-                https=https,   # REST
-                ssl=https,     # gRPC
-                prefer_grpc=True,
-                timeout=60.0,
-            )
-        except Exception:
-            # Падаем на REST
-            pass
-
-    return QdrantClient(
-        host=host,
-        port=port,
-        api_key=QDRANT_API_KEY,
-        https=https,
-        timeout=60.0,
-    )
+    # Сначала пробуем «умный» вариант: url=...
+    try:
+        return QdrantClient(
+            url=QDRANT_URL,
+            api_key=QDRANT_API_KEY,
+            prefer_grpc=PREFER_GRPC,
+            grpc_port=QDRANT_GRPC_PORT,
+            timeout=60.0,
+        )
+    except Exception:
+        # Фолбэк на ручную сборку host/port (на случай очень «сырых» URL)
+        from urllib.parse import urlparse
+        u = urlparse(QDRANT_URL if "://" in QDRANT_URL else "http://" + QDRANT_URL)
+        host = u.hostname or QDRANT_URL
+        port = u.port or (443 if u.scheme == "https" else 6333)
+        https = (u.scheme == "https")
+        return QdrantClient(
+            host=host,
+            port=port,
+            grpc_port=QDRANT_GRPC_PORT,
+            api_key=QDRANT_API_KEY,
+            https=https,
+            ssl=https,
+            prefer_grpc=PREFER_GRPC,
+            timeout=60.0,
+        )
 
 
 def get_client() -> QdrantClient:
