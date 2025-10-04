@@ -764,7 +764,7 @@ async def diag_db():
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import text as _sql
 from app.db.core import async_session as _summ_sess
-from app.memory_summarizer import make_daily, rollup_weekly, rollup_topic_month
+from app.memory_summarizer import make_daily, rollup_weekly, rollup_monthly
 
 def _utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -847,7 +847,7 @@ async def admin_summaries_monthly():
     ok, err = 0, 0
     for uid in uids:
         try:
-            await rollup_topic_month(int(uid), prev_month_start)
+            await rollup_monthly(int(uid), prev_month_start)
             ok += 1
         except Exception as e:
             print("[/api/admin/summaries/monthly]", uid, "->", repr(e))

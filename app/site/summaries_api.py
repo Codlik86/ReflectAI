@@ -7,7 +7,7 @@ import os
 
 from sqlalchemy import text as sql
 from app.db.core import async_session
-from app.memory_summarizer import make_daily, rollup_weekly, rollup_topic_month
+from app.memory_summarizer import make_daily, rollup_weekly, rollup_monthly
 from app.rag_summaries import delete_user_summaries
 
 router = APIRouter(prefix="/api/admin/summaries", tags=["summaries"])
@@ -162,7 +162,7 @@ async def run_monthly(
     ok, fail = 0, 0
     for uid in ids:
         try:
-            await rollup_topic_month(uid, month_start)
+            await rollup_monthly(uid, month_start)
             ok += 1
         except Exception as e:
             fail += 1
@@ -224,7 +224,7 @@ async def rebuild_for_user(
             mo += 12
         ms = datetime(y, mo, 1, tzinfo=timezone.utc)
         try:
-            await rollup_topic_month(user_id, ms)
+            await rollup_monthly(user_id, ms)
         except Exception as e:
             print(f"[rebuild/monthly] user={user_id} month={ms.date()} ERROR: {e}")
 

@@ -8,7 +8,7 @@ import click
 from sqlalchemy import text as sql
 
 from app.db.core import async_session
-from app.memory_summarizer import make_daily, rollup_weekly, rollup_topic_month
+from app.memory_summarizer import make_daily, rollup_weekly, rollup_monthly
 from app.rag_summaries import delete_user_summaries
 
 
@@ -87,7 +87,7 @@ async def cmd_topic(month_start_utc: str | None) -> None:
     async with async_session() as s:
         user_ids = (await s.execute(sql("SELECT id FROM users"))).scalars().all()
     for uid in user_ids:
-        await rollup_topic_month(uid, start)
+        await rollup_monthly(uid, start)
 
 
 @cli.command("purge-user")
