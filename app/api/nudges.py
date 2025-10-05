@@ -58,20 +58,21 @@ def _kb_pay() -> InlineKeyboardMarkup:
     ])
 
 
-async def _pick_targets(period: str) -> List[Dict[str, Any]]:
+async def _pick_targets(period: str, min_days: int | None = None, max_days: int | None = None) -> List[Dict[str, Any]]:
     """
     Возвращает список юзеров для пуша.
     period: 'week' | 'month'
-    Фильтры:
-      - last_activity ∈ [7,30) для week; ≥30 для month
-      - не отправляли такой пуш ранее (см. bot_events)
+    min_days/max_days — переопределяют стандартные пороги (week: 7..30, month: >=30)
     """
     assert period in ("week", "month")
     if period == "week":
-        cond = "last_at <= NOW() - INTERVAL '7 days' AND last_at > NOW() - INTERVAL '30 days'"
+        min_d = min_days if (min_days is not None) else 7
+        max_d = max_days if (max_days is not None) else 30
+        cond = f"last_at <= NOW() - INTERVAL '{int(min_d)} days' AND last_at > NOW() - INTERVAL '{int(max_d)} days'"
         event_type = "nudge_week"
     else:
-        cond = "last_at <= NOW() - INTERVAL '30 days'"
+        min_d = min_days if (min_days is not None) else 30
+        cond = f"last_at <= NOW() - INTERVAL '{int(min_d)} days'"
         event_type = "nudge_month"
 
     sql = f"""
@@ -135,6 +136,8 @@ def _msg_for_user(has_access: bool, period: str) -> Tuple[str, InlineKeyboardMar
 async def run_nudges(
     period: str = Query(pattern="^(week|month)$"),
     dry_run: int = Query(0, description="1 — только посчитать, не отправлять"),
+    min_days: int | None = Query(None),
+    max_days: int | None = Query(None),
     x_admin_secret: str = Header(default="", alias="X-Admin-Secret")
 ):
     if x_admin_secret != ADMIN_API_SECRET:
@@ -143,7 +146,7 @@ async def run_nudges(
     if not BOT_TOKEN:
         raise HTTPException(status_code=500, detail="TELEGRAM_BOT_TOKEN is missing")
 
-    targets = await _pick_targets(period)
+    targets = await _pick_targets(period, min_days=min_days, max_days=max_days)
 
     # Проверим доступ и отправим
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -174,3 +177,23 @@ async def run_nudges(
                 print(f"[nudges] send error for user {uid} ({tg_id}): {e}")
 
     return {"period": period, "checked": checked, "sent": 0 if dry_run else sent}
+
+@router.post("/send_one")
+async def send_one(
+    tg_id: int,
+    kind: str = Query(pattern="^(week|month)$"),
+    has_access: int = Query(1, description="1 — как будто подписка активна; 0 — как будто нет"),
+    x_admin_secret: str = Header(default="", alias="X-Admin-Secret")
+):
+    if x_admin_secret != ADMIN_API_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="TELEGRAM_BOT_TOKEN is missing")
+
+    text, kb = _msg_for_user(bool(has_access), "week" if kind == "week" else "month")
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    try:
+        await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
