@@ -33,6 +33,7 @@ from app.qdrant_client import ensure_qdrant_ready
 from app.legal import router as legal_router               # /requisites, /legal/*
 from app.api import payments as payments_api               # /api/payments/yookassa/webhook
 from app.api import admin as admin_api                     # /api/admin/*
+from app.api import nudges as nudges_api               # /api/admin/nudges/*
 
 # админка (HTML)
 from app.site.admin_ui import router as admin_ui_router    # /admin
@@ -68,6 +69,7 @@ app.include_router(legal_router)                        # /requisites, /legal/*
 app.include_router(payments_api.router, prefix="")      # /api/payments/yookassa/webhook
 app.include_router(admin_api.router,    prefix="")      # /api/admin/*
 app.include_router(admin_ui_router)                     # /admin (HTML)
+app.include_router(nudges_api.router,    prefix="")    # /api/admin/nudges/*
 
 # НОВОЕ: подключаем API для саммари и maintenance
 app.include_router(summaries_router,       prefix="/api")                    # /api/summaries/*
