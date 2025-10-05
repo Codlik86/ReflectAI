@@ -150,35 +150,36 @@ async def run_nudges(
     targets = await _pick_targets(period, min_days=min_days, max_days=max_days)
 
     # Проверим доступ и отправим
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     sent = 0
     checked = 0
 
-    async for session in get_session():
-        for row in targets:
-            checked += 1
-            uid = int(row["user_id"])
-            tg_id = int(row["tg_id"])
+    # корректно открываем и закрываем aiohttp-сессию бота
+    async with Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) as bot:
+        async for session in get_session():
+            for row in targets:
+                checked += 1
+                uid = int(row["user_id"])
+                tg_id = int(row["tg_id"])
 
-            try:
-                access_ok = await check_access(session, uid)
-            except Exception:
-                access_ok = False
+                try:
+                    access_ok = await check_access(session, uid)
+                except Exception:
+                    access_ok = False
 
-            if dry_run:
-                continue
+                if dry_run:
+                    continue
 
-            text, kb = _msg_for_user(access_ok, period)
-            try:
-                if kb:
-                    await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
-                else:
-                    await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
-                sent += 1
-                await _mark_sent(uid, f"nudge_{period}", {"has_access": access_ok})
-            except Exception as e:
-                # не стопаем массовую рассылку — просто лог
-                print(f"[nudges] send error for user {uid} ({tg_id}): {e}")
+                text, kb = _msg_for_user(access_ok, period)
+                try:
+                    if kb:
+                        await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+                    else:
+                        await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
+                    sent += 1
+                    await _mark_sent(uid, f"nudge_{period}", {"has_access": access_ok})
+                except Exception as e:
+                    # не стопаем массовую рассылку — просто лог
+                    print(f"[nudges] send error for user {uid} ({tg_id}): {e}")
 
     return {"period": period, "checked": checked, "sent": 0 if dry_run else sent}
 
@@ -196,12 +197,15 @@ async def send_one(
         raise HTTPException(status_code=500, detail="TELEGRAM_BOT_TOKEN is missing")
 
     text, kb = _msg_for_user(bool(has_access), "week" if kind == "week" else "month")
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    try:
-        if kb:
-            await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
-        else:
-            await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+
+    # тут тоже контекстный менеджер — чтобы не оставалась открытая сессия
+    async with Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) as bot:
+        try:
+            if kb:
+                await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+            else:
+                await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+

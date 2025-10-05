@@ -229,6 +229,11 @@ async def on_shutdown():
         except asyncio.CancelledError:
             pass
 
+           # ↓↓↓ добавь это
+    with suppress(Exception):
+        # aiogram v3: корректно закрыть aiohttp-сессию бота
+        await bot.session.close()
+
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(
     request: Request,
