@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import os
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
-from fastapi import APIRouter, Header, Response, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -23,6 +23,8 @@ if not BOT_TOKEN:
     # не бросаем исключение при импортe, но в рантайме проверим
     pass
 
+
+# ---- Тексты уведомлений ----
 
 WEEK_MSG_ACTIVE = (
     "Привет! Неделю не виделись. Если сейчас всё спокойно — я искренне рад за тебя. "
@@ -45,18 +47,15 @@ MONTH_MSG_NOACCESS = (
 )
 
 
-def _kb_menu() -> InlineKeyboardMarkup:
+# ---- Клавиатуры ----
+
+def _kb_pay_only() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")]
+        [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")]
     ])
 
 
-def _kb_pay() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")],
-        [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
-    ])
-
+# ---- Вспомогательные функции ----
 
 async def _pick_targets(period: str, min_days: int | None = None, max_days: int | None = None) -> List[Dict[str, Any]]:
     """
@@ -121,16 +120,18 @@ def json_dumps(obj: Dict[str, Any]) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
-def _msg_for_user(has_access: bool, period: str) -> Tuple[str, InlineKeyboardMarkup]:
+def _msg_for_user(has_access: bool, period: str) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
     if has_access and period == "week":
-        return WEEK_MSG_ACTIVE, _kb_menu()
+        return WEEK_MSG_ACTIVE, None
     if has_access and period == "month":
-        return MONTH_MSG_ACTIVE, _kb_menu()
+        return MONTH_MSG_ACTIVE, None
     if not has_access and period == "week":
-        return WEEK_MSG_NOACCESS, _kb_pay()
+        return WEEK_MSG_NOACCESS, _kb_pay_only()
     # not access & month
-    return MONTH_MSG_NOACCESS, _kb_pay()
+    return MONTH_MSG_NOACCESS, _kb_pay_only()
 
+
+# ---- Эндпоинты ----
 
 @router.post("/run")
 async def run_nudges(
@@ -169,7 +170,10 @@ async def run_nudges(
 
             text, kb = _msg_for_user(access_ok, period)
             try:
-                await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+                if kb:
+                    await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+                else:
+                    await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
                 sent += 1
                 await _mark_sent(uid, f"nudge_{period}", {"has_access": access_ok})
             except Exception as e:
@@ -177,6 +181,7 @@ async def run_nudges(
                 print(f"[nudges] send error for user {uid} ({tg_id}): {e}")
 
     return {"period": period, "checked": checked, "sent": 0 if dry_run else sent}
+
 
 @router.post("/send_one")
 async def send_one(
@@ -193,7 +198,10 @@ async def send_one(
     text, kb = _msg_for_user(bool(has_access), "week" if kind == "week" else "month")
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     try:
-        await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+        if kb:
+            await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+        else:
+            await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}
