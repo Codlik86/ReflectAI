@@ -165,41 +165,60 @@ async def on_start_payment_deeplink(m: Message):
         reply_markup=kb,
     )
 
-# === Универсальный /start <payload>: deep-link из рекламы ===
+# === Универсальный /start <payload>: deep-link из рекламы (под твою схему) ===
 @router.message(F.text.regexp(r"^/start(\s+.+)?$"))
 async def on_start_with_payload(m: Message):
+    from sqlalchemy import text as _sql
+    import json
+
     raw = (m.text or "").strip()
     parts = raw.split(maxsplit=1)
     payload = (parts[1] if len(parts) > 1 else "").strip()
 
-    # Спец-перенаправление: paid_* обрабатывается верхним хендлером
+    # 1) служебные paid_* отдаём предыдущему хендлеру
     if payload.lower().startswith("paid_"):
         return
 
-    # 1) Трекинг рекламного источника по ad_links.start_code
-    saved_source = False
+    # 2) попытка зафиксировать источник рекламы
+    saved = False
     if payload:
         try:
+            # ad_code = первые 3 символа (A01, A02, …)
+            ad_code = payload[:3].upper() if len(payload) >= 3 else None
+
             async with async_session() as s:
-                r = await s.execute(text("""
-                    SELECT id, ad_id FROM ad_links WHERE start_code = :code
-                """), {"code": payload})
-                link = r.mappings().first()
-                if link:
-                    uid = await _ensure_user_id(m.from_user.id)
-                    await s.execute(text("""
-                        INSERT INTO ad_starts (user_id, ad_link_id, created_at)
-                        VALUES (:u, :l, NOW())
-                    """), {"u": int(uid), "l": int(link["id"])})
-                    await s.commit()
-                    saved_source = True
+                ad_id = None
+                if ad_code and ad_code.isalnum():
+                    r = await s.execute(_sql("SELECT id FROM ads WHERE code = :c LIMIT 1"), {"c": ad_code})
+                    row = r.first()
+                    ad_id = int(row[0]) if row else None
+
+                raw_j = {
+                    "text": m.text,
+                    "date": getattr(m, "date", None).isoformat() if getattr(m, "date", None) else None,
+                    "chat_id": m.chat.id,
+                }
+
+                await s.execute(_sql("""
+                    INSERT INTO ads_starts (ad_id, start_code, tg_user_id, username, first_name, ref_channel, raw_payload, created_at)
+                    VALUES (:ad_id, :code, :tg, :un, :fn, NULL, :raw, NOW())
+                """), {
+                    "ad_id": ad_id,  # может быть NULL, если неизвестен код
+                    "code": payload,
+                    "tg": int(m.from_user.id),
+                    "un": getattr(m.from_user, "username", None),
+                    "fn": getattr(m.from_user, "first_name", None),
+                    "raw": json.dumps(raw_j, ensure_ascii=False),
+                })
+                await s.commit()
+                saved = True
         except Exception as e:
             print("[ads] start tracking error:", repr(e))
 
-    # 2) Обычный онбординг
+    # 3) обычный онбординг
     CHAT_MODE[m.chat.id] = "talk"
     img = get_onb_image("cover")
-    prefix = "Спасибо, что заглянул(а) из рекламы 💛\n\n" if saved_source else ""
+    prefix = "Спасибо, что заглянул(а) из рекламы 💛\n\n" if saved else ""
     if img:
         try:
             await m.answer_photo(img, caption=prefix + ONB_1_TEXT, reply_markup=kb_onb_step1())
