@@ -200,7 +200,7 @@ async def on_start_with_payload(m: Message):
                 }
 
                 await s.execute(_sql("""
-                    INSERT INTO ads_starts (ad_id, start_code, tg_user_id, username, first_name, ref_channel, raw_payload, created_at)
+                    INSERT INTO ad_starts (ad_id, start_code, tg_user_id, username, first_name, ref_channel, raw_payload, created_at)
                     VALUES (:ad_id, :code, :tg, :un, :fn, NULL, :raw, NOW())
                 """), {
                     "ad_id": ad_id,  # может быть NULL, если неизвестен код
