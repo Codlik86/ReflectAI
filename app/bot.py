@@ -165,6 +165,50 @@ async def on_start_payment_deeplink(m: Message):
         reply_markup=kb,
     )
 
+# === Универсальный /start <payload>: deep-link из рекламы ===
+@router.message(F.text.regexp(r"^/start(\s+.+)?$"))
+async def on_start_with_payload(m: Message):
+    raw = (m.text or "").strip()
+    parts = raw.split(maxsplit=1)
+    payload = (parts[1] if len(parts) > 1 else "").strip()
+
+    # Спец-перенаправление: paid_* обрабатывается верхним хендлером
+    if payload.lower().startswith("paid_"):
+        return
+
+    # 1) Трекинг рекламного источника по ad_links.start_code
+    saved_source = False
+    if payload:
+        try:
+            async with async_session() as s:
+                r = await s.execute(text("""
+                    SELECT id, ad_id FROM ad_links WHERE start_code = :code
+                """), {"code": payload})
+                link = r.mappings().first()
+                if link:
+                    uid = await _ensure_user_id(m.from_user.id)
+                    await s.execute(text("""
+                        INSERT INTO ad_starts (user_id, ad_link_id, created_at)
+                        VALUES (:u, :l, NOW())
+                    """), {"u": int(uid), "l": int(link["id"])})
+                    await s.commit()
+                    saved_source = True
+        except Exception as e:
+            print("[ads] start tracking error:", repr(e))
+
+    # 2) Обычный онбординг
+    CHAT_MODE[m.chat.id] = "talk"
+    img = get_onb_image("cover")
+    prefix = "Спасибо, что заглянул(а) из рекламы 💛\n\n" if saved_source else ""
+    if img:
+        try:
+            await m.answer_photo(img, caption=prefix + ONB_1_TEXT, reply_markup=kb_onb_step1())
+            return
+        except Exception:
+            pass
+    await m.answer(prefix + ONB_1_TEXT, reply_markup=kb_onb_step1())
+
+
 # ===== Универсальный paywall в рантайме ======================================
 def _require_access_msg(_: Message) -> bool:
     """
@@ -977,20 +1021,6 @@ PAYWALL_POST_TEXT = (
 def kb_onb_step3() -> ReplyKeyboardMarkup:
     # не используем на 3-м шаге: правую клавиатуру прячем до CTA
     return kb_main_menu()
-
-
-@router.message(CommandStart())
-async def on_start(m: Message):
-    CHAT_MODE[m.chat.id] = "talk"
-    img = get_onb_image("cover")
-    if img:
-        try:
-            await m.answer_photo(img, caption=ONB_1_TEXT, reply_markup=kb_onb_step1())
-            return
-        except Exception:
-            pass
-    await m.answer(ONB_1_TEXT, reply_markup=kb_onb_step1())
-
 
 @router.callback_query(F.data == "onb:step2")
 async def on_onb_step2(cb: CallbackQuery):
