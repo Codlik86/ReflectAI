@@ -1,39 +1,59 @@
-# macOS
+# ===================== macOS =====================
 .DS_Store
 
-# Python
-__pycache__/
-*.pyc
+# ===================== IDE / Editors =====================
+.vscode/
+.idea/
+*.iml
 
-# venv
+# ===================== Python: bytecode & caches =====================
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===================== Virtualenvs =====================
 .venv/
 venv/
 
-# local env & secrets
+# ===================== Local env & secrets =====================
 .env
 .env.*
+!.env.example          # оставим шаблон, если нужен
 
-# caches / temp
-backups/
-.mypy_cache/
-.pytest_cache/
+# ===================== Coverage / reports =====================
 .coverage
+htmlcov/
 
-# alembic artifacts
-migrations/*_pycache__/
+# ===================== Build / packaging =====================
+dist/
+build/
+*.egg-info/
 
-# RAG raw corpus (keep out of repo)
+# ===================== Logs & temp =====================
+logs/
+*.log
+backups/
+
+# ===================== Databases / local state =====================
+*.db
+*.sqlite
+*.sqlite3
+
+# ===================== Alembic artifacts (только кэши) =====================
+migrations/**/__pycache__/
+
+# ===================== Data / corpus (не хранить сырые данные в гите) =====================
 data/
 corpus/
-*.txt*.db
+*.txt
+*.tsv
+*.csv
+*.jsonl
+*.parquet
 
-# local artifacts
-*.db
-
-# local sqlite/db artifacts
-*.db
-
-# local sqlite/db artifacts
-*.db
+# ===================== Run / output artifacts =====================
 /runs/
 /out/
