@@ -35,3 +35,5 @@ corpus/
 
 # local sqlite/db artifacts
 *.db
+/runs/
+/out/

@@ -1,5 +1,0 @@
-scenario,tone,len_hint,turns,pct_end_with_question,pct_one_question_ok,avg_reply_chars,num_too_long_replies(>900ch)
-Workplace disrespect & boundaries,therapist,medium,16,100.0,87.5,305.1,0
-Relationship: suspicion of infidelity,friend,medium,16,100.0,100.0,464.9,0
-Panic/grounding under heavy stress,therapist,short,12,100.0,91.7,349.7,0
-Procrastination on important personal project,default,deep,16,100.0,81.2,689.7,0
