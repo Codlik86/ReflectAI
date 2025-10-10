@@ -57,3 +57,4 @@ corpus/
 # ===================== Run / output artifacts =====================
 /runs/
 /out/
+users.csv
