@@ -21,7 +21,34 @@ llm_adapter.py
     CHAT_MODEL (по умолчанию gpt-4o-mini)
 """
 
+# ===== Новые переменные и алиасы для гибкой маршрутизации моделей =====
 DEFAULT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
+STRONG_MODEL = os.getenv("CHAT_MODEL_STRONG", "gpt-5")  # «старшая» модель для длинных/сложных ответов
+TALK_MODEL = os.getenv("CHAT_MODEL_TALK", STRONG_MODEL)  # можно задать отдельную для talk/reflection
+FALLBACK_TO_DEFAULT = os.getenv("LLM_FALLBACK_TO_DEFAULT", "1") == "1"  # мягкий фолбэк при 5xx/429
+
+# Алиасы имён моделей на случай отличий в прокси-доке
+MODEL_ALIASES: Dict[str, str] = {
+    "chat-gpt5": "gpt-5",
+    "gpt-5-thinking": "gpt-5",
+    "gpt5": "gpt-5",
+    "gpt-4o-mini": "gpt-4o-mini",
+}
+
+def _resolve_model(name: str) -> str:
+    return MODEL_ALIASES.get(name, name)
+
+def _pick_model(ctx: Dict[str, Any]) -> str:
+    """
+    Простейший маршрутизатор по контексту:
+    ctx: { mode: 'talk'|'reflection'|'work'|'system', is_crisis: bool, needs_long_context: bool }
+    """
+    if ctx.get("is_crisis") or ctx.get("needs_long_context"):
+        return _resolve_model(STRONG_MODEL)
+    if ctx.get("mode") in ("talk", "reflection"):
+        return _resolve_model(TALK_MODEL or STRONG_MODEL)
+    return _resolve_model(DEFAULT_MODEL)
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.proxyapi.ru/openai/v1").rstrip("/")
 
@@ -32,7 +59,7 @@ class LLMAdapter:
     def __init__(self, *, api_key: Optional[str] = None, base_url: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or OPENAI_API_KEY
         self.base_url = (base_url or OPENAI_BASE_URL).rstrip("/")
-        self.model = model or DEFAULT_MODEL
+        self.model = _resolve_model(model or DEFAULT_MODEL)
 
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY не задан в окружении")
@@ -88,7 +115,7 @@ class LLMAdapter:
         # Базовый payload + предсказуемый дефолт response_format
         response_format = kwargs.pop("response_format", {"type": "text"})
         payload: Dict[str, Any] = {
-            "model": model or self.model,
+            "model": _resolve_model(model or self.model),
             "messages": msg_list,
             "temperature": float(temperature),
             "response_format": response_format,
@@ -106,7 +133,7 @@ class LLMAdapter:
         client = await self._get_client()
         url = "/chat/completions"  # OpenAI-compatible path
 
-        # Устойчивые ретраи для 429/5xx + лёгкий бэкофф
+        # Устойчивые ретраи для 429/5xx + лёгкий бэкофф; при неудаче — опциональный фолбэк на DEFAULT_MODEL
         last_err: Optional[Exception] = None
         for attempt in range(3):
             try:
@@ -117,11 +144,23 @@ class LLMAdapter:
                 return data["choices"][0]["message"]["content"].strip()
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
+                # Попытки и бэкофф
                 if status in (429, 500, 502, 503, 504) and attempt < 2:
                     import asyncio, random
                     await asyncio.sleep(0.6 * (attempt + 1) + random.random() * 0.3)
                     last_err = e
                     continue
+                # Мягкий фолбэк на DEFAULT_MODEL (если сейчас не она)
+                try_model = payload.get("model")
+                if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
+                    try:
+                        payload["model"] = _resolve_model(DEFAULT_MODEL)
+                        r2 = await client.post(url, json=payload)
+                        r2.raise_for_status()
+                        data2 = r2.json()
+                        return data2["choices"][0]["message"]["content"].strip()
+                    except Exception:
+                        pass
                 raise RuntimeError(f"LLM HTTP error {status}: {e.response.text}") from e
             except Exception as e:
                 if attempt < 2:
@@ -129,6 +168,17 @@ class LLMAdapter:
                     await asyncio.sleep(0.5 * (attempt + 1) + random.random() * 0.2)
                     last_err = e
                     continue
+                # Фолбэк на DEFAULT_MODEL при сетевых/прочих сбоях
+                try_model = payload.get("model")
+                if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
+                    try:
+                        payload["model"] = _resolve_model(DEFAULT_MODEL)
+                        r2 = await client.post(url, json=payload)
+                        r2.raise_for_status()
+                        data2 = r2.json()
+                        return data2["choices"][0]["message"]["content"].strip()
+                    except Exception:
+                        pass
                 raise RuntimeError(f"LLM request failed: {e}") from e
 
         # На всякий случай (сюда не дойдём при raise выше)
@@ -205,6 +255,11 @@ async def chat_with_style(
     rag_ctx: Optional[str] = None,
     # сэмплинг
     temperature: float = 0.6,
+    # ===== Новые параметры маршрутизации модели =====
+    mode: Optional[str] = None,                 # 'talk'|'reflection'|'work'|'system'
+    is_crisis: bool = False,
+    needs_long_context: bool = False,
+    model_override: Optional[str] = None,       # жёсткое переопределение модели
     **kwargs: Any
 ) -> str:
     """
@@ -215,7 +270,18 @@ async def chat_with_style(
     style_text = style if style is not None else style_hint
     sys = _inject_style_into_system(system, style_text)
 
-    # 2) Если нам передали messages, аккуратно добавим/заменим system
+    # 2) Выбор модели (маршрутизатор)
+    chosen_model = None
+    if model_override:
+        chosen_model = _resolve_model(model_override)
+    else:
+        chosen_model = _pick_model({
+            "mode": mode,
+            "is_crisis": is_crisis,
+            "needs_long_context": needs_long_context,
+        })
+
+    # 3) Если нам передали messages, аккуратно добавим/заменим system
     if messages is not None:
         msgs: List[Dict[str, str]] = list(messages)
         need_inject = bool(system or style_text)
@@ -236,14 +302,14 @@ async def chat_with_style(
 
         # Подмешиваем RAG-контекст отдельным system-сообщением в хвост
         msgs = _append_rag_context(msgs, rag_ctx)
-        return await chat(messages=msgs, temperature=temperature, **kwargs)
+        return await chat(messages=msgs, temperature=temperature, model=chosen_model, **kwargs)
 
-    # 3) Если messages не задан — путь system+user
+    # 4) Если messages не задан — путь system+user
     msgs = [{"role": "system", "content": sys}]
     msgs = _append_rag_context(msgs, rag_ctx)
     if user:
         msgs.append({"role": "user", "content": user})
-    return await chat(messages=msgs, temperature=temperature, **kwargs)
+    return await chat(messages=msgs, temperature=temperature, model=chosen_model, **kwargs)
 
 
 # --- Embeddings via OpenAI ---
