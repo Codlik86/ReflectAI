@@ -877,20 +877,16 @@ async def cb_trial_start(call: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "pay:open")
 async def cb_pay_open(call: CallbackQuery):
-    """Открыть список планов (работает и из онбординга)."""
-    # гарантируем наличие пользователя в БД, чтобы дальше не падать в /start
     try:
-        await _ensure_user_id(call.from_user.id)
+        async for session in get_session():
+            from app.db.models import User
+            u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+        trial_ever = getattr(u, "trial_started_at", None) is not None if u else False
     except Exception:
-        # не блокируем поток — просто продолжаем
-        pass
+        trial_ever = False
 
     await call.message.answer(
-        "Подписка «Помни»\n"
-        "• Все функции без ограничений\n"
-        "• 5 дней бесплатно, далее по тарифу\n\n"
-        "⚠️ <i>Важно: подписка с автопродлением. Его можно отключить в любой момент в /pay.</i>\n\n"
-        "<b>Выбери план:</b>",
+        _pay_plans_text(trial_ever_started=trial_ever),
         reply_markup=_kb_pay_plans(),
         parse_mode="HTML",
     )
@@ -898,19 +894,16 @@ async def cb_pay_open(call: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "pay:plans")
 async def cb_pay_plans(call: CallbackQuery):
-    """Явно показать планы (дубликат для любых мест, в т.ч. онбординг)."""
-    # тоже страхуемся: создадим/найдём пользователя в БД
     try:
-        await _ensure_user_id(call.from_user.id)
+        async for session in get_session():
+            from app.db.models import User
+            u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+        trial_ever = getattr(u, "trial_started_at", None) is not None if u else False
     except Exception:
-        pass
+        trial_ever = False
 
     await call.message.answer(
-        "Подписка «Помни»\n"
-        "• Все функции без ограничений\n"
-        "• 5 дней бесплатно, далее по тарифу\n\n"
-        "⚠️ <i>Важно: подписка с автопродлением. Его можно отключить в любой момент в /pay.</i>\n\n"
-        "<b>Выбери план:</b>",
+        _pay_plans_text(trial_ever_started=trial_ever),
         reply_markup=_kb_pay_plans(),
         parse_mode="HTML",
     )
@@ -1756,6 +1749,19 @@ def _kb_pay_plans() -> _IKM:
         [_IKB(text="Год — 7990 ₽",      callback_data="pay:plan:year")],
     ])
 
+def _pay_plans_text(trial_ever_started: bool) -> str:
+    head = "Подписка «Помни»\n• Все функции без ограничений\n"
+    tail = (
+        "⚠️ <i>Важно: подписка с автопродлением. Его можно отключить в любой момент в /pay.</i>\n\n"
+        "<b>Выбери план:</b>"
+    )
+    if trial_ever_started:
+        # без строки про «5 дней бесплатно»
+        return f"{head}\n{tail}"
+    else:
+        # для тех, кто ещё НИ РАЗУ не запускал триал — оставим строку
+        return f"{head}• 5 дней бесплатно, далее по тарифу\n\n{tail}"
+
 @router.message(_CmdPay("pay"))
 async def on_pay(m: Message):
     tg_id = m.from_user.id
@@ -1772,8 +1778,7 @@ async def on_pay(m: Message):
         if active_sub:
             until = active_sub["subscription_until"]
             await m.answer(
-                f"Подписка активна ✅\nДоступ открыт до <b>{_fmt_dt(until)}</b>.\n\n"
-                f"Что дальше?",
+                f"Подписка активна ✅\nДоступ открыт до <b>{_fmt_dt(until)}</b>.\n\nЧто дальше?",
                 reply_markup=_kb_active_sub_actions()
             )
             return
@@ -1783,22 +1788,19 @@ async def on_pay(m: Message):
             until = getattr(u, "trial_expires_at", None)
             tail = f"до <b>{_fmt_dt(until)}</b>" if until else "сейчас"
             await m.answer(
-                f"Пробный период активирован — {tail}. ✅\n"
-                f"Все функции открыты.\n\n"
+                f"Пробный период активирован — {tail}. ✅\nВсе функции открыты.\n\n"
                 f"Хочешь оформить подписку сразу? (Можно в любой момент отменить автопродление в /pay.)",
                 reply_markup=_kb_trial_pay()
             )
             return
 
-    # 3) доступа нет — показываем тарифы + предупреждение
-    await m.answer(
-        "Подписка «Помни»\n"
-        "• Все функции без ограничений\n"
-        "• 5 дней бесплатно, далее по тарифу\n\n"
-        "⚠️ <i>Важно: подписка с автопродлением. Его можно отключить в любой момент в /pay.</i>\n\n"
-        "<b>Выбери план:</b>",
-        reply_markup=_kb_pay_plans()
-    )
+        # 3) доступа нет — показываем планы (строка про «5 дней бесплатно» только если триала ещё НИКОГДА не было)
+        trial_ever = getattr(u, "trial_started_at", None) is not None
+        await m.answer(
+            _pay_plans_text(trial_ever_started=trial_ever),
+            reply_markup=_kb_pay_plans(),
+            parse_mode="HTML",
+        )
 
 @router.callback_query(F.data.startswith("pay:plan:"))
 async def on_pick_plan(cb: CallbackQuery):
@@ -1876,7 +1878,20 @@ from aiogram.types import Message, CallbackQuery
 from typing import Callable, Awaitable, Any, Dict, Tuple, Union
 
 AllowedEvent = Union[Message, CallbackQuery]
-ALLOWED_CB_PREFIXES = ("trial:", "pay:", "plan:", "tariff:", "yk:")
+# только платёжные/служебные — пропускаем без блокировки
+ALLOWED_CB_PREFIXES = ("pay:", "yk:", "sub:", "plan:", "tariff:")
+
+async def _gate_send_paywall(event: AllowedEvent) -> None:
+    """Короткий пейволл без упоминания триала."""
+    text_ = (
+        "Хочу продолжить помогать, но для этого нужна подписка.\n"
+        "Оформи её в /pay и получи полный доступ ко всем функциям."
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")]]
+    )
+    target = event.message if isinstance(event, CallbackQuery) else event
+    await target.answer(text_, reply_markup=kb)
 
 async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool]:
     """
@@ -1970,17 +1985,12 @@ async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
 class GateMiddleware(BaseMiddleware):
     """
     1) Пока не принят policy — разрешены только /start и onb:* (остальное — экран policy).
-    2) После policy, но до доступа — любое ПЕРВОЕ действие запускает триал
-       (пропускаем в исходный хендлер). Исключения: /pay и служебные префиксы
-       оплаты — пропускаем без авто-старта.
-    3) Когда доступ открыт — пропускаем всё.
+    2) Policy принят, НО доступа нет — первое ДЕЙСТВИЕ пользователя автозапускает триал,
+       затем пропускаем исходный хендлер. Исключения: /pay и платёжные/служебные cb —
+       их пропускаем как есть (без автозапуска).
+    3) Доступ открыт — пропускаем всё.
     """
-    async def __call__(
-        self,
-        handler: Callable[[AllowedEvent, Dict[str, Any]], Awaitable[Any]],
-        event: AllowedEvent,
-        data: Dict[str, Any]
-    ) -> Any:
+    async def __call__(self, handler, event, data):
         try:
             tg_id = getattr(getattr(event, "from_user", None), "id", None)
             if not tg_id:
@@ -1990,39 +2000,38 @@ class GateMiddleware(BaseMiddleware):
 
             # 1) policy ещё не принят
             if not policy_ok:
-                if isinstance(event, Message):
-                    if (event.text or "").startswith("/start"):
-                        return await handler(event, data)
-                elif isinstance(event, CallbackQuery):
-                    if (event.data or "").startswith("onb:"):
-                        return await handler(event, data)
+                if isinstance(event, Message) and (event.text or "").startswith("/start"):
+                    return await handler(event, data)
+                if isinstance(event, CallbackQuery) and (event.data or "").startswith("onb:"):
+                    return await handler(event, data)
                 await _gate_send_policy(event)
                 return
 
             # 2) policy принят, но доступа нет
             if not access_ok:
                 if isinstance(event, Message):
-                    # /pay — пропускаем как есть, без автозапуска триала
-                    if (event.text or "").startswith("/pay"):
+                    t = (event.text or "")
+                    # /pay пропускаем без автозапуска триала
+                    if t.startswith("/pay"):
                         return await handler(event, data)
-                    # Любое другое первое действие — авто-стартуем триал и пропускаем дальше
+                    # любое другое первое действие — автостарт триала (если его ещё не было)
                     await _maybe_start_trial_on_first_action(event)
                     return await handler(event, data)
 
-                elif isinstance(event, CallbackQuery):
+                if isinstance(event, CallbackQuery):
                     d = (event.data or "")
-                    # платёжные/технические префиксы не трогаем
+                    # платёжные/служебные — пропускаем без автостарта
                     if d.startswith(ALLOWED_CB_PREFIXES):
                         return await handler(event, data)
-                    # Любая другая кнопка (в т.ч. «Открыть меню») — считаем первым действием
+                    # любые другие кнопки — автостарт триала
                     await _maybe_start_trial_on_first_action(event)
                     return await handler(event, data)
 
-            # 3) доступ открыт — пропускаем всё
+            # 3) доступ открыт
             return await handler(event, data)
 
         except Exception:
-            # fail-open — не блокируем на исключениях
+            # fail-open
             return await handler(event, data)
 
 # --- Однократный mount, чтобы не было дублей ---
