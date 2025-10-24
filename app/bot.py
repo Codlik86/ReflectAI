@@ -553,28 +553,38 @@ async def _get_user_by_tg(session, tg_id: int):
     q = await session.execute(select(User).where(User.tg_id == tg_id))
     return q.scalar_one_or_none()
 
-def _kb_paywall(show_trial: bool) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    if show_trial:
-        rows.append([InlineKeyboardButton(text="Начать пробный период ⭐", callback_data="trial:start")])
-    rows.append([InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def _kb_paywall(_: bool = False) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")]]
+    )
 
 async def _enforce_access_or_paywall(msg_or_call, session, user_id: int) -> bool:
-    """True — доступ есть; False — показан пейволл и нужно прекратить обработку."""
+    """
+    True — доступ есть (активная подписка ИЛИ активный триал);
+    False — показан пейвол (без кнопки триала) и обработку надо прекратить.
+    """
+    # 1) доступ открыт?
     if await check_access(session, user_id):
         return True
-    trial_active = await is_trial_active(session, user_id)
-    show_trial = not trial_active
+
+    # 2) триал активен — тоже пропускаем
+    if await is_trial_active(session, user_id):
+        return True
+
+    # 3) доступа нет — короткий пейвол без кнопки триала
     text_ = (
         "Доступ к разделу открыт по подписке.\n"
-        "Можно начать 5-дневный пробный период бесплатно, затем — по выбранному плану."
+        "Оформи любой план — отменить автопродление можно в /pay в любой момент."
     )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")],
+    ])
     if isinstance(msg_or_call, Message):
-        await msg_or_call.answer(text_, reply_markup=_kb_paywall(show_trial))
+        await msg_or_call.answer(text_, reply_markup=kb)
     else:
-        await msg_or_call.message.answer(text_, reply_markup=_kb_paywall(show_trial))
+        await msg_or_call.message.answer(text_, reply_markup=kb)
     return False
+
 
 # --- pay status helpers ---
 async def _access_status_text(session, user_id: int) -> str | None:
