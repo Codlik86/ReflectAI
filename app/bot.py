@@ -1134,13 +1134,15 @@ async def on_back_to_topics(cb: CallbackQuery):
             return
         if not await _enforce_access_or_paywall(cb, session, u.id):
             return
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): 
+            return
     await _safe_edit(cb.message, "Выбирай тему:", reply_markup=kb_topics())
     await cb.answer()
 
 @router.callback_query(F.data.startswith("t:"))
 async def on_topic_click(cb: CallbackQuery):
-    if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
+    if _require_access_msg(cb.message if hasattr(cb, "message") else cb):
+            return
     tid = cb.data.split(":", 1)[1]
     await _safe_edit(cb.message, topic_button_title(tid), reply_markup=kb_exercises(tid))
     await cb.answer()
@@ -1273,6 +1275,11 @@ MEDITATIONS_TEXT = (
 
 @router.message(Command(commands=["meditations", "meditions", "meditation"]))
 async def cmd_meditations(m: Message):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, m.from_user.id)
+        if not u or not await _enforce_access_or_paywall(m, session, u.id):
+            return
     if _require_access_msg(m.message if hasattr(m, "message") else m): return
     img = get_onb_image("meditations")
     if img:
@@ -1284,16 +1291,31 @@ async def cmd_meditations(m: Message):
 
 @router.message(F.text == "🎧 Медитации")
 async def on_meditations_btn(m: Message):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, m.from_user.id)
+        if not u or not await _enforce_access_or_paywall(m, session, u.id):
+            return
     if _require_access_msg(m.message if hasattr(m, "message") else m): return
     await _safe_edit(m, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories())
 
 @router.callback_query(F.data == "med:cats")
 async def on_med_cats(cb: CallbackQuery):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, cb.from_user.id)
+        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+            return
     if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     await _safe_edit(cb.message, MEDITATIONS_TEXT, reply_markup=kb_meditations_categories()); await cb.answer()
 
 @router.callback_query(F.data.startswith("med:cat:"))
 async def on_med_cat(cb: CallbackQuery):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, cb.from_user.id)
+        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+            return
     if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     cid = cb.data.split(":", 2)[2]
     title = dict(get_categories()).get(cid, "Медитации")
@@ -1302,6 +1324,11 @@ async def on_med_cat(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("med:play:"))
 async def on_med_play(cb: CallbackQuery):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, cb.from_user.id)
+        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+            return
     if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     _, _, cid, mid = cb.data.split(":", 3)
     raw = get_item(cid, mid)
@@ -1361,6 +1388,11 @@ async def on_med_play(cb: CallbackQuery):
 @router.message(Command("settings"))
 @router.message(Command("setting"))
 async def on_settings(m: Message):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, m.from_user.id)
+        if not u or not await _enforce_access_or_paywall(m, session, u.id):
+            return
     if _require_access_msg(m.message if hasattr(m, "message") else m): return
     await m.answer("Настройки:", reply_markup=kb_settings())
 
@@ -1370,20 +1402,40 @@ async def on_menu_main(cb: CallbackQuery):
 
 @router.callback_query(F.data == "menu:settings")
 async def on_menu_settings(cb: CallbackQuery):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, cb.from_user.id)
+        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+            return
     if _require_access_msg(cb.message if hasattr(cb, "message") else cb): return
     await _safe_edit(cb.message, "Настройки:", reply_markup=kb_settings()); await cb.answer()
 
 @router.callback_query(F.data == "settings:tone")
 async def on_settings_tone(cb: CallbackQuery):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, cb.from_user.id)
+        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+            return
     await _safe_edit(cb.message, "Выбери тон общения:", reply_markup=kb_tone_picker()); await cb.answer()
 
 @router.callback_query(F.data == "settings:privacy")
 async def on_settings_privacy(cb: CallbackQuery):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, cb.from_user.id)
+        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+            return
     rm = await kb_privacy_for(cb.message.chat.id)
     await _safe_edit(cb.message, "Приватность:", reply_markup=rm); await cb.answer()
 
 @router.callback_query(F.data == "privacy:toggle")
 async def on_privacy_toggle(cb: CallbackQuery):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, cb.from_user.id)
+        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+            return
     chat_id = cb.message.chat.id
     mode = (await _db_get_privacy(chat_id) or "insights").lower()
     new_mode = "none" if mode != "none" else "insights"
@@ -1395,6 +1447,11 @@ async def on_privacy_toggle(cb: CallbackQuery):
 
 @router.callback_query(F.data == "privacy:clear")
 async def on_privacy_clear(cb: CallbackQuery):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, cb.from_user.id)
+        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+            return
     # 1) чистим историю сообщений
     try:
         msg_count = await _purge_user_history(cb.from_user.id)
@@ -1419,6 +1476,11 @@ async def on_privacy_clear(cb: CallbackQuery):
 
 @router.message(Command("privacy"))
 async def on_privacy_cmd(m: Message):
+    # Жёсткая проверка доступа
+    async for session in get_session():
+        u = await _get_user_by_tg(session, m.from_user.id)
+        if not u or not await _enforce_access_or_paywall(m, session, u.id):
+            return
     mode = (await _db_get_privacy(m.chat.id) or "insights").lower()
     state = "выключено" if mode == "none" else "включено"
     rm = await kb_privacy_for(m.chat.id)
@@ -1568,7 +1630,7 @@ async def _answer_with_llm(m: Message, user_text: str):
             qlen = len((user_text or "").split())
             k = 3 if qlen < 8 else 6 if qlen < 20 else 8
             max_chars = 600 if qlen < 8 else 1000 if qlen < 30 else 1400
-            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ru")
+            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ру")
         except Exception:
             rag_ctx = ""
 
@@ -1721,7 +1783,8 @@ async def on_text(m: Message):
     chat_id = m.chat.id
 
     if CHAT_MODE.get(chat_id, "talk") in ("talk", "reflection"):
-        await _answer_with_llm(m, m.text or ""); return
+        await _answer_with_llm(m, m.text or "")
+        return
 
     if CHAT_MODE.get(chat_id) == "work":
         await m.answer(
