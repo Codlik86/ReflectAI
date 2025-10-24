@@ -1020,11 +1020,11 @@ def kb_onb_step2() -> InlineKeyboardMarkup:
 
 WHAT_NEXT_TEXT = """С чего начнём? 💛
 
-💬 «Поговорить» — место, где можно выговориться, порефлексировать и просто навести ясность. Заботливый психолог, тёплый друг или бережный дневник событий и мыслей — то, что нужно именно сейчас.
-🌿 «Разобраться» — короткие упражнения и практики под разные запросы: стресс, прокрастинация, решения и др.
-🎧 «Медитации» — спокойные аудио-паузы, чтобы переключиться и дать себе передышку.
+💬 «Поговорить» — выговориться, навести ясность и наметить маленький шаг.
+🌿 «Разобраться» — короткие практики под разные запросы.
+🎧 «Медитации» — спокойные аудио-паузы, чтобы переключиться.
 
-Чтобы открыть все функции, начните пробный период — 5 дней бесплатно. После — можно выбрать удобный план."""
+<b>5 дней бесплатно</b> — пробная версия запустится, когда ты впервые воспользуешься любой функцией (включая «Открыть меню»). После — можно выбрать удобный план."""
 
 PAYWALL_POST_TEXT = (
     "Хочу продолжить помогать, но для этого нужна подписка.\n"
@@ -1037,9 +1037,13 @@ PAYWALL_POST_TEXT = (
     "Подписка с автопродлением — его можно отключить в /pay после оформления."
 )
 
-def kb_onb_step3() -> ReplyKeyboardMarkup:
-    # не используем на 3-м шаге: правую клавиатуру прячем до CTA
-    return kb_main_menu()
+def kb_onb_step3() -> InlineKeyboardMarkup:
+    # единственная кнопка, которая выводит правую клавиатуру
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")]
+        ]
+    )
 
 @router.callback_query(F.data == "onb:step2")
 async def on_onb_step2(cb: CallbackQuery):
@@ -1071,11 +1075,8 @@ async def on_onb_step2(cb: CallbackQuery):
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
     """
-    ШАГ 3: фиксируем согласие и показываем корректный CTA:
-    - если доступ уже открыт (активный триал/подписка) — «С чего начнём?» + главное меню (для платной);
-      а для активного триала — «С чего начнём?» + КНОПКА «Оформить подписку»
-    - если доступа нет и триал не запускался — стартовый пейвол (с кнопкой триала);
-    - если доступа нет и триал уже был — послетриальный пейвол (без кнопки триала).
+    После согласия: фиксируем флаг в БД и показываем «С чего начнём?» + кнопку «Открыть меню».
+    Доступ пока заблокирован в БД, но триал стартанёт автоматически при первом действии.
     """
     tg_id = cb.from_user.id
     uid = await _ensure_user_id(tg_id)
@@ -1096,50 +1097,8 @@ async def on_onb_agree(cb: CallbackQuery):
     except Exception:
         pass
 
-    # выбираем правильный экран
-    from app.billing.service import check_access, is_trial_active
-
-    text_out = WHAT_NEXT_TEXT
-    kb = _kb_paywall(True)
-
-    try:
-        async with async_session() as s:
-            access_ok = await check_access(s, uid)     # триал ИЛИ подписка активны?
-            trial_ok  = await is_trial_active(s, uid)  # именно активный триал?
-
-            if access_ok and not trial_ok:
-                # платная подписка активна -> «С чего начнём?» + правая клавиатура
-                text_out = WHAT_NEXT_TEXT
-                kb = kb_main_menu()
-            elif trial_ok:
-                # активен триал -> «С чего начнём?» + ТОЛЬКО «Оформить подписку»
-                text_out = WHAT_NEXT_TEXT
-                kb = _kb_paywall(False)
-            else:
-                # доступа нет: различаем стартовый и пост-пейвол по «был ли триал или платная подписка»
-                r1 = await s.execute(text("SELECT trial_started_at FROM users WHERE id = :uid"), {"uid": uid})
-                trial_started = r1.scalar() is not None
-
-                r2 = await s.execute(text("""
-                    SELECT 1
-                    FROM subscriptions
-                    WHERE user_id = :uid
-                    LIMIT 1
-                """), {"uid": uid})
-                had_paid = r2.first() is not None
-
-                if (not trial_started) and (not had_paid):
-                    # совсем «чистый» пользователь: стартовый пейвол (кнопка триала)
-                    text_out = WHAT_NEXT_TEXT
-                    kb = _kb_paywall(True)
-                else:
-                    # триал был ИЛИ платная подписка когда-то была -> короткий пост-пейвол
-                    text_out = PAYWALL_POST_TEXT
-                    kb = _kb_paywall(False)
-    except Exception:
-        pass
-
-    await cb.message.answer(text_out, reply_markup=kb)
+    # показываем финальный экран онбординга
+    await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb_onb_step3())
 
 # ===== Меню/навигация =====
 @router.message(F.text == "🌿 Разобраться")
@@ -1935,7 +1894,6 @@ async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool]:
 
     return policy_ok, access_ok
 
-
 async def _gate_send_policy(event: AllowedEvent) -> None:
     """Показываем экран с «Принимаю»."""
     import os
@@ -1953,57 +1911,58 @@ async def _gate_send_policy(event: AllowedEvent) -> None:
     target = event.message if isinstance(event, CallbackQuery) else event
     await target.answer(text, reply_markup=kb)
 
-
-async def _gate_send_trial_cta(event: Union[Message, CallbackQuery]) -> None:
+async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
     """
-    Пейвол в «закрытых» местах:
-    - если триала ещё не было И не было платной подписки — стартовый (кнопка «Начать пробный…»)
-    - иначе (триал уже был ИЛИ платная подписка уже была, но истекла/отключена) — пост-триальный короткий пейвол (только «Оформить подписку»)
+    Если policy принят, доступа нет, и триал ещё НЕ запускался — запускаем триал.
+    Отправляем одноразовую отбивку «Пробный период активирован до ...».
+    Ничего не блокируем: после этого исходный хендлер продолжит работу.
     """
-    from sqlalchemy import text
-    from app.db.core import async_session
-
-    tg_id = getattr(getattr(event, "from_user", None), "id", None)
-    show_trial = False
     try:
-        async with async_session() as s:
-            # был ли когда-либо триал
-            trial_started = False
-            if tg_id:
-                r1 = await s.execute(
-                    text("SELECT trial_started_at FROM users WHERE tg_id = :tg"),
-                    {"tg": int(tg_id)},
-                )
-                trial_started = r1.scalar() is not None
+        tg_id = getattr(getattr(event, "from_user", None), "id", None)
+        if not tg_id:
+            return
 
-            # была ли когда-либо платная подписка (любая запись в subscriptions)
-            had_paid = False
-            if tg_id:
-                r2 = await s.execute(text("""
-                    SELECT 1
-                    FROM subscriptions AS s
-                    JOIN users u ON u.id = s.user_id
-                    WHERE u.tg_id = :tg
-                    LIMIT 1
-                """), {"tg": int(tg_id)})
-                had_paid = r2.first() is not None
+        async for session in get_session():
+            from app.db.models import User
+            u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
+            if not u:
+                return
 
-            # показываем кнопку триала только если не было НИ триала, НИ платной подписки
-            show_trial = (not trial_started) and (not had_paid)
+            # Уже есть доступ? (подписка или активный триал)
+            if await check_access(session, u.id):
+                return
+
+            # Уже запускали триал когда-то?
+            trial_started = getattr(u, "trial_started_at", None) is not None
+            if trial_started:
+                return
+
+            # Стартуем триал
+            started, expires = await start_trial_for_user(session, u.id)
+            await session.commit()
+            if not started:
+                return
+
+        # Отбивка пользователю
+        target_msg = event.message if isinstance(event, CallbackQuery) else event
+        try:
+            await target_msg.answer(
+                f"Пробный период активирован ✅\nДоступ открыт до {_fmt_dt(expires)}.",
+                reply_markup=kb_main_menu()
+            )
+        except Exception:
+            pass
+
     except Exception:
-        show_trial = False  # безопасно: короткий пост-пейвол
-
-    text_out = WHAT_NEXT_TEXT if show_trial else PAYWALL_POST_TEXT
-    kb = _kb_paywall(show_trial)
-
-    target = event.message if isinstance(event, CallbackQuery) else event
-    await target.answer(text_out, reply_markup=kb)
-
+        # молча игнорируем — не ломаем поток
+        return
 
 class GateMiddleware(BaseMiddleware):
     """
     1) Пока не принят policy — разрешены только /start и onb:* (остальное — экран policy).
-    2) После policy, но до доступа — разрешены только /pay и trial/pay/plan/tariff/yk:* (остальное — CTA).
+    2) После policy, но до доступа — любое ПЕРВОЕ действие запускает триал
+       (пропускаем в исходный хендлер). Исключения: /pay и служебные префиксы
+       оплаты — пропускаем без авто-старта.
     3) Когда доступ открыт — пропускаем всё.
     """
     async def __call__(
@@ -2033,14 +1992,21 @@ class GateMiddleware(BaseMiddleware):
             # 2) policy принят, но доступа нет
             if not access_ok:
                 if isinstance(event, Message):
+                    # /pay — пропускаем как есть, без автозапуска триала
                     if (event.text or "").startswith("/pay"):
                         return await handler(event, data)
+                    # Любое другое первое действие — авто-стартуем триал и пропускаем дальше
+                    await _maybe_start_trial_on_first_action(event)
+                    return await handler(event, data)
+
                 elif isinstance(event, CallbackQuery):
                     d = (event.data or "")
+                    # платёжные/технические префиксы не трогаем
                     if d.startswith(ALLOWED_CB_PREFIXES):
                         return await handler(event, data)
-                await _gate_send_trial_cta(event)
-                return
+                    # Любая другая кнопка (в т.ч. «Открыть меню») — считаем первым действием
+                    await _maybe_start_trial_on_first_action(event)
+                    return await handler(event, data)
 
             # 3) доступ открыт — пропускаем всё
             return await handler(event, data)
@@ -2048,7 +2014,6 @@ class GateMiddleware(BaseMiddleware):
         except Exception:
             # fail-open — не блокируем на исключениях
             return await handler(event, data)
-
 
 # --- Однократный mount, чтобы не было дублей ---
 if not getattr(router, "_gate_mounted", False):
