@@ -202,7 +202,7 @@ async def chat(
     messages: Optional[List[Dict[str, str]]] = None,
     system: Optional[str] = None,
     user: Optional[str] = None,
-    temperature: float = 0.6,
+    temperature: float = 0.78,  # синхронизируем с chat_with_style
     **opts: Any
 ) -> str:
     """
@@ -243,29 +243,19 @@ def _append_rag_context(msgs: List[Dict[str, str]], rag_ctx: Optional[str]) -> L
 
 async def chat_with_style(
     *,
-    # основной путь: system + messages
     system: Optional[str] = None,
     messages: Optional[List[Dict[str, str]]] = None,
-    # альтернативный путь: system + user (если messages не задан)
     user: Optional[str] = None,
-    # стилизация
     style: Optional[str] = None,
-    style_hint: Optional[str] = None,  # алиас для обратной совместимости
-    # контекст поиска/базы (опционально)
+    style_hint: Optional[str] = None,
     rag_ctx: Optional[str] = None,
-    # сэмплинг
-    temperature: float = 0.6,
-    # ===== Новые параметры маршрутизации модели =====
-    mode: Optional[str] = None,                 # 'talk'|'reflection'|'work'|'system'
+    temperature: float = 0.78,  # было 0.6 → ставим 0.78 как «живой» дефолт
+    mode: Optional[str] = None,
     is_crisis: bool = False,
     needs_long_context: bool = False,
-    model_override: Optional[str] = None,       # жёсткое переопределение модели
+    model_override: Optional[str] = None,
     **kwargs: Any
 ) -> str:
-    """
-    Обёртка, которая добавляет style/style_hint в system и опционально подмешивает rag_ctx.
-    Затем делегирует базовой chat(...).
-    """
     # 1) Склеиваем system + style (или style_hint)
     style_text = style if style is not None else style_hint
     sys = _inject_style_into_system(system, style_text)
@@ -280,6 +270,12 @@ async def chat_with_style(
             "is_crisis": is_crisis,
             "needs_long_context": needs_long_context,
         })
+
+    # >>> ДОБАВЬ ЭТО: дефолты «рандомности без лотереи»
+    kwargs.setdefault("top_p", 0.9)
+    kwargs.setdefault("presence_penalty", 0.6)   # снижает повторы тем/заходов
+    kwargs.setdefault("frequency_penalty", 0.3)  # убирает лексические повторы
+
 
     # 3) Если нам передали messages, аккуратно добавим/заменим system
     if messages is not None:
