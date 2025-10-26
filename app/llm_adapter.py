@@ -229,7 +229,7 @@ def _inject_style_into_system(system_text: Optional[str], style_hint: Optional[s
             base = base + "\n\n" + style_hint.strip()
         else:
             base = style_hint.strip()
-    return base or "Ты — тёплый русскоязычный собеседник и друг. Общайся на «ты», без диагнозов и советов о лекарствах."
+    return base or "Ты — эмпатичный друг и психолог в одном лице. Говори тепло, прямо, поддерживающе."
 
 
 def _append_rag_context(msgs: List[Dict[str, str]], rag_ctx: Optional[str]) -> List[Dict[str, str]]:
@@ -249,7 +249,7 @@ async def chat_with_style(
     style: Optional[str] = None,
     style_hint: Optional[str] = None,
     rag_ctx: Optional[str] = None,
-    temperature: float = 0.78,  # было 0.6 → ставим 0.78 как «живой» дефолт
+    temperature: float = 0.75,  
     mode: Optional[str] = None,
     is_crisis: bool = False,
     needs_long_context: bool = False,
@@ -273,8 +273,8 @@ async def chat_with_style(
 
     # >>> ДОБАВЬ ЭТО: дефолты «рандомности без лотереи»
     kwargs.setdefault("top_p", 0.9)
-    kwargs.setdefault("presence_penalty", 0.6)   # снижает повторы тем/заходов
-    kwargs.setdefault("frequency_penalty", 0.3)  # убирает лексические повторы
+    kwargs.setdefault("presence_penalty", 0.4)   # снижает повторы тем/заходов
+    kwargs.setdefault("frequency_penalty", 0.1)  # убирает лексические повторы
 
 
     # 3) Если нам передали messages, аккуратно добавим/заменим system
