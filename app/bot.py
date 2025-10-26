@@ -1558,13 +1558,13 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
 
-    # Жёсткая фиксация языка (исправляет редкие вкрапления иероглифов/иностр. токенов)
+    # Жёсткая фиксация языка
     sys_prompt += "\n\nОтвечай строго на русском языке. Не используй иностранные слова и символы без явного запроса."
 
-    # 2) История беседы из БД (старые -> новые) - СОХРАНИЛ
+    # 2) История беседы из БД (старые -> новые)
     history_msgs: List[dict] = []
     try:
-        history_msgs = await _load_history_from_db(m.from_user.id, limit=90, hours=24*90)
+        history_msgs = await _load_history_from_db(m.from_user.id, limit=90, hours=24 * 90)
     except Exception:
         # запасной вариант: in-memory
         try:
@@ -1575,19 +1575,48 @@ async def _answer_with_llm(m: Message, user_text: str):
         except Exception:
             history_msgs = []
 
-    # 3) RAG-контекст — отдельным system-сообщением - СОХРАНИЛ
+    # Индекс шага (нужен дальше для RAG)
+    try:
+        turn_idx = len(history_msgs)
+    except Exception:
+        turn_idx = 0
+
+    # 3) RAG-контекст — отдельным system-сообщением (адаптивно + анти-лекционность)
     rag_ctx = ""
-    if rag_search is not None:
+
+    def _should_use_rag(ut: str, turn_idx: int) -> bool:
+        """
+        Включаем RAG:
+        — всегда на «фактовых/учебных» запросах (что такое/почему/как работает и т.п.);
+        — в остальных случаях — с вероятностью ~25% (чтобы не лезть с лекцией).
+        """
+        t = (ut or "").lower()
+
+        # Точные/учебные запросы — включаем обязательно
+        must = any(x in t for x in (
+            "что такое", "объясни", "почему", "как работает",
+            "кпт", "акт", "гештальт", "практика", "техника",
+            "исследован", "данные", "факт"
+        ))
+        if must:
+            return True
+
+        # Иначе — 25% вероятности (стабильной для данного шага)
+        random.seed(f"{turn_idx}|{ut}")
+        return random.random() < 0.25
+
+    if rag_search is not None and _should_use_rag(user_text, turn_idx):
         try:
-            # адаптивный k/max_chars от длины запроса
             qlen = len((user_text or "").split())
-            k = 3 if qlen < 8 else 6 if qlen < 20 else 8
-            max_chars = 600 if qlen < 8 else 1000 if qlen < 30 else 1400
-            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ру")
+            # Чуть скромнее объёмы — меньше «лекций»
+            k = 2 if qlen < 5 else 3 if qlen < 15 else 4
+            max_chars = 400 if qlen < 8 else 600 if qlen < 20 else 800
+            # ВАЖНО: язык латиницей
+            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ru")
         except Exception:
             rag_ctx = ""
 
-    # 4) Долгая память (саммари): daily/weekly/monthly — как мягкий «прошлый опыт» - СОХРАНИЛ
+    # 4) Долгая память (саммари): daily/weekly/monthly — как мягкий «прошлый опыт»
     sum_block = ""
     try:
         uid = await _ensure_user_id(m.from_user.id)
@@ -1596,7 +1625,6 @@ async def _answer_with_llm(m: Message, user_text: str):
         items = await _fetch_summary_texts_by_ids(ids)
 
         if items:
-            # ограничим длину каждого саммари и общий блок, чтобы не «съедать» контекст
             def _short(s: str, n: int = 260) -> str:
                 s = (s or "").strip().replace("\r", " ").replace("\n", " ")
                 return s if len(s) <= n else (s[: n - 1] + "…")
@@ -1611,10 +1639,9 @@ async def _answer_with_llm(m: Message, user_text: str):
     except Exception:
         sum_block = ""
 
-    # 5) Подсказка длины на основе контекста - УПРОСТИЛ
+    # 5) Подсказка длины на основе запроса
     try:
         t = (user_text or "").lower()
-        # Только явные запросы получают специальные подсказки
         if any(x in t for x in ["разложи подробно", "подробно", "план", "что делать по шагам", "структурируй", "инструкция"]):
             sys_prompt += "\n\n" + LENGTH_HINTS["deep"]
         elif any(x in t for x in ["объясни", "поясни", "структурируй", "как это работает", "почему"]):
@@ -1622,30 +1649,27 @@ async def _answer_with_llm(m: Message, user_text: str):
         elif any(x in t for x in ["паническ", "тревог", "успокой", "дышан", "прямо сейчас", "помоги сейчас"]):
             sys_prompt += "\n\n" + LENGTH_HINTS["micro"]
         else:
-            # По умолчанию - короткий формат, но промпт сам регулирует вариативность
             sys_prompt += "\n\n" + LENGTH_HINTS["short"]
     except Exception:
         pass
 
-    # 6) Сбор сообщений для LLM - СОХРАНИЛ СТРУКТУРУ
+    # 6) Сбор сообщений для LLM
     # Порядок: system стиль -> system RAG -> system summaries -> история -> текущее сообщение
     messages: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt}]
     if rag_ctx:
         messages.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
     if sum_block:
         messages.append({"role": "system", "content": sum_block})
-
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
-    # 7) Вызов LLM - УВЕЛИЧИЛ ЛИМИТЫ
+    # 7) Вызов LLM
     if chat_with_style is None:
         await send_and_log(m, "Я тебя слышу. Сейчас подключаюсь…", reply_markup=kb_main_menu())
         return
 
-    # Увеличил лимит токенов для эмпатичных ответов
-    LLM_MAX_TOKENS = 650  # Было 480
-    temp = 0.75  # Стабильная температура
+    LLM_MAX_TOKENS = 650  # было 480
+    temp = 0.75           # стабильная температура
 
     try:
         reply = await chat_with_style(
@@ -1654,7 +1678,6 @@ async def _answer_with_llm(m: Message, user_text: str):
             max_tokens=LLM_MAX_TOKENS,
         )
     except TypeError:
-        # на случай старой сигнатуры
         reply = await chat_with_style(messages, temperature=temp, max_tokens=LLM_MAX_TOKENS)
     except Exception:
         reply = ""
@@ -1662,13 +1685,9 @@ async def _answer_with_llm(m: Message, user_text: str):
     if not reply or not reply.strip():
         reply = "Хочу понять суть поточнее. Что в этой ситуации сейчас болит сильнее всего?"
 
-    # 8) УБРАЛ ВСЮ СЛОЖНУЮ ПОСТ-ОБРАБОТКУ:
-    # - Убрал _enforce_single_question (доверяем промпту)
-    # - Убрал анти-CJK перегенерацию (редкие случаи)
-    # - Убрал анти-повторы через перегенерацию (промпт сам управляет)
-
-    # 9) Отправляем и логируем как 'bot' (для устойчивой памяти) - СОХРАНИЛ
+    # 8) Отправляем и логируем как 'bot'
     await send_and_log(m, reply, reply_markup=kb_main_menu())
+
 
 # ===== Текстовые сообщения =====
 @router.message(F.text & ~F.text.startswith("/"))
@@ -1939,6 +1958,20 @@ async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
         # молча игнорируем — не ломаем поток
         return
 
+# --- Simple rate limit store (в памяти процесса) ---
+from collections import deque
+import time
+
+# последняя метка времени по tg_id
+_RATE_LAST: dict[int, float] = {}
+# скользящее окно для «рывков»
+_RATE_WINDOW: dict[int, deque] = {}
+# параметры
+_RATE_MIN_INTERVAL = 0.8        # минимальный интервал между событиями, сек
+_RATE_BURST_WINDOW = 5.0        # окно для подсчёта рывков, сек
+_RATE_BURST_MAX = 6             # максимум событий в окне
+
+
 class GateMiddleware(BaseMiddleware):
     """
     1) Пока не принят policy — разрешены только /start и onb:* (остальное — экран policy).
@@ -1946,12 +1979,43 @@ class GateMiddleware(BaseMiddleware):
        затем пропускаем исходный хендлер. Исключения: /pay и платёжные/служебные cb —
        их пропускаем как есть (без автозапуска).
     3) Доступ открыт — пропускаем всё.
+    + Rate limiting: мягко ограничиваем частоту сообщений/кликов.
     """
     async def __call__(self, handler, event, data):
         try:
             tg_id = getattr(getattr(event, "from_user", None), "id", None)
             if not tg_id:
                 return await handler(event, data)
+
+            # ---------- RATE LIMITING (до любых тяжёлых операций) ----------
+            now = time.monotonic()
+
+            # правило 1: минимальный интервал между событиями
+            last = _RATE_LAST.get(tg_id, 0.0)
+            if (now - last) < _RATE_MIN_INTERVAL:
+                if isinstance(event, Message):
+                    await event.answer("Слишком быстро. Дай секунду между сообщениями ✋")
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("Подожди чуть-чуть…", show_alert=False)
+                return
+            _RATE_LAST[tg_id] = now
+
+            # правило 2: ограничение на «рывки» в скользящем окне
+            dq = _RATE_WINDOW.get(tg_id)
+            if dq is None:
+                dq = deque()
+                _RATE_WINDOW[tg_id] = dq
+            # чистим старые метки
+            while dq and (now - dq[0]) > _RATE_BURST_WINDOW:
+                dq.popleft()
+            dq.append(now)
+            if len(dq) > _RATE_BURST_MAX:
+                if isinstance(event, Message):
+                    await event.answer("Слишком много запросов подряд. Давай чуть медленнее 🙌")
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("Слишком часто.", show_alert=False)
+                return
+            # ----------------------------------------------------------------
 
             policy_ok, access_ok = await _gate_user_flags(int(tg_id))
 
@@ -1990,6 +2054,7 @@ class GateMiddleware(BaseMiddleware):
         except Exception:
             # fail-open
             return await handler(event, data)
+
 
 # --- Однократный mount, чтобы не было дублей ---
 if not getattr(router, "_gate_mounted", False):

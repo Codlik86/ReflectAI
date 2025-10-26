@@ -1,6 +1,9 @@
 # app/llm_adapter.py
 import os
 import json
+import time
+import asyncio
+import random
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -10,15 +13,10 @@ llm_adapter.py
 --------------
 Асинхронный адаптер к OpenAI-совместимому /chat/completions API.
 
-Возможности:
-- Класс LLMAdapter с методом complete_chat(...)
-- Функции chat(...) / complete_chat(...) на синглтоне
-- Обёртка chat_with_style(...): подмешивает style/style_hint в system
-- Опциональное подмешивание RAG-контекста отдельным system-сообщением
-- Конфиги из ENV:
-    OPENAI_API_KEY
-    OPENAI_BASE_URL (например, https://api.proxyapi.ru/openai/v1)
-    CHAT_MODEL (по умолчанию gpt-4o-mini)
+Изменения:
+- Таймауты клиента ужаты (сбалансировано под прод-диалог).
+- Ретраи: максимум 2 попытки с коротким бэкоффом и джиттером.
+- "Мягкий" circuit breaker: при серии фейлов перестаём слать запросы на короткое время.
 """
 
 # ===== Новые переменные и алиасы для гибкой маршрутизации моделей =====
@@ -26,6 +24,10 @@ DEFAULT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 STRONG_MODEL = os.getenv("CHAT_MODEL_STRONG", "gpt-5")  # «старшая» модель для длинных/сложных ответов
 TALK_MODEL = os.getenv("CHAT_MODEL_TALK", STRONG_MODEL)  # можно задать отдельную для talk/reflection
 FALLBACK_TO_DEFAULT = os.getenv("LLM_FALLBACK_TO_DEFAULT", "1") == "1"  # мягкий фолбэк при 5xx/429
+
+# Circuit breaker настройки (можно править через ENV)
+CB_THRESHOLD = int(os.getenv("LLM_CIRCUIT_THRESHOLD", "4"))   # сколько последовательных фейлов открыть «половину»
+CB_COOLDOWN = float(os.getenv("LLM_CIRCUIT_COOLDOWN", "20"))  # секунд «остывания»
 
 # Алиасы имён моделей на случай отличий в прокси-доке
 MODEL_ALIASES: Dict[str, str] = {
@@ -52,6 +54,22 @@ def _pick_model(ctx: Dict[str, Any]) -> str:
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.proxyapi.ru/openai/v1").rstrip("/")
 
+# --- очень простой circuit breaker на уровне процесса ---
+_CB_STATE = {"fails": 0, "open_until": 0.0}
+
+def _cb_is_open() -> bool:
+    return time.monotonic() < _CB_STATE["open_until"]
+
+def _cb_on_success():
+    _CB_STATE["fails"] = 0
+    _CB_STATE["open_until"] = 0.0
+
+def _cb_on_failure():
+    _CB_STATE["fails"] += 1
+    if _CB_STATE["fails"] >= CB_THRESHOLD:
+        _CB_STATE["open_until"] = time.monotonic() + CB_COOLDOWN
+        _CB_STATE["fails"] = 0  # сбрасываем счётчик после открытия
+
 
 # --------- Core adapter ---------
 
@@ -68,13 +86,14 @@ class LLMAdapter:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            # более агрессивные таймауты: connect 8s, write 15s, read 30s, pool 30s
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"
                 },
-                timeout=90.0,  # ↑ запас по времени
+                timeout=httpx.Timeout(connect=8.0, write=15.0, read=30.0, pool=30.0),
             )
         return self._client
 
@@ -99,6 +118,10 @@ class LLMAdapter:
         Высокоуровневый метод: принимает либо messages=[...], либо system+user.
         Возвращает текст assistant'а.
         """
+        # Если «полуоткрыто» — быстро фейлимся, чтобы не висеть на ретраях
+        if _cb_is_open():
+            raise RuntimeError("LLM temporarily unavailable (cooldown)")
+
         # Build message list
         msg_list: List[Dict[str, str]] = []
         if messages is not None:
@@ -133,23 +156,26 @@ class LLMAdapter:
         client = await self._get_client()
         url = "/chat/completions"  # OpenAI-compatible path
 
-        # Устойчивые ретраи для 429/5xx + лёгкий бэкофф; при неудаче — опциональный фолбэк на DEFAULT_MODEL
+        # Укороченные ретраи: максимум 2 попытки (0 и 1)
         last_err: Optional[Exception] = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 r = await client.post(url, json=payload)
                 r.raise_for_status()
                 data = r.json()
+                _cb_on_success()
                 # Expected OpenAI-like schema
                 return data["choices"][0]["message"]["content"].strip()
+
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
-                # Попытки и бэкофф
-                if status in (429, 500, 502, 503, 504) and attempt < 2:
-                    import asyncio, random
-                    await asyncio.sleep(0.6 * (attempt + 1) + random.random() * 0.3)
+
+                # 429/5xx — одна дополнительная попытка с лёгким бэкоффом
+                if status in (429, 500, 502, 503, 504) and attempt < 1:
+                    await asyncio.sleep(0.25 + random.random() * 0.25)  # ~0.25–0.5s
                     last_err = e
                     continue
+
                 # Мягкий фолбэк на DEFAULT_MODEL (если сейчас не она)
                 try_model = payload.get("model")
                 if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
@@ -158,17 +184,22 @@ class LLMAdapter:
                         r2 = await client.post(url, json=payload)
                         r2.raise_for_status()
                         data2 = r2.json()
+                        _cb_on_success()
                         return data2["choices"][0]["message"]["content"].strip()
                     except Exception:
                         pass
+
+                _cb_on_failure()
                 raise RuntimeError(f"LLM HTTP error {status}: {e.response.text}") from e
+
             except Exception as e:
-                if attempt < 2:
-                    import asyncio, random
-                    await asyncio.sleep(0.5 * (attempt + 1) + random.random() * 0.2)
+                # сеть/таймаут и т.п.: одна дополнительная попытка
+                if attempt < 1:
+                    await asyncio.sleep(0.20 + random.random() * 0.20)  # ~0.2–0.4s
                     last_err = e
                     continue
-                # Фолбэк на DEFAULT_MODEL при сетевых/прочих сбоях
+
+                # Фолбэк на DEFAULT_MODEL при прочих сбоях
                 try_model = payload.get("model")
                 if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
                     try:
@@ -176,14 +207,19 @@ class LLMAdapter:
                         r2 = await client.post(url, json=payload)
                         r2.raise_for_status()
                         data2 = r2.json()
+                        _cb_on_success()
                         return data2["choices"][0]["message"]["content"].strip()
                     except Exception:
                         pass
+
+                _cb_on_failure()
                 raise RuntimeError(f"LLM request failed: {e}") from e
 
         # На всякий случай (сюда не дойдём при raise выше)
         if last_err:
+            _cb_on_failure()
             raise RuntimeError(f"LLM request failed after retries: {last_err}")
+        _cb_on_failure()
         raise RuntimeError("LLM request failed for unknown reasons")
 
 
@@ -249,7 +285,7 @@ async def chat_with_style(
     style: Optional[str] = None,
     style_hint: Optional[str] = None,
     rag_ctx: Optional[str] = None,
-    temperature: float = 0.75,  
+    temperature: float = 0.75,
     mode: Optional[str] = None,
     is_crisis: bool = False,
     needs_long_context: bool = False,
@@ -261,7 +297,6 @@ async def chat_with_style(
     sys = _inject_style_into_system(system, style_text)
 
     # 2) Выбор модели (маршрутизатор)
-    chosen_model = None
     if model_override:
         chosen_model = _resolve_model(model_override)
     else:
@@ -271,11 +306,10 @@ async def chat_with_style(
             "needs_long_context": needs_long_context,
         })
 
-    # >>> ДОБАВЬ ЭТО: дефолты «рандомности без лотереи»
+    # Дефолты с «больше разнообразия, меньше повторов»
     kwargs.setdefault("top_p", 0.9)
-    kwargs.setdefault("presence_penalty", 0.4)   # снижает повторы тем/заходов
-    kwargs.setdefault("frequency_penalty", 0.1)  # убирает лексические повторы
-
+    kwargs.setdefault("presence_penalty", 0.4)
+    kwargs.setdefault("frequency_penalty", 0.1)
 
     # 3) Если нам передали messages, аккуратно добавим/заменим system
     if messages is not None:
