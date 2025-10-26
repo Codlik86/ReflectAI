@@ -1536,7 +1536,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     """
 
     # Локальные импорты, чтобы не править верх файла
-    import random
+    import random, re
     from app.prompts import LENGTH_HINTS
 
     chat_id = m.chat.id
@@ -1558,13 +1558,50 @@ async def _answer_with_llm(m: Message, user_text: str):
     if mode == "reflection" and REFLECTIVE_SUFFIX:
         sys_prompt += "\n\n" + REFLECTIVE_SUFFIX
 
-    # Жёсткая фиксация языка
+    # Жёсткая фиксация языка (исправляет редкие вкрапления иероглифов/иностр. токенов)
     sys_prompt += "\n\nОтвечай строго на русском языке. Не используй иностранные слова и символы без явного запроса."
+
+    # ЯВНАЯ подсказка длины по словам-триггерам (перекрывает общий picker)
+    try:
+        t = (user_text or "").lower()
+        need_deep = any(x in t for x in ["разложи подробно", "подробно", "план", "что делать по шагам", "структурируй", "инструкция"])
+        need_medium = any(x in t for x in ["объясни", "поясни", "структурируй", "как это работает", "почему"])
+
+        if need_deep:
+            sys_prompt += "\n\n" + LENGTH_HINTS["deep"]
+        elif need_medium:
+            sys_prompt += "\n\n" + LENGTH_HINTS["medium"]
+        else:
+            # по умолчанию подсказываем короткий формат, остальное дорегулируем ниже
+            sys_prompt += "\n\n" + LENGTH_HINTS["short"]
+    except Exception:
+        pass
+
+    # 1.1) Вариативность объёма ответа (микро/короткий/средний/глубокий)
+    def _pick_length_profile(ut: str, turns: int) -> str:
+        t = (ut or "").lower()
+        # Запросы «что делать / план / разложи / подробно»
+        if any(k in t for k in ("что делать", "план", "структур", "разложи", "подробн", "как сделать", "шаг")):
+            return "deep" if "подроб" in t or "план" in t else "medium"
+        # Быстрые «успокой / паническая атака / тревога / дыхание / прямо сейчас»
+        if any(k in t for k in ("паническ", "тревог", "успокой", "дышан", "прямо сейчас", "помоги сейчас")):
+            return "micro" if "прямо сейчас" in t or "паническ" in t else "short"
+        # По умолчанию — мягкая вариативность + чуть глубже на 1-м и 5–6-м ходах
+        base = [("micro", 0.15), ("short", 0.45), ("medium", 0.30), ("deep", 0.10)]
+        if turns in (0, 1, 5, 6):
+            base = [("micro", 0.10), ("short", 0.40), ("medium", 0.35), ("deep", 0.15)]
+        r = random.random()
+        acc = 0.0
+        for key, p in base:
+            acc += p
+            if r <= acc:
+                return key
+        return "short"
 
     # 2) История беседы из БД (старые -> новые)
     history_msgs: List[dict] = []
     try:
-        history_msgs = await _load_history_from_db(m.from_user.id, limit=90, hours=24 * 90)
+        history_msgs = await _load_history_from_db(m.from_user.id, limit=90, hours=24*90)
     except Exception:
         # запасной вариант: in-memory
         try:
@@ -1575,44 +1612,25 @@ async def _answer_with_llm(m: Message, user_text: str):
         except Exception:
             history_msgs = []
 
-    # Индекс шага (нужен дальше для RAG)
+    # 1.2) Применяем хинт по длине (после того как знаем номер хода)
     try:
-        turn_idx = len(history_msgs)
+        turn_idx = len(history_msgs)  # сколько сообщений уже в переписке (перед текущим юзер-сообщением)
     except Exception:
         turn_idx = 0
+    length_key = _pick_length_profile(user_text, turn_idx)
+    len_hint = LENGTH_HINTS.get(length_key, "")
+    if len_hint:
+        sys_prompt += "\n\n" + len_hint
 
-    # 3) RAG-контекст — отдельным system-сообщением (адаптивно + анти-лекционность)
+    # 3) RAG-контекст — отдельным system-сообщением
     rag_ctx = ""
-
-    def _should_use_rag(ut: str, turn_idx: int) -> bool:
-        """
-        Включаем RAG:
-        — всегда на «фактовых/учебных» запросах (что такое/почему/как работает и т.п.);
-        — в остальных случаях — с вероятностью ~25% (чтобы не лезть с лекцией).
-        """
-        t = (ut or "").lower()
-
-        # Точные/учебные запросы — включаем обязательно
-        must = any(x in t for x in (
-            "что такое", "объясни", "почему", "как работает",
-            "кпт", "акт", "гештальт", "практика", "техника",
-            "исследован", "данные", "факт"
-        ))
-        if must:
-            return True
-
-        # Иначе — 25% вероятности (стабильной для данного шага)
-        random.seed(f"{turn_idx}|{ut}")
-        return random.random() < 0.25
-
-    if rag_search is not None and _should_use_rag(user_text, turn_idx):
+    if rag_search is not None:
         try:
+            # адаптивный k/max_chars от длины запроса
             qlen = len((user_text or "").split())
-            # Чуть скромнее объёмы — меньше «лекций»
-            k = 2 if qlen < 5 else 3 if qlen < 15 else 4
-            max_chars = 400 if qlen < 8 else 600 if qlen < 20 else 800
-            # ВАЖНО: язык латиницей
-            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ru")
+            k = 3 if qlen < 8 else 6 if qlen < 20 else 8
+            max_chars = 600 if qlen < 8 else 1000 if qlen < 30 else 1400
+            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ру")
         except Exception:
             rag_ctx = ""
 
@@ -1625,6 +1643,7 @@ async def _answer_with_llm(m: Message, user_text: str):
         items = await _fetch_summary_texts_by_ids(ids)
 
         if items:
+            # ограничим длину каждого саммари и общий блок, чтобы не «съедать» контекст
             def _short(s: str, n: int = 260) -> str:
                 s = (s or "").strip().replace("\r", " ").replace("\n", " ")
                 return s if len(s) <= n else (s[: n - 1] + "…")
@@ -1639,37 +1658,26 @@ async def _answer_with_llm(m: Message, user_text: str):
     except Exception:
         sum_block = ""
 
-    # 5) Подсказка длины на основе запроса
-    try:
-        t = (user_text or "").lower()
-        if any(x in t for x in ["разложи подробно", "подробно", "план", "что делать по шагам", "структурируй", "инструкция"]):
-            sys_prompt += "\n\n" + LENGTH_HINTS["deep"]
-        elif any(x in t for x in ["объясни", "поясни", "структурируй", "как это работает", "почему"]):
-            sys_prompt += "\n\n" + LENGTH_HINTS["medium"]
-        elif any(x in t for x in ["паническ", "тревог", "успокой", "дышан", "прямо сейчас", "помоги сейчас"]):
-            sys_prompt += "\n\n" + LENGTH_HINTS["micro"]
-        else:
-            sys_prompt += "\n\n" + LENGTH_HINTS["short"]
-    except Exception:
-        pass
-
-    # 6) Сбор сообщений для LLM
+    # 5) Сбор сообщений для LLM
     # Порядок: system стиль -> system RAG -> system summaries -> история -> текущее сообщение
     messages: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt}]
     if rag_ctx:
         messages.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
     if sum_block:
         messages.append({"role": "system", "content": sum_block})
+
     messages += history_msgs
     messages.append({"role": "user", "content": user_text})
 
-    # 7) Вызов LLM
+    # 6) Вызов LLM
     if chat_with_style is None:
         await send_and_log(m, "Я тебя слышу. Сейчас подключаюсь…", reply_markup=kb_main_menu())
         return
 
-    LLM_MAX_TOKENS = 650  # было 480
-    temp = 0.75           # стабильная температура
+    # Живая речь: температура слегка варьируется детерминированно от текста и длины истории
+    seed = f"{user_text}|{turn_idx}"
+    temp = 0.66 + (abs(hash(seed)) % 17) / 100.0  # 0.66–0.82
+    LLM_MAX_TOKENS = 480
 
     try:
         reply = await chat_with_style(
@@ -1678,16 +1686,95 @@ async def _answer_with_llm(m: Message, user_text: str):
             max_tokens=LLM_MAX_TOKENS,
         )
     except TypeError:
+        # на случай старой сигнатуры
         reply = await chat_with_style(messages, temperature=temp, max_tokens=LLM_MAX_TOKENS)
     except Exception:
         reply = ""
 
     if not reply or not reply.strip():
-        reply = "Хочу понять суть поточнее. Что в этой ситуации сейчас болит сильнее всего?"
+        reply = "Хочу понять суть поточнее. Что в этой ситуации сейчас болит сильнее всего — один-два предложения?"
 
-    # 8) Отправляем и логируем как 'bot'
+    # NEW: пост-фильтр — максимум один вопрос
+    try:
+        reply = _enforce_single_question(reply)
+    except Exception:
+        pass
+
+    # --- Автоперегенерация, если в выдаче есть CJK-символы (чинит случайные «整理» и т.п.) ---
+    try:
+        _CJK_RE = re.compile(r'[\u3400-\u9FFF]')
+        if _CJK_RE.search(reply or "") and chat_with_style is not None:
+            sys_prompt_ru = sys_prompt + "\n\nОтвечай строго на русском. Исключи любые иероглифы и иностранные слова."
+            messages_ru: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt_ru}]
+            if rag_ctx:
+                messages_ru.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
+            if sum_block:
+                messages_ru.append({"role": "system", "content": sum_block})
+            messages_ru += history_msgs
+            messages_ru.append({"role": "user", "content": user_text})
+
+            try:
+                reply2 = await chat_with_style(messages=messages_ru, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+            except TypeError:
+                reply2 = await chat_with_style(messages_ru, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+            except Exception:
+                reply2 = ""
+            if reply2 and reply2.strip():
+                try:
+                    reply = _enforce_single_question(reply2)
+                except Exception:
+                    reply = reply2
+    except Exception:
+        pass
+
+    # --- Анти-повторы стартовых формул: мягкая перегенерация при совпадении ---
+    try:
+        # берём/создаём in-memory LRU в модуле
+        store = globals().setdefault("LAST_OPENERS", {})
+        from collections import deque as _dq
+        if chat_id not in store:
+            store[chat_id] = _dq(maxlen=3)
+
+        def _extract_opener_local(text: str) -> str:
+            line = (text or "").strip().split("\n", 1)[0]
+            return line[:60].lower()
+
+        opener = _extract_opener_local(reply)
+        seen = store.get(chat_id)
+        opener_seen = opener in seen
+
+        if opener_seen and chat_with_style is not None:
+            # аккуратный хинт: переписать ПЕРВУЮ строку без клише/повторов
+            sys_prompt_r = sys_prompt + "\n\n(Перепиши первую строку без клише и повторов, начни с наблюдения по сути ситуации.)"
+
+            messages_r: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt_r}]
+            if rag_ctx:
+                messages_r.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
+            if sum_block:
+                messages_r.append({"role": "system", "content": sum_block})
+            messages_r += history_msgs
+            messages_r.append({"role": "user", "content": user_text})
+
+            try:
+                reply_r = await chat_with_style(messages=messages_r, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+            except TypeError:
+                reply_r = await chat_with_style(messages_r, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+            except Exception:
+                reply_r = ""
+
+            if reply_r and reply_r.strip():
+                try:
+                    reply = _enforce_single_question(reply_r)
+                except Exception:
+                    reply = reply_r
+
+        # обновляем LRU
+        seen.append(_extract_opener_local(reply))
+    except Exception:
+        pass
+
+    # 7) Отправляем и логируем как 'bot' (для устойчивой памяти)
     await send_and_log(m, reply, reply_markup=kb_main_menu())
-
 
 # ===== Текстовые сообщения =====
 @router.message(F.text & ~F.text.startswith("/"))
@@ -1958,20 +2045,6 @@ async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
         # молча игнорируем — не ломаем поток
         return
 
-# --- Simple rate limit store (в памяти процесса) ---
-from collections import deque
-import time
-
-# последняя метка времени по tg_id
-_RATE_LAST: dict[int, float] = {}
-# скользящее окно для «рывков»
-_RATE_WINDOW: dict[int, deque] = {}
-# параметры
-_RATE_MIN_INTERVAL = 0.8        # минимальный интервал между событиями, сек
-_RATE_BURST_WINDOW = 5.0        # окно для подсчёта рывков, сек
-_RATE_BURST_MAX = 6             # максимум событий в окне
-
-
 class GateMiddleware(BaseMiddleware):
     """
     1) Пока не принят policy — разрешены только /start и onb:* (остальное — экран policy).
@@ -1979,43 +2052,12 @@ class GateMiddleware(BaseMiddleware):
        затем пропускаем исходный хендлер. Исключения: /pay и платёжные/служебные cb —
        их пропускаем как есть (без автозапуска).
     3) Доступ открыт — пропускаем всё.
-    + Rate limiting: мягко ограничиваем частоту сообщений/кликов.
     """
     async def __call__(self, handler, event, data):
         try:
             tg_id = getattr(getattr(event, "from_user", None), "id", None)
             if not tg_id:
                 return await handler(event, data)
-
-            # ---------- RATE LIMITING (до любых тяжёлых операций) ----------
-            now = time.monotonic()
-
-            # правило 1: минимальный интервал между событиями
-            last = _RATE_LAST.get(tg_id, 0.0)
-            if (now - last) < _RATE_MIN_INTERVAL:
-                if isinstance(event, Message):
-                    await event.answer("Слишком быстро. Дай секунду между сообщениями ✋")
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("Подожди чуть-чуть…", show_alert=False)
-                return
-            _RATE_LAST[tg_id] = now
-
-            # правило 2: ограничение на «рывки» в скользящем окне
-            dq = _RATE_WINDOW.get(tg_id)
-            if dq is None:
-                dq = deque()
-                _RATE_WINDOW[tg_id] = dq
-            # чистим старые метки
-            while dq and (now - dq[0]) > _RATE_BURST_WINDOW:
-                dq.popleft()
-            dq.append(now)
-            if len(dq) > _RATE_BURST_MAX:
-                if isinstance(event, Message):
-                    await event.answer("Слишком много запросов подряд. Давай чуть медленнее 🙌")
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("Слишком часто.", show_alert=False)
-                return
-            # ----------------------------------------------------------------
 
             policy_ok, access_ok = await _gate_user_flags(int(tg_id))
 
@@ -2054,7 +2096,6 @@ class GateMiddleware(BaseMiddleware):
         except Exception:
             # fail-open
             return await handler(event, data)
-
 
 # --- Однократный mount, чтобы не было дублей ---
 if not getattr(router, "_gate_mounted", False):
