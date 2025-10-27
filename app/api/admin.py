@@ -530,47 +530,51 @@ async def admin_summaries_daily():
             err += 1
     return {"ok": True, "processed": ok, "errors": err, "day": day_utc.isoformat()}
 
+# --- WEEKLY rollup (batch) ---
 @router.post("/summaries/weekly", dependencies=[Depends(require_admin)])
 async def admin_summaries_weekly(
-    _: Any = None,
+    _: Any = Depends(require_admin),
     limit: int = Query(80, ge=1, le=1000),
     after_id: int = Query(0, ge=0),
 ):
     """
     Сводные weekly-итоги по всем пользователям батчами.
     Пагинация: ?limit=80&after_id=<последний user_id из прошлого батча>.
-    Возвращает next_after_id, если есть следующий батч.
+    Берём тех, у кого за ~8 дней были daily-саммари.
     """
     async with async_session() as s:
         rows = await s.execute(text("""
             SELECT DISTINCT user_id
             FROM dialog_summaries
             WHERE kind = 'daily'
-              AND period_start >= NOW() AT TIME ZONE 'UTC' - INTERVAL '8 days'
+              AND period_start >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '8 days'
               AND (:after_id = 0 OR user_id > :after_id)
             ORDER BY user_id
             LIMIT :limit
         """), {"after_id": after_id, "limit": limit})
-        uids = [r[0] for r in rows]
+        uids = [int(r[0]) for r in rows]
 
-        processed = 0
-        # Берём “опорную” дату: вчерашний UTC-полночь; хелпер сам нормализует до начала недели
-        week_anchor = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        for uid in uids:
-            await rollup_weekly(int(uid), week_anchor)  # <-- передаём дату, НЕ сессию
-            processed += 1
+    processed = 0
+    # якорная дата: вчерашняя UTC-полночь (хелпер сам возьмёт границы недели)
+    week_anchor = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-        next_after = uids[-1] if len(uids) == limit else None
-        return {
-            "ok": True,
-            "processed": processed,
-            "batch_size": len(uids),
-            "next_after_id": next_after,
-        }
+    for uid in uids:
+        await rollup_weekly(uid, week_anchor)   # <-- ПЕРЕДАЁМ ДАТУ, НЕ СЕССИЮ
+        processed += 1
 
+    next_after = uids[-1] if len(uids) == limit else None
+    return {
+        "ok": True,
+        "processed": processed,
+        "batch_size": len(uids),
+        "next_after_id": next_after,
+    }
+
+
+# --- MONTHLY rollup (batch) ---
 @router.post("/summaries/monthly", dependencies=[Depends(require_admin)])
 async def admin_summaries_monthly(
-    _: Any = None,
+    _: Any = Depends(require_admin),
     limit: int = Query(80, ge=1, le=1000),
     after_id: int = Query(0, ge=0),
 ):
@@ -583,25 +587,66 @@ async def admin_summaries_monthly(
         rows = await s.execute(text("""
             SELECT DISTINCT user_id
             FROM dialog_summaries
-              WHERE kind IN ('daily','weekly')
-              AND period_start >= NOW() AT TIME ZONE 'UTC' - INTERVAL '35 days'
+            WHERE kind IN ('daily','weekly')
+              AND period_start >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '35 days'
               AND (:after_id = 0 OR user_id > :after_id)
             ORDER BY user_id
             LIMIT :limit
         """), {"after_id": after_id, "limit": limit})
-        uids = [r[0] for r in rows]
+        uids = [int(r[0]) for r in rows]
 
-        processed = 0
-        # Опорная дата для месяца — тоже вчера (UTC); хелпер сам возьмёт начало месяца
-        month_anchor = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        for uid in uids:
-            await rollup_monthly(int(uid), month_anchor)  # <-- передаём дату, НЕ сессию
-            processed += 1
+    processed = 0
+    # якорная дата: вчерашняя UTC-полночь (хелпер сам возьмёт границы месяца)
+    month_anchor = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-        next_after = uids[-1] if len(uids) == limit else None
-        return {
-            "ok": True,
-            "processed": processed,
-            "batch_size": len(uids),
-            "next_after_id": next_after,
-        }
+    for uid in uids:
+        await rollup_monthly(uid, month_anchor)  # <-- ПЕРЕДАЁМ ДАТУ, НЕ СЕССИЮ
+        processed += 1
+
+    next_after = uids[-1] if len(uids) == limit else None
+    return {
+        "ok": True,
+        "processed": processed,
+        "batch_size": len(uids),
+        "next_after_id": next_after,
+    }
+
+# --- MONTHLY rollup (batch) ---
+@router.post("/summaries/monthly", dependencies=[Depends(require_admin)])
+async def admin_summaries_monthly(
+    _: Any = Depends(require_admin),
+    limit: int = Query(80, ge=1, le=1000),
+    after_id: int = Query(0, ge=0),
+):
+    """
+    Сводные monthly-итоги батчами.
+    Источники: daily/weekly за последние ~35 дней.
+    Пагинация такая же: ?limit=80&after_id=<...>
+    """
+    async with async_session() as s:
+        rows = await s.execute(text("""
+            SELECT DISTINCT user_id
+            FROM dialog_summaries
+            WHERE kind IN ('daily','weekly')
+              AND period_start >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '35 days'
+              AND (:after_id = 0 OR user_id > :after_id)
+            ORDER BY user_id
+            LIMIT :limit
+        """), {"after_id": after_id, "limit": limit})
+        uids = [int(r[0]) for r in rows]
+
+    processed = 0
+    # якорная дата: вчерашняя UTC-полночь (хелпер сам возьмёт границы месяца)
+    month_anchor = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    for uid in uids:
+        await rollup_monthly(uid, month_anchor)  # <-- ПЕРЕДАЁМ ДАТУ, НЕ СЕССИЮ
+        processed += 1
+
+    next_after = uids[-1] if len(uids) == limit else None
+    return {
+        "ok": True,
+        "processed": processed,
+        "batch_size": len(uids),
+        "next_after_id": next_after,
+    }
