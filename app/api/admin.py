@@ -545,8 +545,8 @@ async def admin_summaries_weekly(
         rows = await s.execute(text("""
             SELECT DISTINCT user_id
             FROM dialog_summaries
-            WHERE period = 'daily'
-              AND created_at >= NOW() - INTERVAL '8 days'
+            WHERE kind = 'daily'
+              AND period_start >= NOW() AT TIME ZONE 'UTC' - INTERVAL '8 days'
               AND (:after_id = 0 OR user_id > :after_id)
             ORDER BY user_id
             LIMIT :limit
@@ -581,8 +581,8 @@ async def admin_summaries_monthly(
         rows = await s.execute(text("""
             SELECT DISTINCT user_id
             FROM dialog_summaries
-            WHERE period IN ('daily','weekly')
-              AND created_at >= NOW() - INTERVAL '35 days'
+              WHERE kind IN ('daily','weekly')
+              AND period_start >= NOW() AT TIME ZONE 'UTC' - INTERVAL '35 days'
               AND (:after_id = 0 OR user_id > :after_id)
             ORDER BY user_id
             LIMIT :limit
