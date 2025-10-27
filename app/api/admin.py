@@ -544,7 +544,7 @@ async def admin_summaries_weekly(
     async with async_session() as s:
         rows = await s.execute(text("""
             SELECT DISTINCT user_id
-            FROM dialog_summaries_v1
+            FROM dialog_summaries
             WHERE period = 'daily'
               AND created_at >= NOW() - INTERVAL '8 days'
               AND (:after_id = 0 OR user_id > :after_id)
@@ -580,7 +580,7 @@ async def admin_summaries_monthly(
     async with async_session() as s:
         rows = await s.execute(text("""
             SELECT DISTINCT user_id
-            FROM dialog_summaries_v1
+            FROM dialog_summaries
             WHERE period IN ('daily','weekly')
               AND created_at >= NOW() - INTERVAL '35 days'
               AND (:after_id = 0 OR user_id > :after_id)
