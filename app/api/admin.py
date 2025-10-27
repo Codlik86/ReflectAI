@@ -28,24 +28,44 @@ async def get_session_dep():
     async with async_session() as s:
         yield s
 
-auth = HTTPBearer(auto_error=False)  # не падать сразу, проверим второй вариант
+auth = HTTPBearer(auto_error=False)  # не падать сразу, проверим другие варианты
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 ADMIN_API_SECRET = os.getenv("ADMIN_API_SECRET", "").strip()
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+def _get_header_case_insensitive(request: Request, name: str) -> Optional[str]:
+    # FastAPI/Starlette headers — case-insensitive, но читаем оба варианта на всякий
+    return (request.headers.get(name)
+            or request.headers.get(name.lower())
+            or request.headers.get(name.title()))
 
 def require_admin(
     creds: HTTPAuthorizationCredentials | None = Depends(auth),
     request: Request = None,
+    secret_q: Optional[str] = Query(default=None, alias="secret"),
 ) -> None:
-    # Вариант 1: Bearer <ADMIN_TOKEN>
-    if ADMIN_TOKEN and creds and creds.credentials == ADMIN_TOKEN:
+    """
+    Принимаем любой из трёх способов:
+    1) Authorization: Bearer <ADMIN_TOKEN>
+    2) X-Admin-Secret: <ADMIN_API_SECRET>
+    3) ?secret=<ADMIN_API_SECRET> (удобно для cron/ручных тестов)
+    """
+    # 1) Bearer
+    if ADMIN_TOKEN and creds and creds.scheme.lower() == "bearer" and creds.credentials == ADMIN_TOKEN:
         return
-    # Вариант 2: X-Admin-Secret: <ADMIN_API_SECRET>
-    if ADMIN_API_SECRET and request and request.headers.get("X-Admin-Secret") == ADMIN_API_SECRET:
-        return
-    raise HTTPException(status_code=401, detail="Unauthorized")
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    # 2) Заголовок X-Admin-Secret (без учёта регистра)
+    hdr = _get_header_case_insensitive(request, "X-Admin-Secret")
+    if ADMIN_API_SECRET and hdr and hdr.strip() == ADMIN_API_SECRET:
+        return
+
+    # 3) query ?secret=
+    if ADMIN_API_SECRET and secret_q and secret_q.strip() == ADMIN_API_SECRET:
+        return
+
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 PLAN_TO_DAYS: dict[str, int] = {
     "week": 7,
@@ -250,35 +270,7 @@ async def list_payments(
 
     return {"items": [_row(p) for p in rows], "limit": limit, "offset": offset}
 
-# CSV экспорт платежей
-@router.get("/export/payments.csv", dependencies=[Depends(require_admin)])
-async def export_payments_csv(session: AsyncSession = Depends(get_session_dep)):
-    from app.db.models import Payment  # type: ignore
-    rows = (await session.execute(select(Payment).order_by(Payment.id))).scalars().all()
-    headers = ["id", "user_id", "provider_payment_id", "amount", "currency", "status", "created_at"]
-
-    def as_csv_val(v: Any) -> str:
-        if v is None:
-            return ""
-        s = str(v)
-        if any(ch in s for ch in [",", ";", "\n", '"']):
-            s = '"' + s.replace('"', '""') + '"'
-        return s
-
-    lines = [",".join(headers)]
-    for p in rows:
-        vals = [
-            as_csv_val(getattr(p, "id", None)),
-            as_csv_val(getattr(p, "user_id", None)),
-            as_csv_val(getattr(p, "provider_payment_id", None)),
-            as_csv_val(getattr(p, "amount", None)),
-            as_csv_val(getattr(p, "currency", None)),
-            as_csv_val(getattr(p, "status", None)),
-            as_csv_val(getattr(p, "created_at", None)),
-        ]
-        lines.append(",".join(vals))
-    csv_data = "\n".join(lines)
-    return Response(content=csv_data, media_type="text/csv")
+# CSV экспорт платежей (второй вариант уже есть выше; оставляем как есть)
 
 # ---------------------------------------------------------------------------
 # SUBSCRIPTIONS
@@ -314,47 +306,12 @@ async def list_subscriptions(
 
     return {"items": [_row(s) for s in rows], "limit": limit, "offset": offset}
 
-# CSV экспорт подписок
-@router.get("/export/subscriptions.csv", dependencies=[Depends(require_admin)])
-async def export_subscriptions_csv(session: AsyncSession = Depends(get_session_dep)):
-    from app.db.models import Subscription  # type: ignore
-    rows = (await session.execute(select(Subscription).order_by(Subscription.id))).scalars().all()
-    headers = [
-        "id", "user_id", "plan", "status", "is_auto_renew", "subscription_until",
-        "yk_payment_method_id", "yk_customer_id", "created_at", "updated_at",
-    ]
-
-    def as_csv_val(v: Any) -> str:
-        if v is None:
-            return ""
-        s = str(v)
-        if any(ch in s for ch in [",", ";", "\n", '"']):
-            s = '"' + s.replace('"', '""') + '"'
-        return s
-
-    lines = [",".join(headers)]
-    for s in rows:
-        vals = [
-            as_csv_val(getattr(s, "id", None)),
-            as_csv_val(getattr(s, "user_id", None)),
-            as_csv_val(getattr(s, "plan", None)),
-            as_csv_val(getattr(s, "status", None)),
-            as_csv_val(getattr(s, "is_auto_renew", None)),
-            as_csv_val(getattr(s, "subscription_until", None)),
-            as_csv_val(getattr(s, "yk_payment_method_id", None)),
-            as_csv_val(getattr(s, "yk_customer_id", None)),
-            as_csv_val(getattr(s, "created_at", None)),
-            as_csv_val(getattr(s, "updated_at", None)),
-        ]
-        lines.append(",".join(vals))
-    csv_data = "\n".join(lines)
-    return Response(content=csv_data, media_type="text/csv")
+# CSV экспорт подписок (второй вариант уже есть выше; оставляем как есть)
 
 # --- массовая отметка просроченных ---
 @router.post("/subscriptions/expire", dependencies=[Depends(require_admin)])
 async def expire_subscriptions(_: Request, session: AsyncSession = Depends(get_session_dep)):
-    now = _utcnow()
-    # raw SQL проще и надёжнее для массового апдейта
+    now = _now_utc()
     stmt = text("""
         UPDATE subscriptions
            SET status = 'expired',
@@ -376,7 +333,7 @@ async def cancel_subscription(
     user_id: int = Body(..., embed=True),
 ):
     from app.db.models import Subscription  # type: ignore
-    now = _utcnow()
+    now = _now_utc()
     sub = (await session.execute(
         select(Subscription).where(Subscription.user_id == user_id)
     )).scalar_one_or_none()
@@ -397,7 +354,7 @@ async def reactivate_subscription(
     plan: Optional[str] = Body(None, embed=True),
 ):
     from app.db.models import Subscription  # type: ignore
-    now = _utcnow()
+    now = _now_utc()
     add_days = _plan_days(plan)
 
     sub = (await session.execute(
@@ -480,7 +437,7 @@ async def admin_trial_end(tg_id: int, session: AsyncSession = Depends(get_sessio
     u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    new_exp = _utcnow() - timedelta(seconds=1)
+    new_exp = _now_utc() - timedelta(seconds=1)
     await session.execute(update(User).where(User.id == u.id).values(trial_expires_at=new_exp))
     await session.commit()
     return {"ok": True, "user_id": u.id, "trial_expires_at": new_exp}
@@ -541,227 +498,7 @@ async def user_full(
 
     return {"user": _user(u), "payments": [_pay(p) for p in pays], "subscriptions": [_sub(x) for x in subs]}
 
-# === Maintenance: expire overdue & charge due ===
-from fastapi import Body
-from sqlalchemy import select, update, and_
-from datetime import datetime, timedelta, timezone
-from typing import Optional
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-@router.api_route(
-    "/maintenance/expire_overdue",
-    methods=["GET", "POST"],
-    dependencies=[Depends(require_admin)],
-)
-async def maintenance_expire_overdue(
-    hours: int = Query(24, ge=1, le=168),
-    session: AsyncSession = Depends(get_session_dep),
-):
-    """
-    Отмечает все активные подписки, у которых subscription_until < now,
-    как expired. Возвращает количество обновлённых строк.
-    """
-    now = _utcnow()
-    # ограничим окно «давности», чтобы случайно не трогать очень древние записи
-    oldest = now - timedelta(hours=hours)
-
-    from app.db.models import Subscription  # type: ignore
-
-    # выбираем активные, у которых истёк срок
-    q = await session.execute(
-        select(Subscription).where(
-            and_(
-                Subscription.status == "active",
-                Subscription.subscription_until < now,
-                Subscription.subscription_until > oldest,
-            )
-        )
-    )
-    subs = q.scalars().all()
-    for s in subs:
-        s.status = "expired"
-        # если есть поле is_premium — обнулим
-        try:
-            s.is_premium = False  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        s.updated_at = now
-    await session.commit()
-    return {"expired": len(subs), "window_hours": hours}
-
-@router.api_route(
-    "/maintenance/charge_due",
-    methods=["GET", "POST"],
-    dependencies=[Depends(require_admin)],
-)
-async def maintenance_charge_due(
-    hours: int = Query(24, ge=1, le=168),
-    dry_run: int = Query(1, description="1=dry-run, 0=делаем списания"),
-    session: AsyncSession = Depends(get_session_dep),
-):
-    """
-    Ищет подписки, которым истекает срок в ближайшие `hours` часов
-    (и включены авто-продления), и делает попытку автосписания.
-    При dry_run=1 только возвращает список кандидатов.
-    """
-    now = _utcnow()
-    till = now + timedelta(hours=hours)
-
-    from app.db.models import Subscription  # type: ignore
-    # кандидаты на продление
-    q = await session.execute(
-        select(Subscription).where(
-            and_(
-                Subscription.is_auto_renew == True,  # noqa: E712
-                Subscription.subscription_until <= till,
-                Subscription.subscription_until > now - timedelta(days=30),
-                Subscription.status.in_(("active", "expired")),
-            )
-        ).order_by(Subscription.subscription_until.asc())
-    )
-    subs = q.scalars().all()
-
-    charged, failed = 0, 0
-    details = []
-
-    # Импорты «по месту», чтобы не падать, если модуль ещё не завезли
-    try:
-        from app.billing.service import apply_success_payment, PRICES_RUB
-        from app.billing.yookassa_client import charge_saved_method
-    except Exception:
-        apply_success_payment = None           # type: ignore
-        charge_saved_method = None             # type: ignore
-        PRICES_RUB = {}                        # type: ignore
-
-    for s in subs:
-        uid = int(getattr(s, "user_id"))
-        plan = (getattr(s, "plan") or "month").strip()
-        pm_id = getattr(s, "yk_payment_method_id", None)
-        cust_id = getattr(s, "yk_customer_id", None)
-
-        item = {
-            "subscription_id": getattr(s, "id", None),
-            "user_id": uid,
-            "plan": plan,
-            "until": getattr(s, "subscription_until", None),
-        }
-
-        # если dry-run или нет клиента ЮKassa — просто сообщаем кандидата
-        if dry_run or not charge_saved_method or not apply_success_payment:
-            details.append({**item, "action": "would_charge"})
-            continue
-
-        # нет сохранённого метода — ничего не делаем (фейл)
-        if not pm_id:
-            failed += 1
-            details.append({**item, "action": "skip_no_payment_method"})
-            continue
-
-        # сумма в рублях по плану (если плана нет в прайсе — пропускаем)
-        amount = PRICES_RUB.get(plan)
-        if not amount:
-            failed += 1
-            details.append({**item, "action": "skip_unknown_plan"})
-            continue
-
-        # пробуем списать
-        try:
-            yk = await charge_saved_method(
-                amount_rub=amount,
-                description=f"Auto-renew {plan}",
-                payment_method_id=pm_id,
-                customer_id=cust_id,
-                idempotency_key=f"sub-{getattr(s,'id',uid)}-{int(now.timestamp())}",
-            )
-            if (yk or {}).get("status") == "succeeded":
-                # фиксируем платёж и продлеваем подписку
-                await apply_success_payment(
-                    user_id=uid,
-                    plan=plan,
-                    provider_payment_id=(yk or {}).get("id", "yk_auto"),
-                    payment_method_id=pm_id,
-                    customer_id=cust_id,
-                    session=session,
-                )
-                charged += 1
-                details.append({**item, "action": "charged"})
-            else:
-                failed += 1
-                details.append({**item, "action": "payment_not_succeeded"})
-        except Exception as e:
-            failed += 1
-            details.append({**item, "action": "exception", "error": str(e)})
-
-    return {
-        "candidates": len(subs),
-        "charged": charged,
-        "failed": failed,
-        "dry_run": bool(dry_run),
-        "window_hours": hours,
-        "items": details[:50],  # чтобы ответ не раздувался
-    }
-
-# ---------- TEST UTILITIES (temporary) ----------
-from pydantic import BaseModel, Field
-
-class SetUntilInBody(BaseModel):
-    minutes: int = Field(..., ge=-14400, le=14400, description="Сколько минут от текущего момента (можно отрицательно)")
-
-@router.post("/subscriptions/{tg_id}/set_until_in", dependencies=[Depends(require_admin)])
-async def admin_set_until_in(
-    tg_id: int,
-    body: SetUntilInBody,
-    session: AsyncSession = Depends(get_session_dep),
-):
-    """
-    Тестовый помощник: ставит subscription_until = now + minutes.
-    Удобно, чтобы загнать подписку в окно charge_due или сделать её просроченной.
-    """
-    from app.db.models import User, Subscription  # type: ignore
-    u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
-    if not u:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    sub = (await session.execute(select(Subscription).where(Subscription.user_id == u.id))).scalar_one_or_none()
-    if not sub:
-        raise HTTPException(status_code=404, detail="Subscription not found")
-
-    now = datetime.now(timezone.utc)
-    new_until = now + timedelta(minutes=body.minutes)
-
-    # гарантируем актив и автопродление для теста
-    sub.status = "active"
-    sub.is_auto_renew = True
-    sub.subscription_until = new_until
-    try:
-        sub.updated_at = now
-    except Exception:
-        pass
-
-    await session.commit()
-    return {
-        "ok": True,
-        "user_id": u.id,
-        "minutes": body.minutes,
-        "subscription_until": new_until,
-    }
-
-# --- DEBUG: какие подключены база/хост и сколько записей в bot_messages
-@router.get("/diag/db")
-async def diag_db():
-    from sqlalchemy import text as sql
-    from app.db.core import async_session
-    async with async_session() as s:
-        dbname = (await s.execute(sql("select current_database()"))).scalar_one()
-        now    = (await s.execute(sql("select now() at time zone 'UTC'"))).scalar_one()
-        cnt    = (await s.execute(sql("select count(*) from bot_messages"))).scalar_one()
-        users  = (await s.execute(sql("select count(*) from users"))).scalar_one()
-    return {"db": dbname, "utc_now": str(now), "bot_messages": cnt, "users": users}
-
 # === Summaries bridge (/api/admin/summaries/*) ===
-from datetime import datetime, timedelta, timezone
 from sqlalchemy import text as _sql
 from app.db.core import async_session as _summ_sess
 from app.memory_summarizer import make_daily, rollup_weekly, rollup_monthly
@@ -794,62 +531,73 @@ async def admin_summaries_daily():
     return {"ok": True, "processed": ok, "errors": err, "day": day_utc.isoformat()}
 
 @router.post("/summaries/weekly", dependencies=[Depends(require_admin)])
-async def admin_summaries_weekly():
+async def admin_summaries_weekly(
+    _: Any = None,
+    limit: int = Query(80, ge=1, le=1000),
+    after_id: int = Query(0, ge=0),
+):
     """
-    Недельная сводка: прошлая неделя (Пн–Вс, UTC) по имеющимся daily.
+    Сводные weekly-итоги по всем пользователям батчами.
+    Пагинация: ?limit=80&after_id=<последний user_id из прошлого батча>.
+    Возвращает next_after_id, если есть следующий батч.
     """
-    now = _utc()
-    # старт прошедшей недели (Пн 00:00 UTC)
-    week_today = now - timedelta(days=now.weekday())  # Пн этой недели
-    prev_week_start = (week_today - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    async with async_session() as s:
+        rows = await s.execute(text("""
+            SELECT DISTINCT user_id
+            FROM dialog_summaries_v1
+            WHERE period = 'daily'
+              AND created_at >= NOW() - INTERVAL '8 days'
+              AND (:after_id = 0 OR user_id > :after_id)
+            ORDER BY user_id
+            LIMIT :limit
+        """), {"after_id": after_id, "limit": limit})
+        uids = [r[0] for r in rows]
 
-    async with _summ_sess() as s:
-        uids = (await s.execute(
-            _sql("""
-                SELECT DISTINCT user_id
-                FROM dialog_summaries
-                WHERE kind='daily' AND period_start >= :st AND period_end <= :en
-            """),
-            {"st": prev_week_start, "en": prev_week_start + timedelta(days=7)}
-        )).scalars().all()
+        processed = 0
+        for uid in uids:
+            await rollup_weekly(uid, s)
+            processed += 1
 
-    ok, err = 0, 0
-    for uid in uids:
-        try:
-            await rollup_weekly(int(uid), prev_week_start)
-            ok += 1
-        except Exception as e:
-            print("[/api/admin/summaries/weekly]", uid, "->", repr(e))
-            err += 1
-    return {"ok": True, "processed": ok, "errors": err, "week_start": prev_week_start.isoformat()}
+        next_after = uids[-1] if len(uids) == limit else None
+        return {
+            "ok": True,
+            "processed": processed,
+            "batch_size": len(uids),
+            "next_after_id": next_after,
+        }
 
 @router.post("/summaries/monthly", dependencies=[Depends(require_admin)])
-async def admin_summaries_monthly():
+async def admin_summaries_monthly(
+    _: Any = None,
+    limit: int = Query(80, ge=1, le=1000),
+    after_id: int = Query(0, ge=0),
+):
     """
-    Месячная тематическая выжимка: прошедший месяц.
+    Сводные monthly-итоги батчами.
+    Источники: daily/weekly за последние ~35 дней.
+    Пагинация такая же: ?limit=80&after_id=<...>
     """
-    now = _utc()
-    this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-    prev_month_end = this_month_start - timedelta(seconds=1)
-    prev_month_start = prev_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    async with async_session() as s:
+        rows = await s.execute(text("""
+            SELECT DISTINCT user_id
+            FROM dialog_summaries_v1
+            WHERE period IN ('daily','weekly')
+              AND created_at >= NOW() - INTERVAL '35 days'
+              AND (:after_id = 0 OR user_id > :after_id)
+            ORDER BY user_id
+            LIMIT :limit
+        """), {"after_id": after_id, "limit": limit})
+        uids = [r[0] for r in rows]
 
-    # кандидаты — у кого были daily/weekly в том месяце
-    async with _summ_sess() as s:
-        uids = (await s.execute(
-            _sql("""
-                SELECT DISTINCT user_id
-                FROM dialog_summaries
-                WHERE period_start >= :st AND period_end <= :en
-            """),
-            {"st": prev_month_start, "en": this_month_start}
-        )).scalars().all()
+        processed = 0
+        for uid in uids:
+            await rollup_monthly(uid, s)
+            processed += 1
 
-    ok, err = 0, 0
-    for uid in uids:
-        try:
-            await rollup_monthly(int(uid), prev_month_start)
-            ok += 1
-        except Exception as e:
-            print("[/api/admin/summaries/monthly]", uid, "->", repr(e))
-            err += 1
-    return {"ok": True, "processed": ok, "errors": err, "month_start": prev_month_start.isoformat()}
+        next_after = uids[-1] if len(uids) == limit else None
+        return {
+            "ok": True,
+            "processed": processed,
+            "batch_size": len(uids),
+            "next_after_id": next_after,
+        }
