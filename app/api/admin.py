@@ -554,8 +554,10 @@ async def admin_summaries_weekly(
         uids = [r[0] for r in rows]
 
         processed = 0
+        # Берём “опорную” дату: вчерашний UTC-полночь; хелпер сам нормализует до начала недели
+        week_anchor = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         for uid in uids:
-            await rollup_weekly(uid, s)
+            await rollup_weekly(int(uid), week_anchor)  # <-- передаём дату, НЕ сессию
             processed += 1
 
         next_after = uids[-1] if len(uids) == limit else None
@@ -590,8 +592,10 @@ async def admin_summaries_monthly(
         uids = [r[0] for r in rows]
 
         processed = 0
+        # Опорная дата для месяца — тоже вчера (UTC); хелпер сам возьмёт начало месяца
+        month_anchor = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         for uid in uids:
-            await rollup_monthly(uid, s)
+            await rollup_monthly(int(uid), month_anchor)  # <-- передаём дату, НЕ сессию
             processed += 1
 
         next_after = uids[-1] if len(uids) == limit else None
