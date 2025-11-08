@@ -46,7 +46,7 @@ backups/
 migrations/**/__pycache__/
 
 # ===================== Data / corpora (не хранить сырые данные в гите) =====================
-data/
+/data/
 corpus/
 *.txt
 *.tsv
