@@ -38,6 +38,13 @@ from app.api import nudges as nudges_api               # /api/admin/nudges/*
 # админка (HTML)
 from app.site.admin_ui import router as admin_ui_router    # /admin
 
+# МиниАпп
+from app.api.telegram_webapp import router as tg_router
+from fastapi.middleware.cors import CORSMiddleware
+from app.api.access import router as access_router
+from app.api.payments import router as payments_router
+from app.api import access as access_api
+
 # НОВОЕ: API для саммари и maintenance
 from app.site.summaries_api import router as summaries_router      # /api/summaries/*
 
@@ -70,6 +77,18 @@ app.include_router(payments_api.router, prefix="")      # /api/payments/yookassa
 app.include_router(admin_api.router,    prefix="")      # /api/admin/*
 app.include_router(admin_ui_router)                     # /admin (HTML)
 app.include_router(nudges_api.router,    prefix="")    # /api/admin/nudges/*
+
+app.include_router(access_router)
+app.include_router(access_api.router)
+app.include_router(payments_router)      # /api/payments/*
+app.include_router(tg_router, prefix="/api/tg")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://pomni-miniapp.vercel.app"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
 
 # НОВОЕ: подключаем API для саммари и maintenance
 app.include_router(summaries_router,       prefix="/api")                    # /api/summaries/*

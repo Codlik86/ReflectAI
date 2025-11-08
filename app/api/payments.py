@@ -1,27 +1,42 @@
 from __future__ import annotations
 
 import os
+import uuid
 import base64
 import hmac
 import hashlib
-from typing import Any, Optional, cast
+from typing import Any, Optional, Literal, Dict, cast
 
+import httpx
 from fastapi import APIRouter, Request, HTTPException, Header
+from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.core import async_session
 
-router = APIRouter(prefix="/api/payments/yookassa", tags=["payments"])
+# ---------------------------------------------------------
+# Общий роутер для платежей
+# ---------------------------------------------------------
+router = APIRouter(prefix="/api/payments", tags=["payments"])
 
 # Переменные окружения
-YK_WEBHOOK_SECRET = (os.getenv("YK_WEBHOOK_SECRET") or "").strip()   # секрет вебхука (HMAC или пароль Basic)
-YK_SHOP_ID = (os.getenv("YK_SHOP_ID") or "").strip()                 # для Basic-проверки
+YK_WEBHOOK_SECRET = (os.getenv("YK_WEBHOOK_SECRET") or "").strip()     # секрет вебхука (HMAC или пароль Basic)
+YK_SHOP_ID = (os.getenv("YK_SHOP_ID") or "").strip()                   # shopId для Basic
+YK_SECRET_KEY = (os.getenv("YK_SECRET_KEY") or "").strip()             # секретный ключ API для /create
+MINIAPP_BASE = (os.getenv("MINIAPP_BASE") or "").rstrip("/")           # напр.: https://pomni-miniapp.vercel.app
 
+# Прайсы (RUB) — при необходимости поменяй
+PRICES_RUB: Dict[str, str] = {
+    "week": "499.00",
+    "month": "1190.00",
+    "quarter": "2990.00",
+    "year": "7990.00",
+}
 
-# -----------------------------
+# ==============================
 # Вспомогательные функции
-# -----------------------------
+# ==============================
 
 def _get(obj: Any, *path: str, default: Any = None) -> Any:
     cur = obj
@@ -77,7 +92,7 @@ async def _verify_webhook(
             raw,
             hashlib.sha256,
         ).hexdigest()
-        # ЮKassa может прислать подпись в hex; на всякий попробуем и base64
+        # На всякий: сравним и с base64 от hex
         digest_b64 = base64.b64encode(bytes.fromhex(digest)).decode("ascii")
         if hmac.compare_digest(x_hmac.strip(), digest) or hmac.compare_digest(x_hmac.strip(), digest_b64):
             return  # ok
@@ -95,17 +110,24 @@ async def _verify_webhook(
     raise HTTPException(status_code=401, detail="invalid webhook signature")
 
 
-# -----------------------------
-# Вебхук
-# -----------------------------
+def _auth_header() -> str:
+    if not (YK_SHOP_ID and YK_SECRET_KEY):
+        return ""
+    token = base64.b64encode(f"{YK_SHOP_ID}:{YK_SECRET_KEY}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
 
-@router.post("/webhook")
+
+# ==============================
+# 1) Вебхук YooKassa
+# ==============================
+
+@router.post("/yookassa/webhook")
 async def yookassa_webhook(
     request: Request,
     # alias — реальные имена заголовков в HTTP
     x_content_hmac_sha256: Optional[str] = Header(None, alias="X-Content-HMAC-SHA256"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
-    # на случай кастомного прокси — совместимость с твоим прежним именем
+    # на случай кастомного прокси — совместимость с прежним именем
     x_yookassa_signature: Optional[str] = Header(None),
 ):
     # --- Подпись: поддерживаем оба заголовка (приоритет у X-Content-HMAC-SHA256)
@@ -258,3 +280,97 @@ async def yookassa_webhook(
 
     # YooKassa достаточно 200 OK без тела
     return ""
+
+
+# ==============================
+# 2) Создание платёжной ссылки (MiniApp)
+# ==============================
+
+class CreatePaymentReq(BaseModel):
+    user_id: int = Field(..., description="Внутренний users.id или tg_id (кладём в metadata)")
+    plan: Literal["week", "month", "quarter", "year"] = "month"
+    description: Optional[str] = Field(None, description="Необязательное описание в чеке")
+    return_url: Optional[str] = None  # напр.: `${window.location.origin}/paywall?status=ok`
+    ad: Optional[str] = None          # рекламные метки и т.п.
+
+
+class CreatePaymentResp(BaseModel):
+    payment_id: str
+    confirmation_url: str
+
+
+def _amount_for_plan(plan: str) -> str:
+    return PRICES_RUB.get(plan, PRICES_RUB["month"])
+
+
+@router.post("/yookassa/create", response_model=CreatePaymentResp)
+async def create_yookassa_payment(req: CreatePaymentReq, request: Request):
+    """
+    Создаёт платёж в YooKassa и возвращает confirmation_url.
+    БД/подписку не трогаем — этим занимается webhook.
+    """
+    if not (YK_SHOP_ID and YK_SECRET_KEY):
+        raise HTTPException(status_code=500, detail="YK credentials are not configured")
+
+    amount = _amount_for_plan(req.plan)
+    idempotence_key = str(uuid.uuid4())
+
+    # Куда вернём пользователя после оплаты
+    fallback_return = f"{MINIAPP_BASE}/paywall?status=ok" if MINIAPP_BASE else None
+    return_url = (req.return_url or fallback_return)
+    if not return_url:
+        # В крайнем случае собираем из заголовков запроса
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        scheme = "https"
+        if host:
+            return_url = f"{scheme}://{host}/paywall?status=ok"
+        else:
+            raise HTTPException(status_code=400, detail="return_url is required and MINIAPP_BASE is not set")
+
+    payload = {
+        "amount": {"value": amount, "currency": "RUB"},
+        "capture": True,
+        "description": req.description or f"Помни — {req.plan}",
+        "confirmation": {
+            "type": "redirect",
+            "return_url": return_url,
+        },
+        "metadata": {
+            "user_id": str(req.user_id),
+            "plan": req.plan,
+            "ad": (req.ad or ""),
+            "source": "miniapp",
+        },
+    }
+
+    headers = {
+        "Authorization": _auth_header(),
+        "Idempotence-Key": idempotence_key,
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post("https://api.yookassa.ru/v3/payments", json=payload, headers=headers)
+
+    if r.status_code not in (200, 201):
+        try:
+            err = r.json()
+        except Exception:
+            err = {"error": r.text}
+        raise HTTPException(status_code=502, detail={"yookassa_error": err})
+
+    data = r.json()
+    confirmation = (data.get("confirmation") or {})
+    url = confirmation.get("confirmation_url")
+    payment_id = data.get("id")
+
+    if not url or not payment_id:
+        raise HTTPException(status_code=502, detail="invalid response from YooKassa")
+
+    return CreatePaymentResp(payment_id=payment_id, confirmation_url=url)
+
+
+@router.get("/yookassa/plans")
+async def list_plans():
+    """На фронт: показать прайсы, если нужно."""
+    return {"currency": "RUB", "plans": PRICES_RUB}
