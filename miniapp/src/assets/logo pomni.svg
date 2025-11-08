@@ -1,0 +1,49 @@
+<svg width="150" height="150" viewBox="0 0 150 150" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g clip-path="url(#clip0_208_6)" filter="url(#filter0_nn_208_6)">
+<circle cx="75" cy="78.2967" r="63.8736" fill="#5D83F7" stroke="#F0A257" stroke-width="3.2967"/>
+<ellipse cx="95.1923" cy="42.8572" rx="11.5385" ry="10.3022" transform="rotate(11.9263 95.1923 42.8572)" fill="#F47562"/>
+<ellipse cx="112.838" cy="73.5446" rx="11.5385" ry="10.8167" transform="rotate(11.9263 112.838 73.5446)" fill="#F47562"/>
+<ellipse cx="73.2493" cy="76.3035" rx="9.05091" ry="9.20458" transform="rotate(11.9263 73.2493 76.3035)" fill="#F47562"/>
+<ellipse cx="54.0269" cy="122.431" rx="6.20337" ry="6.73376" transform="rotate(11.9263 54.0269 122.431)" fill="#FFD768"/>
+<ellipse cx="75.6011" cy="101.754" rx="2.89814" ry="3.14593" transform="rotate(11.9263 75.6011 101.754)" fill="#FFD768"/>
+<ellipse cx="121.755" cy="89.8033" rx="2.89814" ry="3.14593" transform="rotate(-30.1419 121.755 89.8033)" fill="#FFD768"/>
+<ellipse cx="122.867" cy="109.267" rx="3.73567" ry="4.05507" transform="rotate(-30.1419 122.867 109.267)" fill="#FFD768"/>
+<ellipse cx="107.141" cy="98.1389" rx="2.04497" ry="2.21982" transform="rotate(-30.1419 107.141 98.1389)" fill="#FFD768"/>
+<path d="M85.2505 110.289C90.5606 107.206 97.5061 109.138 100.739 114.704C103.971 120.271 102.206 127.262 96.8964 130.345C91.586 133.429 84.6394 131.496 81.4068 125.929C78.1746 120.362 79.9403 113.372 85.2505 110.289Z" fill="#FDFDFB" stroke="#F47562" stroke-width="2.06044"/>
+<ellipse cx="38.9423" cy="94.1227" rx="15.8412" ry="15.7304" transform="rotate(11.9263 38.9423 94.1227)" fill="#F47562"/>
+<path d="M66.7882 62.6425C57.5515 74.4658 42.2612 77.9551 32.6365 70.436C23.0118 62.9169 24.3484 48.4991 33.5852 36.6757C44.2994 24.9312 56.4609 20.1008 66.0856 27.6199C75.7104 35.139 76.0249 50.8192 66.7882 62.6425Z" fill="#FDFDFB"/>
+</g>
+<defs>
+<filter id="filter0_nn_208_6" x="9.47802" y="12.7747" width="131.044" height="131.044" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feFlood flood-opacity="0" result="BackgroundImageFix"/>
+<feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+<feTurbulence type="fractalNoise" baseFrequency="1.2133333683013916 1.2133333683013916" stitchTiles="stitch" numOctaves="3" result="noise" seed="1669" />
+<feColorMatrix in="noise" type="luminanceToAlpha" result="alphaNoise" />
+<feComponentTransfer in="alphaNoise" result="coloredNoise1">
+<feFuncA type="discrete" tableValues="0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "/>
+</feComponentTransfer>
+<feComposite operator="in" in2="shape" in="coloredNoise1" result="noise1Clipped" />
+<feFlood flood-color="rgba(255, 255, 255, 0.65)" result="color1Flood" />
+<feComposite operator="in" in2="noise1Clipped" in="color1Flood" result="color1" />
+<feMerge result="effect1_noise_208_6">
+<feMergeNode in="shape" />
+<feMergeNode in="color1" />
+</feMerge>
+<feTurbulence type="fractalNoise" baseFrequency="2.4266667366027832 2.4266667366027832" stitchTiles="stitch" numOctaves="3" result="noise" seed="2455" />
+<feColorMatrix in="noise" type="luminanceToAlpha" result="alphaNoise" />
+<feComponentTransfer in="alphaNoise" result="coloredNoise1">
+<feFuncA type="discrete" tableValues="0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "/>
+</feComponentTransfer>
+<feComposite operator="in" in2="effect1_noise_208_6" in="coloredNoise1" result="noise1Clipped" />
+<feFlood flood-color="rgba(255, 255, 255, 0.25)" result="color1Flood" />
+<feComposite operator="in" in2="noise1Clipped" in="color1Flood" result="color1" />
+<feMerge result="effect2_noise_208_6">
+<feMergeNode in="effect1_noise_208_6" />
+<feMergeNode in="color1" />
+</feMerge>
+</filter>
+<clipPath id="clip0_208_6">
+<rect width="131.044" height="131.044" fill="white" transform="translate(9.47802 12.7747)"/>
+</clipPath>
+</defs>
+</svg>

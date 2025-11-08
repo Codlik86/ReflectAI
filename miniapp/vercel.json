@@ -1,0 +1,12 @@
+{
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Frame-Options", "value": "ALLOW-FROM https://web.telegram.org https://telegram.org https://*.t.me" },
+        { "key": "Content-Security-Policy", "value": "frame-ancestors https://web.telegram.org https://telegram.org https://*.t.me 'self';" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
+      ]
+    }
+  ]
+}
