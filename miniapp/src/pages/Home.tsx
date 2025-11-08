@@ -2,24 +2,32 @@ import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import { ensureAccess } from "../lib/guard";
 
+// импорт ассетов (Vite перепакует и подставит правильные URL)
+import exercisesPng from "../assets/exercises.png";
+import meditationsPng from "../assets/meditations.png";
+import talkPng from "../assets/talk.png";
+
 export default function Home() {
   const navigate = useNavigate();
 
   // универсальный гард: проверяем доступ → либо идём в path, либо на paywall
-  const guardTo = React.useCallback(async (path: string) => {
-    try {
-      const st = await ensureAccess(true); // автостарт триала, если ещё не запущен
-      if (st.has_access) {
-        navigate(path);
-      } else {
+  const guardTo = React.useCallback(
+    async (path: string) => {
+      try {
+        const st = await ensureAccess(true); // автостарт триала, если ещё не запущен
+        if (st.has_access) {
+          navigate(path);
+        } else {
+          const ret = encodeURIComponent(path);
+          navigate(`/paywall?from=${ret}`);
+        }
+      } catch {
         const ret = encodeURIComponent(path);
         navigate(`/paywall?from=${ret}`);
       }
-    } catch {
-      const ret = encodeURIComponent(path);
-      navigate(`/paywall?from=${ret}`);
-    }
-  }, [navigate]);
+    },
+    [navigate]
+  );
 
   const onExercises = () => guardTo("/exercises");
   const onMeditations = () => guardTo("/meditations");
@@ -33,7 +41,11 @@ export default function Home() {
         return;
       }
       // доступ есть — открываем бота
-      window.open("https://t.me/reflectttaibot?start=miniapp", "_blank", "noopener,noreferrer");
+      window.open(
+        "https://t.me/reflectttaibot?start=miniapp",
+        "_blank",
+        "noopener,noreferrer"
+      );
     } catch {
       const ret = encodeURIComponent("/");
       navigate(`/paywall?from=${ret}`);
@@ -43,7 +55,10 @@ export default function Home() {
   return (
     <div className="min-h-dvh flex flex-col">
       {/* Герой со «шаром» */}
-      <div className="relative mb-3" style={{ height: "clamp(220px, 48vh, 420px)" }}>
+      <div
+        className="relative mb-3"
+        style={{ height: "clamp(220px, 48vh, 420px)" }}
+      >
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="blob" />
         </div>
@@ -59,7 +74,7 @@ export default function Home() {
           <div className="card-btn">
             <div className="card-title">Упражнения</div>
             <img
-              src="/src/assets/exercises.png"
+              src={exercisesPng}
               alt="Упражнения"
               className="ml-auto h-24 w-24 object-contain"
             />
@@ -71,7 +86,7 @@ export default function Home() {
           <div className="card-btn">
             <div className="card-title">Медитации</div>
             <img
-              src="/src/assets/meditations.png"
+              src={meditationsPng}
               alt="Медитации"
               className="ml-auto h-24 w-24 object-contain"
             />
@@ -79,15 +94,11 @@ export default function Home() {
         </button>
 
         {/* Поговорить — компактная карточка (половина высоты) */}
-        <button
-          type="button"
-          onClick={onTalk}
-          className="block w-full text-left"
-        >
+        <button type="button" onClick={onTalk} className="block w-full text-left">
           <div
             className="card-btn"
             style={{
-              minHeight: 64, // примерно в 2 раза ниже обычной
+              minHeight: 64, // ниже обычной
               padding: "12px 16px",
               display: "flex",
               alignItems: "center",
@@ -95,7 +106,7 @@ export default function Home() {
           >
             <div className="card-title">Поговорить</div>
             <img
-              src="/src/assets/talk.png"
+              src={talkPng}
               alt="Поговорить"
               className="ml-auto h-24 w-24 object-contain"
             />
