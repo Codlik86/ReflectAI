@@ -2,13 +2,14 @@ import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import { ensureAccess } from "../lib/guard";
 
-// импорт ассетов (Vite перепакует и подставит правильные URL)
-import exercisesPng from "../assets/exercises.png";
-import meditationsPng from "../assets/meditations.png";
-import talkPng from "../assets/talk.png";
-
 export default function Home() {
   const navigate = useNavigate();
+
+  // helper для путей из public/
+  const pub = React.useCallback((p: string) => {
+    const base = import.meta.env.BASE_URL || "/";
+    return `${base}${p}`.replace(/\/+/, "/");
+  }, []);
 
   // универсальный гард: проверяем доступ → либо идём в path, либо на paywall
   const guardTo = React.useCallback(
@@ -74,7 +75,7 @@ export default function Home() {
           <div className="card-btn">
             <div className="card-title">Упражнения</div>
             <img
-              src={exercisesPng}
+              src={pub("exercises.png")}
               alt="Упражнения"
               className="ml-auto h-24 w-24 object-contain"
             />
@@ -86,14 +87,14 @@ export default function Home() {
           <div className="card-btn">
             <div className="card-title">Медитации</div>
             <img
-              src={meditationsPng}
+              src={pub("meditations.png")}
               alt="Медитации"
               className="ml-auto h-24 w-24 object-contain"
             />
           </div>
         </button>
 
-        {/* Поговорить — компактная карточка (половина высоты) */}
+        {/* Поговорить — компактная карточка */}
         <button type="button" onClick={onTalk} className="block w-full text-left">
           <div
             className="card-btn"
@@ -106,7 +107,7 @@ export default function Home() {
           >
             <div className="card-title">Поговорить</div>
             <img
-              src={talkPng}
+              src={pub("talk.png")}
               alt="Поговорить"
               className="ml-auto h-24 w-24 object-contain"
             />
