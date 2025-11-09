@@ -1,9 +1,11 @@
+@import "tailwindcss";
+
 /* 1) Подключаем свой шрифт (пример: Manrope) */
 @font-face {
   font-family: "Manrope";
   src:
-    url("/src/assets/fonts/Manrope-Variable.woff2") format("woff2-variations"),
-    url("/src/assets/fonts/Manrope-Regular.woff2") format("woff2");
+    url("/Manrope-Variable.woff2") format("woff2-variations"),
+    url("/Manrope-Regular.woff2") format("woff2");
   font-weight: 100 900;    /* для Variable; для обычных: 400 */
   font-style: normal;
   font-display: swap;
@@ -72,13 +74,12 @@ body{
     /* E) Базовый длинный вертикальный градиент */
     linear-gradient(
       180deg,
-      #f7f7f7 0% 77%,     /* длинная «серая» часть (подними/понизь 76–78% при желании) */
-      #fff4e6 77% 88%,    /* растянул подложки — без резкой ступени */
+      #f7f7f7 0% 77%,
+      #fff4e6 77% 88%,
       #ffe6cf 88% 95%,
       #ffd9e7 95% 100%
     );
 
-  /* фиксируем фон */
   background-attachment: fixed, fixed, fixed, fixed, fixed, fixed, fixed, fixed;
   background-repeat: no-repeat;
   background-size: cover, cover, cover, cover, cover, cover, cover, cover;
@@ -91,7 +92,6 @@ body{
   height: clamp(260px, 70vw, 480px);
   border-radius: 9999px;
   filter: blur(16px);
-  /* внешний ореол: мягкий оранжево-персиковый, затем розовый, дальше в прозрачность */
   background:
     radial-gradient(circle at 50% 50%,
       rgba(203, 146, 255, 0.00) 0%,
@@ -103,8 +103,6 @@ body{
   will-change: transform;
   pointer-events: none;
 }
-
-/* ядро — отдельным слоем, слегка блуждает внутри */
 .blob::after {
   content: "";
   position: absolute;
@@ -114,7 +112,6 @@ body{
   height: 58%;
   border-radius: 50%;
   filter: blur(20px);
-  /* ядро: холодный фиолетовый центр → мягкая прозрачность */
   background:
     radial-gradient(circle at 50% 50%,
       rgba(164, 110, 255, 0.80) 0%,
@@ -124,144 +121,67 @@ body{
   animation: core-drift 28s ease-in-out infinite;
   will-change: transform;
 }
-
-/* лёгкий «дрейф» всего шара по XY + очень небольшой пульс масштаба */
 @keyframes blob-float {
-  0%   { transform: translate3d(0,   0, 0) scale(1); }
-  20%  { transform: translate3d(14px, -10px, 0) scale(1.02); }
-  40%  { transform: translate3d(-12px, 16px, 0) scale(1.01); }
-  60%  { transform: translate3d(18px, 6px, 0) scale(1.03); }
-  80%  { transform: translate3d(-10px, -12px, 0) scale(1.015); }
-  100% { transform: translate3d(0,   0, 0) scale(1); }
+  0%   { transform: translate3d(0,0,0) scale(1); }
+  20%  { transform: translate3d(14px,-10px,0) scale(1.02); }
+  40%  { transform: translate3d(-12px,16px,0) scale(1.01); }
+  60%  { transform: translate3d(18px,6px,0) scale(1.03); }
+  80%  { transform: translate3d(-10px,-12px,0) scale(1.015); }
+  100% { transform: translate3d(0,0,0) scale(1); }
 }
-
-/* ядро «гуляет» шире, но медленно, чтобы не отвлекать */
 @keyframes core-drift {
-  0%   { transform: translate3d(0, 0, 0); }
-  25%  { transform: translate3d(12px, -18px, 0); }
-  50%  { transform: translate3d(-16px, 16px, 0); }
-  75%  { transform: translate3d(18px, 10px, 0); }
-  100% { transform: translate3d(0, 0, 0); }
+  0%   { transform: translate3d(0,0,0); }
+  25%  { transform: translate3d(12px,-18px,0); }
+  50%  { transform: translate3d(-16px,16px,0); }
+  75%  { transform: translate3d(18px,10px,0); }
+  100% { transform: translate3d(0,0,0); }
 }
 
-/* Контейнер под шар — контролирует просвет сверху/снизу */
-.hero {
-  position: relative;
-  height: clamp(220px, 34vh, 420px); /* было много — делаем ниже */
-  margin-bottom: 12px;               /* минимальный зазор до первой карточки */
-}
+/* Контейнер под шар */
+.hero { position: relative; height: clamp(220px,34vh,420px); margin-bottom: 12px; }
+.hero > .blob { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); }
 
-/* Сам шар по центру контейнера */
-.hero > .blob {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-}
+/* Карточки */
+.card-btn{ height:120px; width:100%; border-radius:1.5rem; background:#fff; padding:20px; display:flex; align-items:center; justify-content:space-between; }
+.card-title{ font-size:20px; line-height:22px; font-weight:500; color:#0f172a; }
 
-/* ----- белые карточки-кнопки из макета (БЕЗ теней и обводок) ----- */
-.card-btn{
-  height: 120px;
-  width: 100%;
-  border-radius: 1.5rem;        /* rounded-3xl */
-  background: #ffffff;          /* bg-white    */
-  padding: 20px;                /* ~px-5 py-5 */
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-/* крупный текст как в макете (20px, medium) */
-.card-title{
-  font-size: 20px;
-  line-height: 22px;
-  font-weight: 500;             /* medium */
-  color: #0f172a;               /* приближен к text-slate-900 */
-}
-
-/* безопасная зона для нижней пилюли */
 .safe-bottom { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
 
-/* --- константы нижней области --- */
 :root{
-  --bb-h: 56px;             /* высота BottomBar */
-  --bb-offset: 20px;        /* отступ BottomBar от низа */
-  --cards-gap: 30px;        /* зазор между BottomBar и карточками */
+  --bb-h: 56px;
+  --bb-offset: 20px;
+  --cards-gap: 30px;
   --content-pad-bottom: calc(env(safe-area-inset-bottom) + var(--bb-h) + var(--bb-offset) + var(--cards-gap));
 }
+.content-pad-bottom { padding-bottom: var(--content-pad-bottom); }
 
-/* паддинг снизу для контента, чтобы ничего не наезжало на бар */
-.content-pad-bottom {
-  padding-bottom: var(--content-pad-bottom);
-}
-
-/* --- Общие утилы для внутренних страниц --- */
 .page { min-height: 100dvh; display: flex; flex-direction: column; }
 .page-body { padding-left: 20px; padding-right: 20px; }
 
-/* мягкая подложка под BackBar, чтобы контент не «слипался» с ним */
 .top-scrim {
-  height: 44px; /* визуальная «полка» под капсулой */
+  height: 44px;
   margin-top: 6px;
-  background: radial-gradient(120% 90% at 50% 0%,
-             rgba(0,0,0,0.05) 0%, rgba(0,0,0,0.025) 40%, rgba(0,0,0,0) 100%);
+  background: radial-gradient(120% 90% at 50% 0%, rgba(0,0,0,0.05) 0%, rgba(0,0,0,0.025) 40%, rgba(0,0,0,0) 100%);
   border-radius: 24px;
   opacity: .6;
 }
 
-/* заголовки страниц (как в макете) */
-.page-title {
-  font-size: 22px; line-height: 28px; font-weight: 600;
-  color: #1f2937; /* слейт-900 */
-  margin-top: 10px; margin-bottom: 8px;
-}
+.page-title { font-size:22px; line-height:28px; font-weight:600; color:#1f2937; margin-top:10px; margin-bottom:8px; }
+.section-title { font-size:16px; line-height:20px; font-weight:600; color:#6b7280; margin:18px 0 10px; }
 
-/* заголовки секций списка */
-.section-title {
-  font-size: 16px; line-height: 20px; font-weight: 600;
-  color: #6b7280; /* слейт-500 */
-  margin: 18px 0 10px;
-}
-
-/* отступ снизу под BottomBar: safe-area + 98px (как на Home) */
 .page-pad-bottom { padding-bottom: calc(env(safe-area-inset-bottom) + 98px); }
 
-/* карточка списка упражнений/медитаций */
-.list-card {
-  background:#fff; border-radius: 20px;
-  padding: 16px 18px; display:flex; flex-direction:column; gap:6px;
-}
+.list-card { background:#fff; border-radius:20px; padding:16px 18px; display:flex; flex-direction:column; gap:6px; }
 .list-title { font-size:16px; line-height:22px; font-weight:600; color:#111827; }
 .list-meta { font-size:14px; line-height:18px; color:#6b7280; display:flex; gap:12px; align-items:center; }
 .dot { width:6px; height:6px; border-radius:9999px; background:#f59e0b; display:inline-block; }
 
-/* === Унифицированные кнопки === */
-.btn{
-  height: 44px;                 /* одинаковая высота везде */
-  padding: 0 20px;
-  border-radius: 12px;          /* как на карточках */
-  font-size: 16px;
-  font-weight: 600;
-  display:inline-flex; align-items:center; justify-content:center;
-}
+.btn{ height:44px; padding:0 20px; border-radius:12px; font-size:16px; font-weight:600; display:inline-flex; align-items:center; justify-content:center; }
 .btn:active{ opacity:.9; }
+.btn-primary{ background:#FFA66B; color:#fff; }
+.btn-stop{ background:#FF6B6B; color:#fff; }
+.btn-neutral{ background:rgba(0,0,0,.08); color:#111827; }
 
-.btn-primary{                   /* «Начать», «Старт», «Продолжить» */
-  background:#FFA66B;           /* тёплый оранжевый */
-  color:#fff;
-}
-
-.btn-stop{                      /* «Остановить» во всех упражнениях */
-  background:#FF6B6B;           /* мягкий красный */
-  color:#fff;
-}
-
-.btn-neutral{                   /* второстепенная серая при необходимости */
-  background:rgba(0,0,0,.08);
-  color:#111827;
-}
-
-/* ====== Orb helpers (не зависят от tailwind purge) ====== */
 .blur-60 { filter: blur(60px); }
 .blur-90 { filter: blur(90px); }
 .blur-26 { filter: blur(26px); }
@@ -269,5 +189,4 @@ body{
 @keyframes spinSlow { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
 @keyframes floatY   { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-10px) } }
 
-/* иногда backdrop/filters в родителях “съедают” эффекты — изолируем */
 .isolate { isolation: isolate; }
