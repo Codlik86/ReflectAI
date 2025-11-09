@@ -458,11 +458,10 @@ async def payments_status(
             "is_auto_renew": bool(is_auto) if is_auto is not None else None,
         }
 
-# Доп. алиас: некоторые фронты/скрипты могут стучаться в /api/access/status
-@router.get("/../access/status")
+# Доп. алиас: совместимость с ожиданиями старого фронта
+@router.get("/alias/access-status")
 async def access_status_alias(
     user_id: Optional[int] = Query(None),
     tg_user_id: Optional[int] = Query(None),
 ):
-    # просто проксируем к /api/payments/status
     return await payments_status(user_id=user_id, tg_user_id=tg_user_id)

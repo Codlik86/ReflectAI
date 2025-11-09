@@ -31,22 +31,16 @@ from app.qdrant_client import ensure_qdrant_ready
 
 # внешние/внутренние API-роутеры
 from app.legal import router as legal_router               # /requisites, /legal/*
-from app.api import payments as payments_api               # /api/payments/yookassa/webhook
 from app.api import admin as admin_api                     # /api/admin/*
-from app.api import nudges as nudges_api               # /api/admin/nudges/*
+from app.api import nudges as nudges_api                   # /api/admin/nudges/*
+from app.site.admin_ui import router as admin_ui_router    # /admin (HTML)
 
-# админка (HTML)
-from app.site.admin_ui import router as admin_ui_router    # /admin
-
-# МиниАпп
+# МиниАпп/прочее API
 from app.api.telegram_webapp import router as tg_router
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.access import router as access_router
-from app.api.payments import router as payments_router
-from app.api import access as access_api
-
-# НОВОЕ: API для саммари и maintenance
-from app.site.summaries_api import router as summaries_router      # /api/summaries/*
+from app.api.access import router as access_router          # /api/access/*
+from app.api.payments import router as payments_router      # /api/payments/*
+from app.site.summaries_api import router as summaries_router  # /api/summaries/*
 
 # --- ENV ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -66,35 +60,42 @@ WATCHDOG_INTERVAL_SEC = int(os.getenv("WEBHOOK_WATCHDOG_SEC", "60"))
 # aiogram 3.x
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-from app.mw_log_messages import LogUserMessagesMiddleware
+from app.mw_log_messages import LogUserMessagesMiddleware  # noqa: F401
 dp.include_router(bot_router)
 
 app = FastAPI(title="ReflectAI webhook")
 
-# --------- Роутеры FastAPI ----------
-app.include_router(legal_router)                        # /requisites, /legal/*
-app.include_router(payments_api.router, prefix="")      # /api/payments/yookassa/webhook
-app.include_router(admin_api.router,    prefix="")      # /api/admin/*
-app.include_router(admin_ui_router)                     # /admin (HTML)
-app.include_router(nudges_api.router,    prefix="")    # /api/admin/nudges/*
+# --------- CORS (A) ----------
+# Разрешаем прод-домен мини-аппа + превью Vercel
+ALLOWED_ORIGINS = [
+    "https://reflectaiminiapp.vercel.app",  # прод
+]
+ALLOW_ORIGIN_REGEX = r"https://.*\.vercel\.app$"  # превью-ветки
 
-app.include_router(access_router)
-app.include_router(access_api.router)
-app.include_router(payments_router)      # /api/payments/*
-app.include_router(tg_router, prefix="/api/tg")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://pomni-miniapp.vercel.app"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOW_ORIGIN_REGEX,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
 )
+print("[cors] allow_origins=", ALLOWED_ORIGINS, " allow_origin_regex=", ALLOW_ORIGIN_REGEX)
 
-# НОВОЕ: подключаем API для саммари и maintenance
-app.include_router(summaries_router,       prefix="/api")                    # /api/summaries/*
+# --------- Роутеры FastAPI (B) ----------
+# HTML
+app.include_router(admin_ui_router)                     # /admin (HTML)
+app.include_router(legal_router)                        # /requisites, /legal/*
+
+# API
+app.include_router(admin_api.router,    prefix="")      # /api/admin/*
+app.include_router(nudges_api.router,   prefix="")      # /api/admin/nudges/*
+app.include_router(access_router)                       # /api/access/*
+app.include_router(payments_router)                     # /api/payments/*   (status/create/webhook)
+app.include_router(tg_router,           prefix="/api/tg")
+app.include_router(summaries_router,    prefix="/api")  # /api/summaries/*
 
 # ==== Мини-лендинг для модерации YooKassa ====
-
 PROJECT_NAME = os.getenv("PROJECT_NAME", "Помни")
 PUBLIC_BOT_URL = os.getenv("PUBLIC_BOT_URL", "https://t.me/reflectttaibot")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "selflect@proton.me")
@@ -243,14 +244,10 @@ async def on_shutdown():
     task = getattr(app.state, "webhook_watchdog", None)
     if task:
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
-
-           # ↓↓↓ добавь это
+    # (C) корректно закрываем aiohttp-сессию бота
     with suppress(Exception):
-        # aiogram v3: корректно закрыть aiohttp-сессию бота
         await bot.session.close()
 
 @app.post(WEBHOOK_PATH)
