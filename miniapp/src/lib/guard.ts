@@ -1,102 +1,50 @@
 // src/lib/guard.ts
-// Централизованный гейт для упражнений/медитаций
+// Централизованный гейт для упражнений/медитаций/переходов
+
+import { getAccessStatus } from "./access";
 
 type AccessStatus = {
   ok: boolean;
-  // доступ открыт, если активен триал или есть подписка
-  has_access: boolean;
-  // справочная инфа
-  trial_started?: boolean;
-  trial_until?: string | null;
-  sub_active?: boolean;
-  sub_until?: string | null;
+  has_access: boolean;              // дублируем для удобства в UI
+  trial_started?: boolean;          // (опц.) если решишь расширить /check
+  trial_until?: string | null;      // (опц.)
+  sub_active?: boolean;             // (опц.)
+  sub_until?: string | null;        // (опц.)
+  until?: string | null;            // текущая дата окончания доступа (из API)
+  has_auto_renew?: boolean | null;  // автопродление подписки
 };
 
+// Базовые пути (если где-то логгируешь события — оставил как заготовку)
 const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/$/, "") || "";
+const API_LOG = API_BASE ? `${API_BASE}/api/miniapp/log` : "";
 
-// эндпойнты на бэке (поменяй, если у тебя другие пути)
-const API_ACCESS = `${API_BASE}/api/access/status`;      // GET
-const API_TRIAL  = `${API_BASE}/api/trial/start`;         // POST (автостарт отложенного триала)
-const API_LOG    = `${API_BASE}/api/events/miniapp`;      // POST опционально (трек)
+// Универсальная функция: проверяем доступ.
+// Параметр autoStartTrial оставил на будущее (когда подключим эндпоинт автозапуска триала),
+// сейчас он не используется — /api/access/check только читает статус.
+export async function ensureAccess(_autoStartTrial?: boolean): Promise<AccessStatus> {
+  const res = await getAccessStatus();
 
-let cache: { at: number; data: AccessStatus } | null = null;
-const STALE_MS = 20_000; // 20 секунд кэша, чтобы не долбить бэк
+  // Маппинг в формат, который уже использует твой UI
+  const status: AccessStatus = {
+    ok: !!res.ok,
+    has_access: !!res.ok,
+    until: res.until ?? null,
+    has_auto_renew: res.has_auto_renew ?? null,
+  };
 
-async function getAccessFresh(): Promise<AccessStatus> {
-  const r = await fetch(API_ACCESS, { credentials: "include" });
-  if (!r.ok) throw new Error(`ACCESS ${r.status}`);
-  return (await r.json()) as AccessStatus;
+  return status;
 }
 
-/**
- * Безопасный доступ со слабым кэшем.
- * force=true — игнорировать кэш (например, после старта триала).
- */
-export async function getAccess(force = false): Promise<AccessStatus> {
-  const now = Date.now();
-  if (!force && cache && now - cache.at < STALE_MS) return cache.data;
-
-  const data = await getAccessFresh();
-  cache = { at: now, data };
-  return data;
-}
-
-/**
- * Пытаемся обеспечить доступ:
- * 1) Проверяем статус
- * 2) Если доступа нет и триал ещё не стартовал — запускаем триал
- * 3) Перечитываем статус и возвращаем результат
- */
-export async function ensureAccess(autoStartTrial = true): Promise<AccessStatus> {
-  let s = await getAccess();
-  if (s.has_access) return s;
-
-  if (autoStartTrial && !s.trial_started) {
-    await startTrial();
-    s = await getAccess(true);
-  }
-  return s;
-}
-
-export async function startTrial(): Promise<void> {
-  // Запускаем триал и не падаем, даже если бэк вернул 409/400
-  try {
-    await fetch(API_TRIAL, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "miniapp-first-action" }),
-    });
-  } catch { /* noop */ }
-}
-
-/**
- * Универсальный хелпер для действий, требующих доступа.
- * Если доступа нет — редиректит на пейволл.
- */
-export async function requireAccessOrPaywall(
-  navigate: (to: string) => void,
-  opts?: { autoStartTrial?: boolean; returnTo?: string; event?: string }
-): Promise<boolean> {
-  const s = await ensureAccess(opts?.autoStartTrial ?? true);
-  if (s.has_access) {
-    if (opts?.event) track(opts.event);
-    return true;
-  }
-  // отправляем на пейволл, запоминаем куда вернуться
-  const ret = encodeURIComponent(opts?.returnTo || location.pathname + location.search);
-  navigate(`/paywall?from=${ret}`);
-  return false;
-}
-
-// Опциональный мягкий лог (можно вырубить)
+// Опциональный мягкий лог (можно вырубить/переименовать на бекенде)
 export function track(event: string, extra?: Record<string, any>) {
+  if (!API_LOG) return;
   try {
     fetch(API_LOG, {
       method: "POST",
-      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ event, ...extra }),
-    });
-  } catch { /* noop */ }
+    }).catch(() => {});
+  } catch {
+    /* noop */
+  }
 }
