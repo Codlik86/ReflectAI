@@ -374,3 +374,95 @@ async def create_yookassa_payment(req: CreatePaymentReq, request: Request):
 async def list_plans():
     """На фронт: показать прайсы, если нужно."""
     return {"currency": "RUB", "plans": PRICES_RUB}
+
+# ==============================
+# 3) Статус доступа/подписки (для MiniApp Paywall)
+# ==============================
+
+from fastapi import Query  # использую только здесь
+
+def _iso(dtobj) -> Optional[str]:
+    try:
+        return dtobj.astimezone(None).isoformat()
+    except Exception:
+        return None
+
+async def _load_user(session: AsyncSession, *, user_id: Optional[int], tg_user_id: Optional[int]):
+    from app.db.models import User  # type: ignore
+    u = None
+    if user_id is not None:
+        u = (await session.execute(select(User).where(User.id == int(user_id)))).scalar_one_or_none()
+    if not u and tg_user_id is not None:
+        u = (await session.execute(select(User).where(User.tg_id == int(tg_user_id)))).scalar_one_or_none()
+    return u
+
+def _trial_active(u, now) -> bool:
+    """
+    Пытаемся мягко определить активный триал.
+    Считаем 5 дней с момента trial_started_at, если поле есть.
+    """
+    import datetime as dt
+    started = getattr(u, "trial_started_at", None)
+    if not started:
+        return False
+    try:
+        return (started + dt.timedelta(days=5)) > now
+    except Exception:
+        return False
+
+@router.get("/status")
+async def payments_status(
+    user_id: Optional[int] = Query(None, description="users.id (внутренний id)"),
+    tg_user_id: Optional[int] = Query(None, description="Telegram id (users.tg_id)"),
+):
+    """
+    Универсальный статус доступа для мини-аппа.
+    Возвращает:
+      - has_access: bool
+      - plan: str | None
+      - status: str | None
+      - until: ISO8601 | None
+      - is_auto_renew: bool | None
+    """
+    if user_id is None and tg_user_id is None:
+        raise HTTPException(status_code=400, detail="provide user_id or tg_user_id")
+
+    now = _utcnow()
+    async with async_session() as _s:
+        session = cast(AsyncSession, _s)
+        from app.db.models import Subscription  # type: ignore
+
+        u = await _load_user(session, user_id=user_id, tg_user_id=tg_user_id)
+        if not u:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        sub = (await session.execute(
+            select(Subscription).where(Subscription.user_id == u.id)
+        )).scalar_one_or_none()
+
+        plan = getattr(sub, "plan", None)
+        status = getattr(sub, "status", None)
+        until = getattr(sub, "subscription_until", None)
+        is_auto = getattr(sub, "is_auto_renew", None)
+
+        # доступ: активная подписка или активный триал
+        has_sub_access = bool(until and status == "active" and until > now)
+        has_trial = _trial_active(u, now)
+        has_access = has_sub_access or has_trial
+
+        return {
+            "has_access": has_access,
+            "plan": plan,
+            "status": status if has_sub_access else ("trial" if has_trial else status),
+            "until": _iso(until) if until else None,
+            "is_auto_renew": bool(is_auto) if is_auto is not None else None,
+        }
+
+# Доп. алиас: некоторые фронты/скрипты могут стучаться в /api/access/status
+@router.get("/../access/status")
+async def access_status_alias(
+    user_id: Optional[int] = Query(None),
+    tg_user_id: Optional[int] = Query(None),
+):
+    # просто проксируем к /api/payments/status
+    return await payments_status(user_id=user_id, tg_user_id=tg_user_id)
