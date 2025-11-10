@@ -1,95 +1,94 @@
 // src/lib/guard.ts
-// Единая проверка доступа для Mini App (синхронно с /api/access/check)
-
 import { getTelegramUserId } from "./telegram";
+
+type StatusDTO = {
+  ok?: boolean;
+  status?: "active" | "trial" | "none" | null;
+  until?: string | null;
+  plan?: "week" | "month" | "quarter" | "year" | null;
+};
+
+export type AccessSnapshot = {
+  ok: boolean;
+  has_access: boolean;
+  reason: "subscription" | "trial" | "none";
+  until: string | null;
+};
 
 const API_BASE =
   (import.meta.env.VITE_API_BASE?.replace(/\/$/, "") ||
     window.localStorage.getItem("VITE_API_BASE")?.replace(/\/$/, "") ||
     "");
 
-// Ответ бэка /api/access/check
-export type AccessSnapshot = {
-  ok: boolean;                      // есть доступ (подписка ИЛИ активный триал)
-  until?: string | null;            // дата окончания доступа (если есть)
-  has_auto_renew?: boolean | null;  // автопродление (если есть подписка)
-};
+const CACHE_KEY = "ACCESS_OK_UNTIL"; // ms timestamp
 
-// Основная функция: возвращает снапшот доступа
-export async function checkAccess(): Promise<AccessSnapshot> {
-  const tg = getTelegramUserId();
-  if (!API_BASE || !tg) return { ok: false };
-
-  const r = await fetch(`${API_BASE}/api/access/check`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "omit",
-    body: JSON.stringify({ tg_user_id: tg }),
-  });
-
-  if (!r.ok) return { ok: false };
-
-  const data = (await r.json()) as {
-    ok: boolean;
-    until?: string | null;
-    has_auto_renew?: boolean | null;
-  };
-
-  return {
-    ok: !!data.ok,
-    until: data.until ?? null,
-    has_auto_renew: data.has_auto_renew ?? null,
-  };
+function nowMs() { return Date.now(); }
+function isFuture(iso?: string | null) {
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  return Number.isFinite(t) && t > nowMs();
 }
 
-/** Шорткат: только булевый признак */
-export async function hasAccess(): Promise<boolean> {
-  try {
-    const s = await checkAccess();
-    return !!s.ok;
-  } catch {
-    return false;
-  }
+function getCachedOk(): boolean {
+  const until = Number(sessionStorage.getItem(CACHE_KEY) || "0");
+  return Number.isFinite(until) && until > nowMs();
+}
+function putCachedOk(ms: number = 60_000) {
+  sessionStorage.setItem(CACHE_KEY, String(nowMs() + ms));
 }
 
-/**
- * Совместимая обёртка под старый импорт.
- * Если доступа нет — по возможности редиректит на "/paywall".
- *
- * Примеры совместимости:
- *   await ensureAccess(navigate)                       // передан navigate из react-router
- *   await ensureAccess({ navigate })                  // объект с navigate
- *   await ensureAccess({ onDenied: () => nav('/paywall') })
- */
-export async function ensureAccess(
-  navigateOrOpts?: any
-): Promise<boolean> {
-  const ok = await hasAccess();
-  if (ok) return true;
+/** Ждём появления tg_id (в WebApp он иногда появляется с задержкой) */
+async function waitTelegramId(maxTries = 5, delayMs = 120): Promise<number | null> {
+  for (let i = 0; i < maxTries; i++) {
+    const id = getTelegramUserId();
+    if (id) return id;
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  return getTelegramUserId();
+}
 
-  // попытка редиректа, если передали navigate
-  try {
-    // вариант 1: функция navigate
-    if (typeof navigateOrOpts === "function") {
-      navigateOrOpts("/paywall", { replace: true });
-    }
-    // вариант 2: объект с полем navigate
-    else if (
-      navigateOrOpts &&
-      typeof navigateOrOpts.navigate === "function"
-    ) {
-      navigateOrOpts.navigate("/paywall", { replace: true });
-    }
-    // вариант 3: кастомный колбэк
-    else if (
-      navigateOrOpts &&
-      typeof navigateOrOpts.onDenied === "function"
-    ) {
-      navigateOrOpts.onDenied();
-    }
-  } catch {
-    // молча
+/** Единый гард. Возвращает снимок доступа. */
+export async function ensureAccess(autoStartTrial: boolean = true): Promise<AccessSnapshot> {
+  // если недавно уже подтверждали доступ — не мигаем экранами
+  if (getCachedOk()) {
+    return { ok: true, has_access: true, reason: "subscription", until: null };
   }
 
-  return false;
+  const tg = await waitTelegramId();
+  if (!API_BASE || !tg) {
+    // Сетевой/иниц. сбой — не валим пользователя, дадим Paywall решить
+    return { ok: false, has_access: false, reason: "none", until: null };
+  }
+
+  const url = new URL(`${API_BASE}/api/payments/status`);
+  url.searchParams.set("tg_user_id", String(tg));
+  if (autoStartTrial) url.searchParams.set("start_trial", "1");
+
+  let dto: StatusDTO | null = null;
+  try {
+    const res = await fetch(url.toString(), { credentials: "omit" });
+    if (!res.ok) throw new Error(`${res.status}`);
+    dto = (await res.json()) as StatusDTO;
+  } catch {
+    // при сетевой ошибке уважаем кэш, иначе — отрицательно
+    if (getCachedOk()) {
+      return { ok: true, has_access: true, reason: "subscription", until: null };
+    }
+    return { ok: false, has_access: false, reason: "none", until: null };
+  }
+
+  const subActive = dto?.status === "active" && isFuture(dto?.until);
+  const trialActive = dto?.status === "trial" && isFuture(dto?.until);
+
+  if (subActive || trialActive) {
+    putCachedOk(); // 60 сек «зелёного» окна, чтобы не было bounce
+    return {
+      ok: true,
+      has_access: true,
+      reason: subActive ? "subscription" : "trial",
+      until: dto?.until ?? null,
+    };
+  }
+
+  return { ok: true, has_access: false, reason: "none", until: dto?.until ?? null };
 }
