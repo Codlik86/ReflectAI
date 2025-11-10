@@ -1,6 +1,6 @@
 // src/App.tsx
 import * as React from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import Header from "./components/Header";
 import BottomBar from "./components/BottomBar";
 import "./index.css";
@@ -20,6 +20,12 @@ export default function App() {
 
   // 2) Авто-роутинг по start-параметру (хук сам защищён от повторов)
   useStartRouter();
+
+  // 3) Всегда открывать страницы с самого верха
+  const { pathname } = useLocation();
+  React.useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname]);
 
   return (
     <div className="min-h-screen flex flex-col bg-bg">
