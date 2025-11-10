@@ -1,6 +1,6 @@
 // src/pages/Meditations.tsx
 import * as React from "react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import { ensureAccess } from "../lib/guard";
@@ -93,13 +93,16 @@ const LIB: { id: Track["catId"]; title: string; items: Track[] }[] = [
 
 export default function Meditations() {
   const navigate = useNavigate();
+  const checkedRef = useRef(false);
 
-  // Защищаем страницу: если нет доступа — уводим на Paywall с возвратом
   useEffect(() => {
+    if (checkedRef.current) return;
+    checkedRef.current = true;
     let cancelled = false;
+
     (async () => {
       try {
-        const snap = await ensureAccess(true);
+        const snap = await ensureAccess(false); // без автозапуска триала
         if (!cancelled && !snap.has_access) {
           navigate(`/paywall?from=${encodeURIComponent("/meditations")}`, { replace: true });
         }
@@ -109,6 +112,7 @@ export default function Meditations() {
         }
       }
     })();
+
     return () => { cancelled = true; };
   }, [navigate]);
 
@@ -131,22 +135,17 @@ export default function Meditations() {
               <Link
                 key={t.id}
                 to={`/meditations/${t.id}`}
-                state={{ title: t.title, src: t.url }}  // ← передаём в плеер
+                state={{ title: t.title, src: t.url }}
                 className="block"
               >
                 <article className="card-btn">
                   <div>
                     <div className="card-title text-[20px] leading-7">{t.title}</div>
                     {t.subtitle && (
-                      <div className="text-[14px] leading-6 text-ink-500 mt-1">
-                        {t.subtitle}
-                      </div>
+                      <div className="text-[14px] leading-6 text-ink-500 mt-1">{t.subtitle}</div>
                     )}
                     <div className="mt-1 flex items-center gap-2 text-[14px] leading-5 text-ink-500">
-                      <span
-                        aria-hidden
-                        className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400 relative top-px"
-                      />
+                      <span aria-hidden className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400 relative top-px" />
                       <span>{t.duration}</span>
                     </div>
                   </div>

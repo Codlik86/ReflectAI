@@ -1,6 +1,6 @@
 // src/pages/Exercises.tsx
 import * as React from "react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import data from "../data/exercises.ru";
@@ -9,13 +9,19 @@ import { ensureAccess } from "../lib/guard";
 
 export default function Exercises() {
   const navigate = useNavigate();
+  const payload: AAPayload = data;
+  const [active, setActive] = useState<AAExercise | null>(null);
 
-  // Защищаем страницу: если нет доступа — уводим на Paywall с возвратом
+  // Проверяем доступ один раз за маунт
+  const checkedRef = useRef(false);
   useEffect(() => {
+    if (checkedRef.current) return;
+    checkedRef.current = true;
     let cancelled = false;
+
     (async () => {
       try {
-        const snap = await ensureAccess(true);
+        const snap = await ensureAccess(false); // без автозапуска триала
         if (!cancelled && !snap.has_access) {
           navigate(`/paywall?from=${encodeURIComponent("/exercises")}`, { replace: true });
         }
@@ -25,11 +31,9 @@ export default function Exercises() {
         }
       }
     })();
+
     return () => { cancelled = true; };
   }, [navigate]);
-
-  const payload: AAPayload = data;
-  const [active, setActive] = useState<AAExercise | null>(null);
 
   // ====== Список упражнений ======
   if (!active) {
@@ -275,7 +279,7 @@ function Timer({ seconds, label }: { seconds: number; label?: string }) {
   );
 }
 
-/* ===== BREATH: корректные фазы с поддержкой hold и hold2 ===== */
+/* ===== BREATH ===== */
 
 function BreathWidget({
   inhale,
@@ -326,12 +330,7 @@ function BreathWidget({
   }, []);
 
   const total = inhale + (hold || 0) + exhale + (hold2 || 0);
-  const offsets = {
-    inhale: 0,
-    hold: inhale,
-    exhale: inhale + hold,
-    hold2: inhale + hold + exhale,
-  } as const;
+  const offsets = { inhale: 0, hold: inhale, exhale: inhale + hold, hold2: inhale + hold + exhale } as const;
   const cycleProgress = (offsets[phase] + Math.min(elapsed, phaseDur)) / (total || 1);
   const overallProgress = ((cycle - 1) + cycleProgress) / cycles;
 
@@ -360,19 +359,13 @@ function BreathWidget({
     rafRef.current = requestAnimationFrame(step);
   };
 
-  // ВАЖНО: всегда возвращаем строковую фазу, даже когда серия закончена.
   function advanceCycle(): Phase {
-    let finished = false;
-    setCycle((c) => {
-      const nc = c + 1;
-      if (nc > cycles) {
-        finished = true;
-        reset();
-        return c; // число только для state, но не в return функции
-      }
-      return nc;
-    });
-    return "inhale"; // ← важно для типобезопасности
+    setCycle((c) => (c + 1 > cycles ? c : c + 1));
+    if (cycle + 1 > cycles) {
+      reset();
+      return "inhale";
+    }
+    return "inhale";
   }
 
   const start = () => {
@@ -408,13 +401,9 @@ function BreathWidget({
 
       <div className="mt-3 flex justify-center">
         {!running ? (
-          <button onClick={start} className="btn btn-primary">
-            Начать
-          </button>
+          <button onClick={start} className="btn btn-primary">Начать</button>
         ) : (
-          <button onClick={stop} className="btn btn-stop">
-            Остановить
-          </button>
+          <button onClick={stop} className="btn btn-stop">Остановить</button>
         )}
       </div>
     </div>

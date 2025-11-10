@@ -16,7 +16,7 @@ export default function Home() {
   const guardTo = React.useCallback(
     async (path: string) => {
       try {
-        const snap = await ensureAccess(true); // можно автозапуск триала
+        const snap = await ensureAccess(true); // автостарт триала по клику из Home
         if (snap.has_access) {
           navigate(path);
         } else {

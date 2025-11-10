@@ -20,20 +20,14 @@ const API_BASE =
     window.localStorage.getItem("VITE_API_BASE")?.replace(/\/$/, "") ||
     "");
 
-// === DEBUG & anti-spam ===
-const DEBUG = new URLSearchParams(location.search).has("debug");
-// один одновременный вызов на модуль, чтобы не было лавины запросов
-let inflight: Promise<AccessSnapshot> | null = null;
-
+// Сессионный кэш «зелёного» окна
 const CACHE_KEY = "ACCESS_OK_UNTIL"; // ms timestamp
-
 function nowMs() { return Date.now(); }
 function isFuture(iso?: string | null) {
   if (!iso) return false;
   const t = new Date(iso).getTime();
   return Number.isFinite(t) && t > nowMs();
 }
-
 function getCachedOk(): boolean {
   const until = Number(sessionStorage.getItem(CACHE_KEY) || "0");
   return Number.isFinite(until) && until > nowMs();
@@ -52,24 +46,21 @@ async function waitTelegramId(maxTries = 5, delayMs = 120): Promise<number | nul
   return getTelegramUserId();
 }
 
+/** Глобальная дедупликация запроса в полёте */
+let inflight: Promise<AccessSnapshot> | null = null;
+
 /** Единый гард. Возвращает снимок доступа. */
 export async function ensureAccess(autoStartTrial: boolean = true): Promise<AccessSnapshot> {
-  if (DEBUG) {
-    // покажет полный стек: какой файл/строка вызвала проверку
-    console.trace(`[ensureAccess] called autoStartTrial=${autoStartTrial} @ ${new Date().toISOString()}`);
+  // если недавно уже подтверждали доступ — не мигаем экранами
+  if (getCachedOk()) {
+    return { ok: true, has_access: true, reason: "subscription", until: null };
   }
-  // если уже есть выполняющийся вызов — подождём его (без параллельных дублей)
+
   if (inflight) return inflight;
 
-  inflight = (async () => {
-    // если недавно уже подтверждали доступ — не мигаем экранами
-    if (getCachedOk()) {
-      return { ok: true, has_access: true, reason: "subscription", until: null };
-    }
-
+  inflight = (async (): Promise<AccessSnapshot> => {
     const tg = await waitTelegramId();
     if (!API_BASE || !tg) {
-      // Сетевой/иниц. сбой — не валим пользователя, дадим Paywall решить
       return { ok: false, has_access: false, reason: "none", until: null };
     }
 
@@ -109,6 +100,6 @@ export async function ensureAccess(autoStartTrial: boolean = true): Promise<Acce
   try {
     return await inflight;
   } finally {
-    inflight = null; // снимаем замок
+    inflight = null; // обязательно сбрасываем
   }
 }
