@@ -12,10 +12,10 @@ const API_BASE =
 export type AccessSnapshot = {
   ok: boolean;                      // есть доступ (подписка ИЛИ активный триал)
   until?: string | null;            // дата окончания доступа (если есть)
-  has_auto_renew?: boolean | null;  // автопродление подписки (если есть подписка)
+  has_auto_renew?: boolean | null;  // автопродление (если есть подписка)
 };
 
-// Основная функция: true/false + полезные поля
+// Основная функция: возвращает снапшот доступа
 export async function checkAccess(): Promise<AccessSnapshot> {
   const tg = getTelegramUserId();
   if (!API_BASE || !tg) return { ok: false };
@@ -42,7 +42,7 @@ export async function checkAccess(): Promise<AccessSnapshot> {
   };
 }
 
-/** Удобный шорткат только для булевого признака */
+/** Шорткат: только булевый признак */
 export async function hasAccess(): Promise<boolean> {
   try {
     const s = await checkAccess();
@@ -50,4 +50,46 @@ export async function hasAccess(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Совместимая обёртка под старый импорт.
+ * Если доступа нет — по возможности редиректит на "/paywall".
+ *
+ * Примеры совместимости:
+ *   await ensureAccess(navigate)                       // передан navigate из react-router
+ *   await ensureAccess({ navigate })                  // объект с navigate
+ *   await ensureAccess({ onDenied: () => nav('/paywall') })
+ */
+export async function ensureAccess(
+  navigateOrOpts?: any
+): Promise<boolean> {
+  const ok = await hasAccess();
+  if (ok) return true;
+
+  // попытка редиректа, если передали navigate
+  try {
+    // вариант 1: функция navigate
+    if (typeof navigateOrOpts === "function") {
+      navigateOrOpts("/paywall", { replace: true });
+    }
+    // вариант 2: объект с полем navigate
+    else if (
+      navigateOrOpts &&
+      typeof navigateOrOpts.navigate === "function"
+    ) {
+      navigateOrOpts.navigate("/paywall", { replace: true });
+    }
+    // вариант 3: кастомный колбэк
+    else if (
+      navigateOrOpts &&
+      typeof navigateOrOpts.onDenied === "function"
+    ) {
+      navigateOrOpts.onDenied();
+    }
+  } catch {
+    // молча
+  }
+
+  return false;
 }
