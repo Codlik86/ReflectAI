@@ -174,6 +174,11 @@ export default function ThoughtLabeling() {
 
   const current = STEPS[stepIdx - 1];
 
+  // helper для тач-фикса
+  const onPD = (e: React.PointerEvent) => {
+    if ((e as any).pointerType === "touch") e.preventDefault();
+  };
+
   return (
     <div className="min-h-dvh flex flex-col">
       <BackBar title="Маркировка мыслей" to="/exercises" />
@@ -194,7 +199,14 @@ export default function ThoughtLabeling() {
               ускользает — ничего страшного, просто возвращай внимание.
             </div>
             <div className="flex items-center justify-center">
-              <button onClick={begin} className="btn btn-primary">Начать</button>
+              <button
+                onPointerDown={onPD}
+                style={{ touchAction: "manipulation" }}
+                onClick={begin}
+                className="btn btn-primary"
+              >
+                Начать
+              </button>
             </div>
           </div>
         )}
@@ -225,21 +237,47 @@ export default function ThoughtLabeling() {
 
             <div className="mt-5 flex items-center justify-center gap-3">
               {phase === "idle" ? (
-                <button onClick={startCurrentStep} className="btn btn-primary">Старт</button>
+                <button
+                  onPointerDown={onPD}
+                  style={{ touchAction: "manipulation" }}
+                  onClick={startCurrentStep}
+                  className="btn btn-primary"
+                >
+                  Старт
+                </button>
               ) : (
-                <button onClick={onPauseResume} className="btn btn-primary">
+                <button
+                  onPointerDown={onPD}
+                  style={{ touchAction: "manipulation" }}
+                  onClick={onPauseResume}
+                  className="btn btn-primary"
+                >
                   {paused ? "Продолжить" : "Пауза"}
                 </button>
               )}
-              <button onClick={onStop} className="btn btn-stop">Остановить</button>
+              <button
+                onPointerDown={onPD}
+                style={{ touchAction: "manipulation" }}
+                onClick={onStop}
+                className="btn btn-stop"
+              >
+                Остановить
+              </button>
             </div>
 
             <div className="mt-5 pt-4 border-t border-black/5">
               <div className="flex items-center justify-center gap-2">
-                <button onClick={goStart} className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80">
+                <button
+                  onPointerDown={onPD}
+                  style={{ touchAction: "manipulation" }}
+                  onClick={goStart}
+                  className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80"
+                >
                   Сначала
                 </button>
                 <button
+                  onPointerDown={onPD}
+                  style={{ touchAction: "manipulation" }}
                   onClick={goPrev}
                   disabled={stepIdx === 1}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
@@ -247,6 +285,8 @@ export default function ThoughtLabeling() {
                   Назад
                 </button>
                 <button
+                  onPointerDown={onPD}
+                  style={{ touchAction: "manipulation" }}
                   onClick={goNext}
                   disabled={stepIdx === TOTAL}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
@@ -267,6 +307,8 @@ export default function ThoughtLabeling() {
             </div>
             <div className="mt-4 flex items-center justify-center gap-3">
               <button
+                onPointerDown={onPD}
+                style={{ touchAction: "manipulation" }}
                 onClick={() => {
                   setStepIdx(1);
                   setPhase("idle");
@@ -277,7 +319,12 @@ export default function ThoughtLabeling() {
               >
                 Ещё раз
               </button>
-              <a href="/exercises" className="h-10 px-4 rounded-xl bg-white text-ink-900 flex items-center">
+              <a
+                href="/exercises"
+                className="h-10 px-4 rounded-xl bg-white text-ink-900 flex items-center"
+                style={{ touchAction: "manipulation" }}
+                onPointerDown={(e) => { if ((e as any).pointerType === "touch") e.preventDefault(); }}
+              >
                 К упражнениям
               </a>
             </div>
