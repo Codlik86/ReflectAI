@@ -6,16 +6,36 @@ const base = (import.meta as any)?.env?.BASE_URL || "/";
 const pub = (p: string) => `${base}${p}`.replace(/\/+/, "/");
 
 // Имя бота — из ENV, с дефолтом
-const BOT_USERNAME = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
+const BOT_USERNAME =
+  (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
 
 function openBot(start?: string) {
-  const url = `https://t.me/${BOT_USERNAME}${start ? `?start=${encodeURIComponent(start)}` : ""}`;
+  const url = `https://t.me/${BOT_USERNAME}${
+    start ? `?start=${encodeURIComponent(start)}` : ""
+  }`;
+
+  // Пытаемся открыть ссылку «по-телеграмному» и закрыть webview
+  const tg: any = getTelegram();
+  const safeClose = () => {
+    try {
+      tg?.close?.();
+      tg?.WebApp?.close?.();
+    } catch {}
+  };
+
   try {
-    const tg = getTelegram() as any;
-    if (tg?.openTelegramLink) tg.openTelegramLink(url);
-    else window.open(url, "_blank", "noopener,noreferrer");
+    if (tg?.openTelegramLink) {
+      tg.openTelegramLink(url);
+      // Дадим переходу стартануть и аккуратно закроем webview
+      setTimeout(safeClose, 120);
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
+      // Если не WebApp — закрывать нечего, но на всякий случай попробуем
+      setTimeout(safeClose, 0);
+    }
   } catch {
     window.open(url, "_blank", "noopener,noreferrer");
+    setTimeout(safeClose, 0);
   }
 }
 
@@ -35,7 +55,6 @@ export default function Header() {
           className="w-6 h-6 object-contain"
           draggable={false}
           onError={(e) => {
-            // если файла нет — скрываем img, оставляем только текст
             (e.currentTarget as HTMLImageElement).style.display = "none";
           }}
         />

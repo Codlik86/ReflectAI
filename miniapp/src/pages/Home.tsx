@@ -52,31 +52,41 @@ export default function Home() {
   const onExercises = () => guardTo("/exercises");
   const onMeditations = () => guardTo("/meditations");
 
-  // «Поговорить»: считаем осмысленным действием → разрешаем автозапуск триала
-  const onTalk = async () => {
-    if (busyRef.current) return;
-    busyRef.current = true;
+// «Поговорить»: осмысленное действие → можно автозапуск триала
+const onTalk = async () => {
+  if (busyRef.current) return;
+  busyRef.current = true;
+
+  try {
+    const snap = await ensureAccess({ startTrial: true });
+    if (!snap.has_access) {
+      safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
+      return;
+    }
+
+    const bot = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
+    const url = `https://t.me/${bot}?start=talk`; // бот трактует start=talk как /talk
+    const wa = (window as any)?.Telegram?.WebApp;
+
     try {
-      const snap = await ensureAccess({ startTrial: true });
-      if (!snap.has_access) {
-        safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
-        return;
-      }
-      const bot = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
-      const url = `https://t.me/${bot}?start=miniapp`;
-      const wa = (window as any)?.Telegram?.WebApp;
-      try {
-        if (wa?.openTelegramLink) wa.openTelegramLink(url);
-        else window.open(url, "_blank", "noopener,noreferrer");
-      } catch {
+      if (wa?.openTelegramLink) {
+        wa.openTelegramLink(url);
+        // даём переходу стартануть и закрываем webview
+        setTimeout(() => wa.close(), 120);
+      } else {
         window.open(url, "_blank", "noopener,noreferrer");
+        setTimeout(() => wa?.close?.(), 0);
       }
     } catch {
-      safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
-    } finally {
-      setTimeout(() => (busyRef.current = false), 150);
+      window.open(url, "_blank", "noopener,noreferrer");
+      setTimeout(() => wa?.close?.(), 0);
     }
-  };
+  } catch {
+    safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
+  } finally {
+    setTimeout(() => (busyRef.current = false), 150);
+  }
+};
 
   return (
     <div className="min-h-dvh flex flex-col">
