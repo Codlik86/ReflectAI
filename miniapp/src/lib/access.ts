@@ -85,3 +85,11 @@ export async function computeAccess(): Promise<AccessComputed> {
     trialUntil: trialUntilIso,
   };
 }
+
+// src/lib/access.ts — добавить безопасную заглушку при желании
+export async function acceptPolicy(): Promise<void> {
+  // В бэкенде нет соответствующего API.
+  // Реальное принятие происходит в боте на onb:agree.
+  // Открывай бота и нажимай «Принимаю».
+  throw new Error("acceptPolicy API недоступен — открой бота и нажми «Принимаю».");
+}
