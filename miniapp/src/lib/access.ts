@@ -1,5 +1,5 @@
 // src/lib/access.ts
-// Единая точка: получить tg_user_id и проверить доступ у бэкенда
+// Единая точка: получить tg_user_id и проверить/изменить доступ у бэкенда
 
 export type AccessApiOut = {
   ok: boolean;                     // есть доступ (триал/подписка)
@@ -71,4 +71,21 @@ export async function getAccessStatus(): Promise<AccessApiOut> {
     until: data.until ?? null,
     has_auto_renew: data.has_auto_renew ?? null,
   };
+}
+
+// Принять правила (пишем отметку на сервере)
+export async function acceptPolicy(): Promise<void> {
+  const tg_user_id = getTelegramUserId();
+  if (!API_BASE || !tg_user_id) throw new Error("no_api_or_user");
+
+  const r = await fetch(`${API_BASE}/api/access/accept-policy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tg_user_id }),
+  });
+
+  if (!r.ok) {
+    const txt = await r.text().catch(() => "");
+    throw new Error(txt || "accept_failed");
+  }
 }
