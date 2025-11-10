@@ -16,8 +16,7 @@ function findById(id?: string) {
   return undefined;
 }
 
-const isIOS =
-  /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
 
 function PlayIcon({ size = 34 }: { size?: number }) {
   return (
@@ -39,7 +38,6 @@ export default function MeditationPlayer() {
   const location = useLocation();
   const navigate = useNavigate();
   const navState = (location.state as NavState) ?? {};
-
   const meta = React.useMemo(() => findById(id), [id]);
 
   const title = navState.title ?? meta?.title ?? "Медитация";
@@ -55,7 +53,6 @@ export default function MeditationPlayer() {
     if (checkedRef.current) return;
     checkedRef.current = true;
     let cancelled = false;
-
     (async () => {
       try {
         const snap = await ensureAccess(false);
@@ -68,14 +65,12 @@ export default function MeditationPlayer() {
         }
       }
     })();
-
     return () => { cancelled = true; };
   }, [navigate, id]);
 
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const dragging = React.useRef(false);
 
-  const [ready, setReady] = React.useState(false);
   const [playing, setPlaying] = React.useState(false);
   const [duration, setDuration] = React.useState(0);
   const [current, setCurrent] = React.useState(0);
@@ -85,6 +80,22 @@ export default function MeditationPlayer() {
   const audioCtxRef = React.useRef<AudioContext | null>(null);
   const sourceRef = React.useRef<MediaElementAudioSourceNode | null>(null);
   const gainRef = React.useRef<GainNode | null>(null);
+
+  // --- RAF-тикер как резерв к timeupdate (в некоторых webview он редкий)
+  const rafIdRef = React.useRef<number | null>(null);
+  const startTicker = () => {
+    stopTicker();
+    const loop = () => {
+      const a = audioRef.current;
+      if (a) setCurrent(a.currentTime || 0);
+      rafIdRef.current = requestAnimationFrame(loop);
+    };
+    rafIdRef.current = requestAnimationFrame(loop);
+  };
+  const stopTicker = () => {
+    if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
+    rafIdRef.current = null;
+  };
 
   const ensureWebAudio = async () => {
     if (!isIOS) return;
@@ -97,14 +108,14 @@ export default function MeditationPlayer() {
       const ctx = new Ctx();
       audioCtxRef.current = ctx;
       try {
-        const srcNode = ctx.createMediaElementSource(el); // требует crossOrigin + CORS
+        const srcNode = ctx.createMediaElementSource(el); // требует CORS
         const gain = ctx.createGain();
         gain.gain.value = volume;
         srcNode.connect(gain).connect(ctx.destination);
         sourceRef.current = srcNode;
         gainRef.current = gain;
       } catch {
-        // CORS не выдан сервером — остаёмся на системной громкости
+        // нет CORS — просто выходим, останемся на системной громкости
         return;
       }
     }
@@ -119,20 +130,28 @@ export default function MeditationPlayer() {
     const a = audioRef.current;
     if (!a) return;
 
+    // ВАЖНО: назначаем CORS до src
+    a.crossOrigin = "anonymous";
+
     const onLoaded = () => {
-      setDuration(isFinite(a.duration) ? a.duration : 0);
-      setReady(true);
+      setDuration(Number.isFinite(a.duration) ? a.duration : 0);
     };
-    const onTime = () => !dragging.current && setCurrent(a.currentTime);
-    const onEnded = () => { setPlaying(false); setCurrent(a.duration || 0); };
-    const onError = () => { setPlaying(false); setReady(false); };
+    const onTime = () => {
+      if (!dragging.current) setCurrent(a.currentTime || 0);
+    };
+    const onPlay = () => { setPlaying(true); startTicker(); };
+    const onPause = () => { setPlaying(false); stopTicker(); };
+    const onEnded = () => { setPlaying(false); stopTicker(); setCurrent(a.duration || 0); };
+    const onError = () => { setPlaying(false); stopTicker(); };
 
     a.addEventListener("loadedmetadata", onLoaded);
     a.addEventListener("timeupdate", onTime);
+    a.addEventListener("play", onPlay);
+    a.addEventListener("pause", onPause);
     a.addEventListener("ended", onEnded);
     a.addEventListener("error", onError);
 
-    setReady(false);
+    // полный сброс при смене src
     setPlaying(false);
     setCurrent(0);
     a.pause();
@@ -140,9 +159,12 @@ export default function MeditationPlayer() {
     a.load();
 
     return () => {
+      stopTicker();
       a.pause();
       a.removeEventListener("loadedmetadata", onLoaded);
       a.removeEventListener("timeupdate", onTime);
+      a.removeEventListener("play", onPlay);
+      a.removeEventListener("pause", onPause);
       a.removeEventListener("ended", onEnded);
       a.removeEventListener("error", onError);
     };
@@ -165,6 +187,7 @@ export default function MeditationPlayer() {
   React.useEffect(() => {
     return () => {
       try {
+        stopTicker();
         sourceRef.current?.disconnect();
         gainRef.current?.disconnect();
         audioCtxRef.current?.close();
@@ -175,21 +198,20 @@ export default function MeditationPlayer() {
   const togglePlay = async () => {
     const a = audioRef.current;
     if (!a) return;
-    await ensureWebAudio();
+    await ensureWebAudio(); // iOS «пинок»
 
     if (playing) {
       a.pause();
-      setPlaying(false);
       return;
     }
     try {
       if (a.readyState < 2) a.load();
       await a.play();
-      setPlaying(true);
     } catch {
+      // если play() отклонён — дождёмся canplay и повторим
       const once = () => {
         a.removeEventListener("canplay", once);
-        a.play().then(() => setPlaying(true)).catch(() => {});
+        a.play().catch(() => {});
       };
       a.addEventListener("canplay", once, { once: true });
     }
@@ -215,9 +237,11 @@ export default function MeditationPlayer() {
     <div className="min-h-dvh flex flex-col">
       <BackBar title={title} to="/meditations" />
 
-      <audio ref={audioRef} preload="auto" playsInline crossOrigin="anonymous" />
+      {/* скрытый источник */}
+      <audio ref={audioRef} preload="auto" playsInline />
 
       <div className="px-5 pb-6" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 98px)" }}>
+        {/* ... UI без изменений ... */}
         <div className="flex justify-center mt-2">
           <div
             className="w-[80%] max-w-[520px] aspect-square rounded-3xl"
@@ -231,9 +255,7 @@ export default function MeditationPlayer() {
 
         <div className="mt-6 text-center">
           {!!subtitle && (
-            <div className="text-[13px] tracking-wide uppercase text-black/50 mb-1 select-none">
-              {subtitle}
-            </div>
+            <div className="text-[13px] tracking-wide uppercase text-black/50 mb-1 select-none">{subtitle}</div>
           )}
           <h1 className="text-[20px] leading-7 font-semibold text-black/85">{title}</h1>
         </div>
@@ -277,6 +299,7 @@ export default function MeditationPlayer() {
               style={{ left: `calc(${(p * 100).toFixed(2)}% - 9px)` }}
             />
           </div>
+
           <div className="mt-2 flex justify-between text-[14px] text-black/65 tabular-nums">
             <span aria-label="Текущее время">{fmt(current)}</span>
             <span aria-label="Длительность">{fmt(duration)}</span>
@@ -284,54 +307,19 @@ export default function MeditationPlayer() {
 
           {/* Кнопки */}
           <div className="mt-4 flex items-center justify-center gap-10">
-            <button
-              className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
-              onClick={() => skip(-15)}
-              aria-label="Назад 15 секунд"
-              title="−15 сек"
-            >
-              {"\u25C0\u25C0"}
-            </button>
-
-            <button
-              className="px-2 py-2 text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
-              onClick={togglePlay}
-              onPointerDown={(e) => e.preventDefault()}
-              aria-label={playing ? "Пауза" : "Пуск"}
-              title={playing ? "Пауза" : "Пуск"}
-            >
-              {playing ? <PauseIcon /> : <PlayIcon />}
-            </button>
-
-            <button
-              className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
-              onClick={() => skip(+15)}
-              aria-label="Вперёд 15 секунд"
-              title="+15 сек"
-            >
-              {"\u25B6\u25B6"}
-            </button>
+            <button className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)]" onClick={() => skip(-15)} aria-label="Назад 15 секунд">{"\u25C0\u25C0"}</button>
+            <button className="px-2 py-2 text-[rgba(47,47,47,.95)]" onClick={togglePlay} onPointerDown={(e) => e.preventDefault()} aria-label={playing ? "Пауза" : "Пуск"}>{playing ? <PauseIcon /> : <PlayIcon />}</button>
+            <button className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)]" onClick={() => skip(+15)} aria-label="Вперёд 15 секунд">{"\u25B6\u25B6"}</button>
           </div>
 
           {/* Громкость */}
           <div className="mt-2">
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={volume}
-              onChange={(e) => setVolume(parseFloat(e.target.value))}
-              className="w-full accent-[rgba(47,47,47,.95)]"
-              aria-label="Громкость"
-            />
+            <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-full accent-[rgba(47,47,47,.95)]" aria-label="Громкость" />
           </div>
         </div>
 
         <div className="mt-4 text-center">
-          <Link to="/meditations" className="text-ink-500 text-[14px]">
-            К списку медитаций
-          </Link>
+          <Link to="/meditations" className="text-ink-500 text-[14px]">К списку медитаций</Link>
         </div>
       </div>
     </div>
