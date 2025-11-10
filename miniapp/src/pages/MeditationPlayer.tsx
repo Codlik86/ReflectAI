@@ -88,24 +88,29 @@ export default function MeditationPlayer() {
 
   const ensureWebAudio = async () => {
     if (!isIOS) return;
-    if (!audioRef.current) return;
+    const el = audioRef.current;
+    if (!el) return;
 
     if (!audioCtxRef.current) {
       const Ctx: any = (window as any).AudioContext || (window as any).webkitAudioContext;
       if (!Ctx) return;
       const ctx = new Ctx();
       audioCtxRef.current = ctx;
-      const srcNode = ctx.createMediaElementSource(audioRef.current);
-      const gain = ctx.createGain();
-      gain.gain.value = volume;
-      srcNode.connect(gain).connect(ctx.destination);
-      sourceRef.current = srcNode;
-      gainRef.current = gain;
+      try {
+        const srcNode = ctx.createMediaElementSource(el); // требует crossOrigin + CORS
+        const gain = ctx.createGain();
+        gain.gain.value = volume;
+        srcNode.connect(gain).connect(ctx.destination);
+        sourceRef.current = srcNode;
+        gainRef.current = gain;
+      } catch {
+        // CORS не выдан сервером — остаёмся на системной громкости
+        return;
+      }
     }
-
     const ctx = audioCtxRef.current;
     if (ctx && ctx.state === "suspended") {
-      try { await ctx.resume(); } catch { /* noop */ }
+      try { await ctx.resume(); } catch {}
     }
   };
 
@@ -163,7 +168,7 @@ export default function MeditationPlayer() {
         sourceRef.current?.disconnect();
         gainRef.current?.disconnect();
         audioCtxRef.current?.close();
-      } catch { /* noop */ }
+      } catch {}
     };
   }, []);
 
@@ -210,7 +215,7 @@ export default function MeditationPlayer() {
     <div className="min-h-dvh flex flex-col">
       <BackBar title={title} to="/meditations" />
 
-      <audio ref={audioRef} preload="auto" playsInline />
+      <audio ref={audioRef} preload="auto" playsInline crossOrigin="anonymous" />
 
       <div className="px-5 pb-6" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 98px)" }}>
         <div className="flex justify-center mt-2">
@@ -234,8 +239,9 @@ export default function MeditationPlayer() {
         </div>
 
         <div className="mt-5 rounded-3xl bg-white/70 backdrop-blur px-5 pt-6 pb-6">
+          {/* Прогресс */}
           <div
-            className="relative h-1,5 w-full rounded-full bg-black/12 select-none"
+            className="relative h-[6px] w-full rounded-full bg-black/12 select-none"
             onPointerDown={(e) => {
               if (!duration) return;
               dragging.current = true;
@@ -276,6 +282,7 @@ export default function MeditationPlayer() {
             <span aria-label="Длительность">{fmt(duration)}</span>
           </div>
 
+          {/* Кнопки */}
           <div className="mt-4 flex items-center justify-center gap-10">
             <button
               className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
@@ -306,6 +313,7 @@ export default function MeditationPlayer() {
             </button>
           </div>
 
+          {/* Громкость */}
           <div className="mt-2">
             <input
               type="range"
