@@ -20,6 +20,11 @@ const API_BASE =
     window.localStorage.getItem("VITE_API_BASE")?.replace(/\/$/, "") ||
     "");
 
+// === DEBUG & anti-spam ===
+const DEBUG = new URLSearchParams(location.search).has("debug");
+// один одновременный вызов на модуль, чтобы не было лавины запросов
+let inflight: Promise<AccessSnapshot> | null = null;
+
 const CACHE_KEY = "ACCESS_OK_UNTIL"; // ms timestamp
 
 function nowMs() { return Date.now(); }
@@ -49,46 +54,61 @@ async function waitTelegramId(maxTries = 5, delayMs = 120): Promise<number | nul
 
 /** Единый гард. Возвращает снимок доступа. */
 export async function ensureAccess(autoStartTrial: boolean = true): Promise<AccessSnapshot> {
-  // если недавно уже подтверждали доступ — не мигаем экранами
-  if (getCachedOk()) {
-    return { ok: true, has_access: true, reason: "subscription", until: null };
+  if (DEBUG) {
+    // покажет полный стек: какой файл/строка вызвала проверку
+    console.trace(`[ensureAccess] called autoStartTrial=${autoStartTrial} @ ${new Date().toISOString()}`);
   }
+  // если уже есть выполняющийся вызов — подождём его (без параллельных дублей)
+  if (inflight) return inflight;
 
-  const tg = await waitTelegramId();
-  if (!API_BASE || !tg) {
-    // Сетевой/иниц. сбой — не валим пользователя, дадим Paywall решить
-    return { ok: false, has_access: false, reason: "none", until: null };
-  }
-
-  const url = new URL(`${API_BASE}/api/payments/status`);
-  url.searchParams.set("tg_user_id", String(tg));
-  if (autoStartTrial) url.searchParams.set("start_trial", "1");
-
-  let dto: StatusDTO | null = null;
-  try {
-    const res = await fetch(url.toString(), { credentials: "omit" });
-    if (!res.ok) throw new Error(`${res.status}`);
-    dto = (await res.json()) as StatusDTO;
-  } catch {
-    // при сетевой ошибке уважаем кэш, иначе — отрицательно
+  inflight = (async () => {
+    // если недавно уже подтверждали доступ — не мигаем экранами
     if (getCachedOk()) {
       return { ok: true, has_access: true, reason: "subscription", until: null };
     }
-    return { ok: false, has_access: false, reason: "none", until: null };
+
+    const tg = await waitTelegramId();
+    if (!API_BASE || !tg) {
+      // Сетевой/иниц. сбой — не валим пользователя, дадим Paywall решить
+      return { ok: false, has_access: false, reason: "none", until: null };
+    }
+
+    const url = new URL(`${API_BASE}/api/payments/status`);
+    url.searchParams.set("tg_user_id", String(tg));
+    if (autoStartTrial) url.searchParams.set("start_trial", "1");
+
+    let dto: StatusDTO | null = null;
+    try {
+      const res = await fetch(url.toString(), { credentials: "omit" });
+      if (!res.ok) throw new Error(`${res.status}`);
+      dto = (await res.json()) as StatusDTO;
+    } catch {
+      // при сетевой ошибке уважаем кэш, иначе — отрицательно
+      if (getCachedOk()) {
+        return { ok: true, has_access: true, reason: "subscription", until: null };
+      }
+      return { ok: false, has_access: false, reason: "none", until: null };
+    }
+
+    const subActive = dto?.status === "active" && isFuture(dto?.until);
+    const trialActive = dto?.status === "trial" && isFuture(dto?.until);
+
+    if (subActive || trialActive) {
+      putCachedOk(); // 60 сек «зелёного» окна, чтобы не было bounce
+      return {
+        ok: true,
+        has_access: true,
+        reason: subActive ? "subscription" : "trial",
+        until: dto?.until ?? null,
+      };
+    }
+
+    return { ok: true, has_access: false, reason: "none", until: dto?.until ?? null };
+  })();
+
+  try {
+    return await inflight;
+  } finally {
+    inflight = null; // снимаем замок
   }
-
-  const subActive = dto?.status === "active" && isFuture(dto?.until);
-  const trialActive = dto?.status === "trial" && isFuture(dto?.until);
-
-  if (subActive || trialActive) {
-    putCachedOk(); // 60 сек «зелёного» окна, чтобы не было bounce
-    return {
-      ok: true,
-      has_access: true,
-      reason: subActive ? "subscription" : "trial",
-      until: dto?.until ?? null,
-    };
-  }
-
-  return { ok: true, has_access: false, reason: "none", until: dto?.until ?? null };
 }
