@@ -1,6 +1,7 @@
+// src/pages/Home.tsx
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { ensureAccess } from "../lib/guard";
+import { hasAccess } from "../lib/guard";
 
 export default function Home() {
   const navigate = useNavigate();
@@ -15,8 +16,8 @@ export default function Home() {
   const guardTo = React.useCallback(
     async (path: string) => {
       try {
-        const st = await ensureAccess(true); // автостарт триала, если ещё не запущен
-        if (st.has_access) {
+        const ok = await hasAccess();
+        if (ok) {
           navigate(path);
         } else {
           const ret = encodeURIComponent(path);
@@ -35,18 +36,22 @@ export default function Home() {
 
   const onTalk = async () => {
     try {
-      const st = await ensureAccess(true);
-      if (!st.has_access) {
+      const ok = await hasAccess();
+      if (!ok) {
         const ret = encodeURIComponent("/");
         navigate(`/paywall?from=${ret}`);
         return;
       }
       // доступ есть — открываем бота
-      window.open(
-        "https://t.me/reflectttaibot?start=miniapp",
-        "_blank",
-        "noopener,noreferrer"
-      );
+      const bot = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
+      const url = `https://t.me/${bot}?start=miniapp`;
+      const wa = (window as any)?.Telegram?.WebApp;
+      try {
+        if (wa?.openTelegramLink) wa.openTelegramLink(url);
+        else window.open(url, "_blank", "noopener,noreferrer");
+      } catch {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
     } catch {
       const ret = encodeURIComponent("/");
       navigate(`/paywall?from=${ret}`);
