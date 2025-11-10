@@ -1,3 +1,4 @@
+// src/components/Header.tsx
 import * as React from "react";
 import { getTelegram } from "../lib/telegram";
 
@@ -9,33 +10,36 @@ const pub = (p: string) => `${base}${p}`.replace(/\/+/, "/");
 const BOT_USERNAME =
   (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
 
-function openBot(start?: string) {
-  const url = `https://t.me/${BOT_USERNAME}${
-    start ? `?start=${encodeURIComponent(start)}` : ""
-  }`;
+function openBotHelp() {
+  const startPayload = "help";
+  const tgDeep = `tg://resolve?domain=${encodeURIComponent(BOT_USERNAME)}&start=${encodeURIComponent(startPayload)}`;
+  const httpsUrl = `https://t.me/${BOT_USERNAME}?start=${encodeURIComponent(startPayload)}`;
 
-  // Пытаемся открыть ссылку «по-телеграмному» и закрыть webview
   const tg: any = getTelegram();
+  const wa: any = tg?.WebApp || tg;
+
   const safeClose = () => {
     try {
-      tg?.close?.();
-      tg?.WebApp?.close?.();
+      wa?.close?.();
     } catch {}
   };
 
   try {
-    if (tg?.openTelegramLink) {
-      tg.openTelegramLink(url);
-      // Дадим переходу стартануть и аккуратно закроем webview
-      setTimeout(safeClose, 120);
-    } else {
-      window.open(url, "_blank", "noopener,noreferrer");
-      // Если не WebApp — закрывать нечего, но на всякий случай попробуем
-      setTimeout(safeClose, 0);
+    if (wa?.openTelegramLink) {
+      // Пробуем deep-link (внутри Telegram предпочтительно)
+      wa.openTelegramLink(tgDeep);
+      // Параллельно даём https-фоллбек (если deep-link не сработал)
+      wa.openTelegramLink(httpsUrl);
+    } else if (typeof window !== "undefined") {
+      // Обычный веб: сначала deep-link, потом https-фоллбек
+      try { window.location.href = tgDeep; } catch {}
+      window.open(httpsUrl, "_blank", "noopener,noreferrer");
     }
   } catch {
-    window.open(url, "_blank", "noopener,noreferrer");
-    setTimeout(safeClose, 0);
+    window.open(httpsUrl, "_blank", "noopener,noreferrer");
+  } finally {
+    // Мягко закрываем webview после запуска перехода
+    setTimeout(safeClose, 120);
   }
 }
 
@@ -63,10 +67,10 @@ export default function Header() {
 
       <button
         type="button"
-        onClick={() => openBot("miniapp")}
+        onClick={openBotHelp}
         className="text-[16px] font-medium text-ink-900 hover:opacity-80 active:opacity-70"
       >
-        Открыть бот
+        Связаться
       </button>
     </header>
   );

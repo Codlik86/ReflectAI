@@ -20,7 +20,6 @@ export default function Home() {
       if (navigatedRef.current) return;
       navigatedRef.current = true;
       navigate(to);
-      // снимем флаг чуть позже, чтобы не словить мгновенный дубль
       setTimeout(() => (navigatedRef.current = false), 300);
     },
     [navigate]
@@ -42,7 +41,6 @@ export default function Home() {
       } catch {
         safeNavigate(`/paywall?from=${encodeURIComponent(path)}`);
       } finally {
-        // лёгкая задержка, чтобы не провоцировать повтор
         setTimeout(() => (busyRef.current = false), 150);
       }
     },
@@ -52,41 +50,63 @@ export default function Home() {
   const onExercises = () => guardTo("/exercises");
   const onMeditations = () => guardTo("/meditations");
 
-// «Поговорить»: осмысленное действие → можно автозапуск триала
-const onTalk = async () => {
-  if (busyRef.current) return;
-  busyRef.current = true;
-
-  try {
-    const snap = await ensureAccess({ startTrial: true });
-    if (!snap.has_access) {
-      safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
-      return;
-    }
-
+  // ===== helpers для открытия бота и мягкого закрытия webview =====
+  const openBotWithStart = (startPayload: string) => {
     const bot = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
-    const url = `https://t.me/${bot}?start=talk`; // бот трактует start=talk как /talk
     const wa = (window as any)?.Telegram?.WebApp;
+
+    // 1) tg://resolve — предпочтительно внутри Telegram
+    const tgDeep = `tg://resolve?domain=${encodeURIComponent(bot)}&start=${encodeURIComponent(startPayload)}`;
+    // 2) https-фоллбек
+    const httpsUrl = `https://t.me/${bot}?start=${encodeURIComponent(startPayload)}`;
 
     try {
       if (wa?.openTelegramLink) {
-        wa.openTelegramLink(url);
-        // даём переходу стартануть и закрываем webview
-        setTimeout(() => wa.close(), 120);
-      } else {
-        window.open(url, "_blank", "noopener,noreferrer");
-        setTimeout(() => wa?.close?.(), 0);
+        // Многие клиенты умеют и tg://, и https://
+        wa.openTelegramLink(tgDeep);
+      } else if (typeof window !== "undefined") {
+        // Пытаемся прямой deep-link; если заблокирован — откроется https ниже
+        window.location.href = tgDeep;
       }
     } catch {
-      window.open(url, "_blank", "noopener,noreferrer");
-      setTimeout(() => wa?.close?.(), 0);
+      // noop — перейдём к https
+    } finally {
+      // Всегда даём https-фоллбек параллельно (на случай, если tg:// не сработал)
+      try {
+        if (wa?.openTelegramLink) {
+          wa.openTelegramLink(httpsUrl);
+        } else {
+          window.open(httpsUrl, "_blank", "noopener,noreferrer");
+        }
+      } catch {
+        window.open(httpsUrl, "_blank", "noopener,noreferrer");
+      }
+      // Мягко закрываем webview после запуска перехода
+      setTimeout(() => {
+        try { wa?.close?.(); } catch {}
+      }, 120);
     }
-  } catch {
-    safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
-  } finally {
-    setTimeout(() => (busyRef.current = false), 150);
-  }
-};
+  };
+
+  // «Поговорить»: осмысленное действие → можно автозапуск триала
+  const onTalk = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+
+    try {
+      const snap = await ensureAccess({ startTrial: true });
+      if (!snap.has_access) {
+        safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
+        return;
+      }
+      // Если доступ есть — открываем бота в режиме talk и закрываем webview
+      openBotWithStart("talk");
+    } catch {
+      safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
+    } finally {
+      setTimeout(() => (busyRef.current = false), 150);
+    }
+  };
 
   return (
     <div className="min-h-dvh flex flex-col">

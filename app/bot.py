@@ -179,6 +179,28 @@ async def on_start_with_payload(m: Message):
     if payload.lower().startswith("paid_"):
         return
 
+    # 1.1) управляемые payload'ы, которые НЕ логируем как рекламу
+    pl = payload.lower()
+    if pl == "talk":
+        # мгновенно переводим в режим разговора и выходим
+        CHAT_MODE[m.chat.id] = "talk"
+        try:
+            # если есть твой вход в разговор — вызови его тут:
+            #   await start_talk_flow(m)      # <-- раскомментируй, если функция есть
+            await m.answer("Я рядом. Можем поговорить — напиши, что сейчас волнует 💬")
+        except Exception:
+            pass
+        return
+
+    if pl == "miniapp":
+        # мягкий вход из мини-аппа (без онбординга/логирования рекламы)
+        # здесь можно показать меню или короткий привет
+        try:
+            await m.answer("Открыл мини-приложение. Чем помочь?")
+        except Exception:
+            pass
+        return
+
     # 2) попытка зафиксировать источник рекламы
     saved = False
     if payload:
@@ -215,7 +237,7 @@ async def on_start_with_payload(m: Message):
         except Exception as e:
             print("[ads] start tracking error:", repr(e))
 
-    # 3) обычный онбординг
+    # 3) обычный онбординг (как было)
     CHAT_MODE[m.chat.id] = "talk"
     img = get_onb_image("cover")
     prefix = "Спасибо, что заглянул(а) из рекламы 💛\n\n" if saved else ""
@@ -226,7 +248,6 @@ async def on_start_with_payload(m: Message):
         except Exception:
             pass
     await m.answer(prefix + ONB_1_TEXT, reply_markup=kb_onb_step1())
-
 
 # ===== Универсальный paywall в рантайме ======================================
 def _require_access_msg(_: Message) -> bool:
