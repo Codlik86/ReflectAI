@@ -1,6 +1,6 @@
 // src/pages/Paywall.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import { computeAccess } from "../lib/access";
 
@@ -23,12 +23,11 @@ const nowMs = () => Date.now();
 export default function Paywall() {
   const nav = useNavigate();
   const loc = useLocation();
-  const navigatedRef = useRef(false);
+  const redirectingRef = useRef(false);
 
-  // куда возвращать после получения доступа
-  const qs = new URLSearchParams(loc.search);
-  const fromPath = qs.get("from");
-  const returnTo = fromPath && fromPath.startsWith("/") ? fromPath : "/";
+  // from=/exercises или /meditations — куда вернуть после подтверждения доступа
+  const params = new URLSearchParams(loc.search);
+  const from = params.get("from") || "/";
 
   const [access, setAccess] = useState<Awaited<ReturnType<typeof computeAccess>> | null>(null);
   const [loading, setLoading] = useState(true);
@@ -56,30 +55,31 @@ export default function Paywall() {
   const view: View = useMemo(() => {
     if (!access) return "loading";
 
-    // подписка
     const subUntilMs = access.subscriptionUntil ? new Date(access.subscriptionUntil).getTime() : 0;
     const hasSub = !!subUntilMs && subUntilMs > nowMs();
 
-    // триал (по computeAccess — это started + 5дн)
     const trialUntilMs = access.trialUntil ? new Date(access.trialUntil).getTime() : 0;
     const trialActive = !!access.trialStartedAt && trialUntilMs > nowMs();
 
     if (hasSub || trialActive || access.hasAccess) return "has-access";
 
-    // триал когда-то был, но уже не активен
     if (access.trialStartedAt && !trialActive && !hasSub) return "expired";
-
-    // совсем новый пользователь
     return "pre-trial";
   }, [access]);
 
-  // доступ есть — впускаем (уважаем ?from=)
+  // доступ есть — ВОЗВРАЩАЕМ туда, откуда пришли (from), а не на "/"
   useEffect(() => {
-    if (view === "has-access" && !navigatedRef.current) {
-      navigatedRef.current = true;
-      nav(returnTo, { replace: true });
-    }
-  }, [view, nav, returnTo]);
+    if (view !== "has-access") return;
+    if (redirectingRef.current) return;
+    redirectingRef.current = true;
+
+    // маленькая задержка, чтобы не было «мигания» при быстрой загрузке
+    const t = setTimeout(() => {
+      nav(from, { replace: true });
+    }, 10);
+
+    return () => clearTimeout(t);
+  }, [view, from, nav]);
 
   return (
     <div className="min-h-dvh flex flex-col">
