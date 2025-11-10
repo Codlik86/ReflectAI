@@ -360,11 +360,13 @@ function BreathWidget({
   };
 
   function advanceCycle(): Phase {
-    setCycle((c) => (c + 1 > cycles ? c : c + 1));
-    if (cycle + 1 > cycles) {
-      reset();
-      return "inhale";
-    }
+    let finished = false;
+    setCycle((c) => {
+      const nc = c + 1;
+      if (nc > cycles) { finished = true; return c; }
+      return nc;
+    });
+    if (finished) reset();
     return "inhale";
   }
 
