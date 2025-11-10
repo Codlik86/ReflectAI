@@ -17,6 +17,24 @@ function findById(id?: string) {
   return undefined;
 }
 
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
+
+// Иконки одинакового размера (24×24), чтобы не «скакали»
+function PlayIcon({ size = 34 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M8 5v14l11-7-11-7z" fill="currentColor" />
+    </svg>
+  );
+}
+function PauseIcon({ size = 34 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M6 5h4v14H6zM14 5h4v14h-4z" fill="currentColor" />
+    </svg>
+  );
+}
+
 export default function MeditationPlayer() {
   const { id } = useParams<{ id: string }>();
   const location = useLocation();
@@ -29,7 +47,6 @@ export default function MeditationPlayer() {
   const src =
     nav.src ??
     (meta as any)?.url ??
-    // резервный трек, если зашли напрямую без состояния
     "https://cdn.pixabay.com/download/audio/2022/03/15/audio_e4a79d.mp3?filename=calm-meditation-110624.mp3";
 
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
@@ -40,6 +57,32 @@ export default function MeditationPlayer() {
   const [duration, setDuration] = React.useState(0);
   const [current, setCurrent] = React.useState(0);
   const [volume, setVolume] = React.useState(0.9);
+
+  // WebAudio для iOS-громкости
+  const audioCtxRef = React.useRef<AudioContext | null>(null);
+  const sourceRef = React.useRef<MediaElementAudioSourceNode | null>(null);
+  const gainRef = React.useRef<GainNode | null>(null);
+  const webAudioReadyRef = React.useRef(false);
+
+  const ensureWebAudio = async () => {
+    if (!isIOS) return; // на десктопах громкость меняем через audio.volume
+    if (!audioRef.current) return;
+    if (!audioCtxRef.current) {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioCtxRef.current = ctx;
+      const srcNode = ctx.createMediaElementSource(audioRef.current);
+      const gain = ctx.createGain();
+      gain.gain.value = volume;
+      srcNode.connect(gain).connect(ctx.destination);
+      sourceRef.current = srcNode;
+      gainRef.current = gain;
+    }
+    // из «suspended» в «running» по пользовательскому жесту
+    if (audioCtxRef.current.state === "suspended") {
+      try { await audioCtxRef.current.resume(); } catch {}
+    }
+    webAudioReadyRef.current = true;
+  };
 
   React.useEffect(() => {
     const a = audioRef.current;
@@ -81,13 +124,27 @@ export default function MeditationPlayer() {
     };
   }, [src]);
 
+  // Устанавливаем громкость
   React.useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = volume;
+    const a = audioRef.current;
+    if (!a) return;
+    if (isIOS) {
+      // На iOS системный ползунок, поэтому управляем через GainNode
+      if (gainRef.current) gainRef.current.gain.value = volume;
+      // держим сам элемент на 1, чтобы не было двойного умножения
+      a.volume = 1;
+    } else {
+      a.volume = volume;
+      if (gainRef.current) gainRef.current.gain.value = volume; // не повредит, если включён WebAudio
+    }
   }, [volume]);
 
   const togglePlay = async () => {
     const a = audioRef.current;
     if (!a) return;
+    // Инициализируем WebAudio по первому жесту (нужно для iOS)
+    await ensureWebAudio();
+
     if (playing) {
       a.pause();
       setPlaying(false);
@@ -108,8 +165,8 @@ export default function MeditationPlayer() {
 
   const seekTo = (sec: number) => {
     const a = audioRef.current;
-    if (!a) return;
-    const v = Math.max(0, Math.min(duration || 0, sec));
+    if (!a || !duration) return;
+    const v = Math.max(0, Math.min(duration, sec));
     a.currentTime = v;
     setCurrent(v);
   };
@@ -130,12 +187,11 @@ export default function MeditationPlayer() {
       <audio ref={audioRef} preload="auto" playsInline />
 
       <div className="px-5 pb-6" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 98px)" }}>
-        {/* Обложка (без обводок/тени) */}
+        {/* Обложка */}
         <div className="flex justify-center mt-2">
           <div
             className="w-[80%] max-w-[520px] aspect-square rounded-3xl"
             style={{
-              // мягкий, но нейтральный плейсхолдер
               background:
                 "radial-gradient(45% 45% at 50% 45%, rgba(255,255,255,.92) 0%, rgba(255,231,216,.72) 35%, rgba(255,218,238,.54) 68%, rgba(255,255,255,0) 76%)",
             }}
@@ -153,11 +209,11 @@ export default function MeditationPlayer() {
           <h1 className="text-[20px] leading-7 font-semibold text-black/85">{title}</h1>
         </div>
 
-        {/* Плеер-карта без обводок/тени */}
+        {/* Плеер */}
         <div className="mt-5 rounded-3xl bg-white/70 backdrop-blur px-5 pt-6 pb-6">
-          {/* Прогресс */}
+          {/* Прогресс — фикс видимости (h-[6px]) */}
           <div
-            className="relative h-1,5 w-full rounded-full bg-black/12 select-none"
+            className="relative h-[6px] w-full rounded-full bg-black/12 select-none"
             onPointerDown={(e) => {
               if (!duration) return;
               dragging.current = true;
@@ -172,6 +228,7 @@ export default function MeditationPlayer() {
               seekTo((duration || 0) * (x / rect.width));
             }}
             onPointerUp={() => (dragging.current = false)}
+            onPointerCancel={() => (dragging.current = false)}
             onPointerLeave={() => (dragging.current = false)}
           >
             <div
@@ -192,7 +249,7 @@ export default function MeditationPlayer() {
             <span>{fmt(duration)}</span>
           </div>
 
-          {/* Кнопки — плоские, как на рефе */}
+          {/* Кнопки */}
           <div className="mt-4 flex items-center justify-center gap-10">
             <button
               className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
@@ -200,18 +257,17 @@ export default function MeditationPlayer() {
               aria-label="Назад 15 секунд"
               title="−15 сек"
             >
-              {/* двойной треугольник влево */}
               {"\u25C0\u25C0"}
             </button>
 
             <button
-              className="px-2 py-2 text-[34px] text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
+              className="px-2 py-2 text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
               onClick={togglePlay}
-              onPointerDown={(e) => e.preventDefault()}
+              onPointerDown={(e) => e.preventDefault()} // защита от двойного тапа на iOS
               aria-label={playing ? "Пауза" : "Пуск"}
               title={playing ? "Пауза" : "Пуск"}
             >
-              {playing ? "❚❚" : "▶"}
+              {playing ? <PauseIcon /> : <PlayIcon />}
             </button>
 
             <button
@@ -220,12 +276,11 @@ export default function MeditationPlayer() {
               aria-label="Вперёд 15 секунд"
               title="+15 сек"
             >
-              {/* двойной треугольник вправо */}
               {"\u25B6\u25B6"}
             </button>
           </div>
 
-          {/* Громкость */}
+          {/* Громкость — работает и на iOS через GainNode */}
           <div className="mt-2">
             <input
               type="range"
