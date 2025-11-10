@@ -1,14 +1,14 @@
 @import "tailwindcss";
 
 /* 1) Подключаем свой шрифт (пример: Manrope) */
-@font-face {
-  font-family: "Manrope";
+@font-face{
+  font-family:"Manrope";
   src:
-    url("/Manrope-Variable.woff2") format("woff2-variations"),
-    url("/Manrope-Regular.woff2") format("woff2");
-  font-weight: 100 900;    /* для Variable; для обычных: 400 */
-  font-style: normal;
-  font-display: swap;
+    url("./assets/fonts/Manrope-Variable.woff2.ttf") format("woff2-variations"),
+    url("./assets/fonts/Manrope-Regular.woff2") format("woff2");
+  font-weight:100 900;
+  font-style:normal;
+  font-display:swap;
 }
 
 /* 2) Делаем его шрифтом по умолчанию для всего приложения */
