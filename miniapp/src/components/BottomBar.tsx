@@ -1,4 +1,4 @@
-// src/components/BottomBar.tsx
+import * as React from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { HomeIcon, InfoIcon, SettingsIcon } from "./icons";
 
@@ -19,18 +19,13 @@ function Item({
     <button
       onClick={onClick}
       aria-label={label}
+      aria-current={active ? "page" : undefined}
       className={[
-        // без серого круга: прозрачный фон, только изменение цвета
         "h-12 w-12 flex items-center justify-center rounded-full transition-colors",
         "focus:outline-none focus:ring-0",
       ].join(" ")}
     >
-      <div
-        className={[
-          "transition-colors",
-          active ? ACCENT : "text-black/70 hover:text-black",
-        ].join(" ")}
-      >
+      <div className={["transition-colors", active ? ACCENT : "text-black/70 hover:text-black"].join(" ")}>
         {children}
       </div>
     </button>
@@ -43,10 +38,16 @@ export default function BottomBar() {
 
   const go = (p: string) => () => nav(p);
 
-  // Главная считается активной и на списках/страницах упражнений/медитаций
-  const isHome = pathname === "/";
+  // Главная считается активной и на /, /exercises/*, /meditations/*, /paywall
   const isAbout = pathname.startsWith("/about");
   const isSettings = pathname.startsWith("/settings");
+  const isHome =
+    !isAbout &&
+    !isSettings &&
+    (pathname === "/" ||
+      pathname.startsWith("/exercises") ||
+      pathname.startsWith("/meditations") ||
+      pathname.startsWith("/paywall"));
 
   return (
     <nav

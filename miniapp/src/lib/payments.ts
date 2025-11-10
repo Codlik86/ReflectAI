@@ -1,7 +1,7 @@
 // src/lib/payments.ts
 // Хелперы для Paywall: статус доступа и (опц.) создание платежа
 
-import { getTelegramUserId } from "./access";
+import { getTelegramUserId } from "./telegram";
 
 export type PayStatus = {
   ok: boolean;
@@ -14,120 +14,148 @@ export type PayStatus = {
   // подписка
   active?: boolean; // есть активная подписка
   plan?: "week" | "month" | "quarter" | "year" | null;
-  until?: string | null; // дата окончания (подписки или триала — смотря какая ветка выбрана)
+  until?: string | null; // дата окончания (подписки или триала — в зависимости от ветки)
 };
 
-// API base из ENV или из localStorage (как в access.ts)
+// ==== API base (как в guard.ts / access.ts) =================================
+
+function normalizeBase(s?: string | null) {
+  if (!s) return "";
+  return s.replace(/\/+$/, "");
+}
+
 const API_BASE =
-  (import.meta.env.VITE_API_BASE?.replace(/\/$/, "") ||
-    window.localStorage.getItem("VITE_API_BASE")?.replace(/\/$/, "") ||
-    "");
+  normalizeBase((import.meta as any)?.env?.VITE_API_BASE) ||
+  normalizeBase(window.localStorage.getItem("VITE_API_BASE")) ||
+  "";
+
+const apiUrl = (path: string) => (API_BASE ? `${API_BASE}${path}` : path);
+
+// ==== Утилиты ===============================================================
+
+const addDaysISO = (iso: string, days: number) => {
+  const d = new Date(iso);
+  d.setDate(d.getDate() + days);
+  return d.toISOString();
+};
+
+const isFuture = (iso?: string | null) => {
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  return Number.isFinite(t) && t > Date.now();
+};
+
+// ==== 1) Получить статус оплаты/доступа =====================================
 
 /**
- * 1) Получить статус оплаты/доступа.
  * Бэкенд может вернуть один из форматов:
- *  a) { status: "active"|"trial"|..., until, plan, is_auto_renew }
- *  b) { has_access, plan, trial_started_at, subscription_until }
+ *  a) { status: "active"|"trial"|"none", until, plan, is_auto_renew, has_access? }
+ *  b) { has_access, plan, trial_started_at, trial_expires_at?, subscription_until }
  */
 export async function fetchPayStatus(): Promise<PayStatus> {
-  if (!API_BASE) return { ok: false, error: "NO_API_BASE" };
-
   const tg = getTelegramUserId();
-  const url = tg
-    ? `${API_BASE}/api/payments/status?tg_user_id=${tg}`
-    : `${API_BASE}/api/payments/status`;
 
-  let r: Response;
   try {
-    r = await fetch(url, { credentials: "omit" });
-  } catch (e: any) {
-    return { ok: false, error: e?.message || "NETWORK_ERROR" };
-  }
+    // Пытаемся новый канон: /api/payments/status?tg_user_id=...
+    const u = new URL(apiUrl("/api/payments/status"), window.location.origin);
+    if (tg) u.searchParams.set("tg_user_id", String(tg));
 
-  if (!r.ok) {
-    return { ok: false, error: `${r.status} ${r.statusText}` };
-  }
-
-  const data = (await r.json()) as any;
-
-  // ----- Вариант (a): status/ until -----
-  if (typeof data?.status === "string") {
-    const st = (data.status as string).toLowerCase();
-    const until = data?.until ?? null;
-    const plan = (data?.plan ?? null) as PayStatus["plan"];
-
-    if (st === "active") {
-      return { ok: true, active: true, plan, until };
+    const r = await fetch(u.toString(), { credentials: "omit" });
+    if (!r.ok) {
+      return { ok: false, error: `${r.status} ${r.statusText}` };
     }
-    if (st === "trial") {
-      return { ok: true, active: false, plan, until, trial_started: true, trial_until: until };
+
+    const data = (await r.json()) as any;
+
+    // ----- Вариант (a): status/until -----
+    if (typeof data?.status === "string") {
+      const st = (data.status as string).toLowerCase();
+      const until = data?.until ?? null;
+      const plan = (data?.plan ?? null) as PayStatus["plan"];
+
+      if (st === "active") {
+        return { ok: true, active: true, plan, until };
+      }
+      if (st === "trial") {
+        return { ok: true, active: false, plan, until, trial_started: true, trial_until: until };
+      }
+      // любой иной статус — считаем доступа нет
+      return {
+        ok: true,
+        active: false,
+        plan: plan ?? null,
+        until: until ?? null,
+        trial_started: false,
+        trial_until: null,
+      };
     }
-    // любой иной статус — считаем доступа нет
-    return { ok: true, active: false, plan: plan ?? null, until: until ?? null, trial_started: false, trial_until: null };
-  }
 
-  // ----- Вариант (b): has_access / trial_started_at / subscription_until -----
-  const now = Date.now();
-  const subUntilIso = data?.subscription_until ?? null;
-  const subUntilMs = subUntilIso ? new Date(subUntilIso).getTime() : 0;
-  const subActive = !!subUntilMs && subUntilMs > now;
+    // ----- Вариант (b): has_access / trial_started_at / subscription_until -----
+    const subUntilIso = data?.subscription_until ?? null;
+    const subActive = isFuture(subUntilIso);
 
-  const trialStartedAt = data?.trial_started_at ?? null;
-  // В проекте триал = 5 дней от trial_started_at (если бек не шлёт trial_expires_at)
-  const trialExpiresIso =
-    data?.trial_expires_at ??
-    (trialStartedAt ? new Date(new Date(trialStartedAt).getTime() + 5 * 24 * 60 * 60 * 1000).toISOString() : null);
-  const trialActive = Boolean(trialStartedAt) && trialExpiresIso && new Date(trialExpiresIso).getTime() > now;
+    const trialStartedAt = data?.trial_started_at ?? null;
+    const trialExpiresIso = data?.trial_expires_at ?? (trialStartedAt ? addDaysISO(trialStartedAt, 5) : null);
+    const trialActive = Boolean(trialStartedAt) && isFuture(trialExpiresIso);
 
-  if (subActive) {
-    return {
-      ok: true,
-      active: true,
-      plan: (data?.plan ?? null) as PayStatus["plan"],
-      until: subUntilIso,
-      trial_started: Boolean(trialStartedAt),
-      trial_until: trialExpiresIso ?? null,
-    };
-  }
+    if (subActive) {
+      return {
+        ok: true,
+        active: true,
+        plan: (data?.plan ?? null) as PayStatus["plan"],
+        until: subUntilIso,
+        trial_started: Boolean(trialStartedAt),
+        trial_until: trialExpiresIso ?? null,
+      };
+    }
 
-  if (trialActive) {
+    if (trialActive) {
+      return {
+        ok: true,
+        active: false,
+        plan: (data?.plan ?? null) as PayStatus["plan"],
+        until: trialExpiresIso,
+        trial_started: true,
+        trial_until: trialExpiresIso,
+      };
+    }
+
+    // по умолчанию — доступа нет
     return {
       ok: true,
       active: false,
       plan: (data?.plan ?? null) as PayStatus["plan"],
-      until: trialExpiresIso,
-      trial_started: true,
-      trial_until: trialExpiresIso,
+      until: null,
+      trial_started: Boolean(trialStartedAt),
+      trial_until: trialExpiresIso ?? null,
     };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "NETWORK_ERROR" };
   }
-
-  // по умолчанию — доступа нет
-  return {
-    ok: true,
-    active: false,
-    plan: (data?.plan ?? null) as PayStatus["plan"],
-    until: null,
-    trial_started: Boolean(trialStartedAt),
-    trial_until: trialExpiresIso ?? null,
-  };
 }
 
-/** 2) Создать платёж и вернуть redirect URL на YooKassa (пока не используем из миниаппа) */
-export async function createPaymentLink(plan: "week" | "month" | "quarter" | "year"): Promise<string> {
-  if (!API_BASE) throw new Error("NO_API_BASE");
+// ==== 2) Создать платёж и вернуть redirect URL на YooKassa ==================
 
+export async function createPaymentLink(
+  plan: "week" | "month" | "quarter" | "year"
+): Promise<string> {
   const tg = getTelegramUserId();
+  if (!tg) throw new Error("NO_USER");
+
   const return_url = `${window.location.origin}/paywall?status=ok`;
 
-  const r = await fetch(`${API_BASE}/api/payments/yookassa/create`, {
+  const r = await fetch(apiUrl("/api/payments/yookassa/create"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "omit",
     body: JSON.stringify({
-      user_id: tg, // бэк примет и users.id, и tg_id (по твоей реализации)
+      // шлём оба поля, чтобы бэк однозначно нашёл пользователя
+      tg_user_id: tg,
+      tg_id: tg,
       plan,
       return_url,
       description: `Помни — ${plan}`,
+      source: "miniapp",
     }),
   });
 

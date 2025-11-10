@@ -1,12 +1,11 @@
 // src/pages/MeditationPlayer.tsx
 import * as React from "react";
-import { Link, useParams, useLocation } from "react-router-dom";
+import { Link, useParams, useLocation, useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import { MEDITATIONS_LIB } from "./Meditations";
+import { ensureAccess } from "../lib/guard";
 
-type NavState =
-  | { title?: string; subtitle?: string; src?: string }
-  | undefined;
+type NavState = { title?: string; subtitle?: string; src?: string } | undefined;
 
 function findById(id?: string) {
   if (!id) return undefined;
@@ -17,9 +16,9 @@ function findById(id?: string) {
   return undefined;
 }
 
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
+const isIOS =
+  /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
 
-// Иконки одинакового размера (24×24), чтобы не «скакали»
 function PlayIcon({ size = 34 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -38,16 +37,40 @@ function PauseIcon({ size = 34 }: { size?: number }) {
 export default function MeditationPlayer() {
   const { id } = useParams<{ id: string }>();
   const location = useLocation();
-  const nav = (location.state as NavState) ?? {};
+  const navigate = useNavigate();
+  const navState = (location.state as NavState) ?? {};
 
   const meta = React.useMemo(() => findById(id), [id]);
 
-  const title = nav.title ?? meta?.title ?? "Медитация";
-  const subtitle = nav.subtitle ?? meta?.subtitle ?? "";
+  const title = navState.title ?? meta?.title ?? "Медитация";
+  const subtitle = navState.subtitle ?? meta?.subtitle ?? "";
   const src =
-    nav.src ??
+    navState.src ??
     (meta as any)?.url ??
     "https://cdn.pixabay.com/download/audio/2022/03/15/audio_e4a79d.mp3?filename=calm-meditation-110624.mp3";
+
+  // --- гард доступа
+  const checkedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (checkedRef.current) return;
+    checkedRef.current = true;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const snap = await ensureAccess(false);
+        if (!cancelled && !snap.has_access) {
+          navigate(`/paywall?from=${encodeURIComponent(`/meditations/${id || ""}`)}`, { replace: true });
+        }
+      } catch {
+        if (!cancelled) {
+          navigate(`/paywall?from=${encodeURIComponent(`/meditations/${id || ""}`)}`, { replace: true });
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [navigate, id]);
 
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const dragging = React.useRef(false);
@@ -58,17 +81,19 @@ export default function MeditationPlayer() {
   const [current, setCurrent] = React.useState(0);
   const [volume, setVolume] = React.useState(0.9);
 
-  // WebAudio для iOS-громкости
+  // WebAudio (для iOS громкости)
   const audioCtxRef = React.useRef<AudioContext | null>(null);
   const sourceRef = React.useRef<MediaElementAudioSourceNode | null>(null);
   const gainRef = React.useRef<GainNode | null>(null);
-  const webAudioReadyRef = React.useRef(false);
 
   const ensureWebAudio = async () => {
-    if (!isIOS) return; // на десктопах громкость меняем через audio.volume
+    if (!isIOS) return;
     if (!audioRef.current) return;
+
     if (!audioCtxRef.current) {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const Ctx: any = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
       audioCtxRef.current = ctx;
       const srcNode = ctx.createMediaElementSource(audioRef.current);
       const gain = ctx.createGain();
@@ -77,13 +102,14 @@ export default function MeditationPlayer() {
       sourceRef.current = srcNode;
       gainRef.current = gain;
     }
-    // из «suspended» в «running» по пользовательскому жесту
-    if (audioCtxRef.current.state === "suspended") {
-      try { await audioCtxRef.current.resume(); } catch {}
+
+    const ctx = audioCtxRef.current;
+    if (ctx && ctx.state === "suspended") {
+      try { await ctx.resume(); } catch { /* noop */ }
     }
-    webAudioReadyRef.current = true;
   };
 
+  // Подписки и смена src
   React.useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
@@ -93,21 +119,14 @@ export default function MeditationPlayer() {
       setReady(true);
     };
     const onTime = () => !dragging.current && setCurrent(a.currentTime);
-    const onEnded = () => {
-      setPlaying(false);
-      setCurrent(a.duration || 0);
-    };
-    const onError = () => {
-      setPlaying(false);
-      setReady(false);
-    };
+    const onEnded = () => { setPlaying(false); setCurrent(a.duration || 0); };
+    const onError = () => { setPlaying(false); setReady(false); };
 
     a.addEventListener("loadedmetadata", onLoaded);
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("ended", onEnded);
     a.addEventListener("error", onError);
 
-    // полный сброс при смене src
     setReady(false);
     setPlaying(false);
     setCurrent(0);
@@ -124,25 +143,33 @@ export default function MeditationPlayer() {
     };
   }, [src]);
 
-  // Устанавливаем громкость
+  // Громкость
   React.useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
     if (isIOS) {
-      // На iOS системный ползунок, поэтому управляем через GainNode
       if (gainRef.current) gainRef.current.gain.value = volume;
-      // держим сам элемент на 1, чтобы не было двойного умножения
       a.volume = 1;
     } else {
       a.volume = volume;
-      if (gainRef.current) gainRef.current.gain.value = volume; // не повредит, если включён WebAudio
+      if (gainRef.current) gainRef.current.gain.value = volume;
     }
   }, [volume]);
+
+  // Чистка WebAudio при размонтировании
+  React.useEffect(() => {
+    return () => {
+      try {
+        sourceRef.current?.disconnect();
+        gainRef.current?.disconnect();
+        audioCtxRef.current?.close();
+      } catch { /* noop */ }
+    };
+  }, []);
 
   const togglePlay = async () => {
     const a = audioRef.current;
     if (!a) return;
-    // Инициализируем WebAudio по первому жесту (нужно для iOS)
     await ensureWebAudio();
 
     if (playing) {
@@ -181,13 +208,11 @@ export default function MeditationPlayer() {
 
   return (
     <div className="min-h-dvh flex flex-col">
-      <BackBar title="Медитация" to="/meditations" />
+      <BackBar title={title} to="/meditations" />
 
-      {/* скрытый источник */}
       <audio ref={audioRef} preload="auto" playsInline />
 
       <div className="px-5 pb-6" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 98px)" }}>
-        {/* Обложка */}
         <div className="flex justify-center mt-2">
           <div
             className="w-[80%] max-w-[520px] aspect-square rounded-3xl"
@@ -199,7 +224,6 @@ export default function MeditationPlayer() {
           />
         </div>
 
-        {/* Тексты */}
         <div className="mt-6 text-center">
           {!!subtitle && (
             <div className="text-[13px] tracking-wide uppercase text-black/50 mb-1 select-none">
@@ -209,9 +233,7 @@ export default function MeditationPlayer() {
           <h1 className="text-[20px] leading-7 font-semibold text-black/85">{title}</h1>
         </div>
 
-        {/* Плеер */}
         <div className="mt-5 rounded-3xl bg-white/70 backdrop-blur px-5 pt-6 pb-6">
-          {/* Прогресс — фикс видимости (h-[6px]) */}
           <div
             className="relative h-1,5 w-full rounded-full bg-black/12 select-none"
             onPointerDown={(e) => {
@@ -230,6 +252,11 @@ export default function MeditationPlayer() {
             onPointerUp={() => (dragging.current = false)}
             onPointerCancel={() => (dragging.current = false)}
             onPointerLeave={() => (dragging.current = false)}
+            aria-label="Полоса прогресса"
+            role="slider"
+            aria-valuemin={0}
+            aria-valuemax={duration || 0}
+            aria-valuenow={current || 0}
           >
             <div
               className="absolute left-0 top-0 h-full rounded-full"
@@ -245,11 +272,10 @@ export default function MeditationPlayer() {
             />
           </div>
           <div className="mt-2 flex justify-between text-[14px] text-black/65 tabular-nums">
-            <span>{fmt(current)}</span>
-            <span>{fmt(duration)}</span>
+            <span aria-label="Текущее время">{fmt(current)}</span>
+            <span aria-label="Длительность">{fmt(duration)}</span>
           </div>
 
-          {/* Кнопки */}
           <div className="mt-4 flex items-center justify-center gap-10">
             <button
               className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
@@ -263,7 +289,7 @@ export default function MeditationPlayer() {
             <button
               className="px-2 py-2 text-[rgba(47,47,47,.95)] hover:text-black/90 active:scale-[.98] focus:outline-none"
               onClick={togglePlay}
-              onPointerDown={(e) => e.preventDefault()} // защита от двойного тапа на iOS
+              onPointerDown={(e) => e.preventDefault()}
               aria-label={playing ? "Пауза" : "Пуск"}
               title={playing ? "Пауза" : "Пуск"}
             >
@@ -280,7 +306,6 @@ export default function MeditationPlayer() {
             </button>
           </div>
 
-          {/* Громкость — работает и на iOS через GainNode */}
           <div className="mt-2">
             <input
               type="range"

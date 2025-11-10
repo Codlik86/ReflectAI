@@ -2,7 +2,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import BackBar from "../components/BackBar";
-import { computeAccess } from "../lib/access";
+import { ensureAccess } from "../lib/guard";
+import { getTelegramUserId } from "../lib/telegram";
 
 /** Открыть чат бота с опциональным start-параметром */
 function openInBot(startParam?: string) {
@@ -18,66 +19,110 @@ function openInBot(startParam?: string) {
 }
 
 type View = "loading" | "has-access" | "pre-trial" | "expired";
+
+type StatusDTO = {
+  has_access?: boolean;
+  status?: "active" | "trial" | "none" | null;
+  until?: string | null;
+  plan?: "week" | "month" | "quarter" | "year" | null;
+  is_auto_renew?: boolean | null;
+};
+
 const nowMs = () => Date.now();
+
+// ---- API base (same as guard.ts) -------------------------------------------
+function normalizeBase(s?: string | null) {
+  if (!s) return "";
+  return s.replace(/\/+$/, "");
+}
+const API_BASE =
+  normalizeBase((import.meta as any)?.env?.VITE_API_BASE) ||
+  normalizeBase(window.localStorage.getItem("VITE_API_BASE")) ||
+  "";
+
+const apiUrl = (path: string) => (API_BASE ? `${API_BASE}${path}` : path);
+
+// ----------------------------------------------------------------------------
 
 export default function Paywall() {
   const nav = useNavigate();
   const loc = useLocation();
-  const redirectingRef = useRef(false);
+  const redirectedRef = useRef(false);
 
   // from=/exercises или /meditations — куда вернуть после подтверждения доступа
   const params = new URLSearchParams(loc.search);
   const from = params.get("from") || "/";
 
-  const [access, setAccess] = useState<Awaited<ReturnType<typeof computeAccess>> | null>(null);
+  const [status, setStatus] = useState<StatusDTO | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // грузим единый снимок доступа
+  // 1) Быстрый снимок — если уже есть доступ, тихо уходим «домой»
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setLoading(true);
-      setErr(null);
       try {
-        const s = await computeAccess();
-        if (!cancelled) setAccess(s);
+        const snap = await ensureAccess({ startTrial: false });
+        if (!cancelled && snap.has_access) {
+          if (!redirectedRef.current) {
+            redirectedRef.current = true;
+            // маленькая задержка, чтобы не мигало
+            setTimeout(() => nav(from, { replace: true }), 10);
+          }
+          return; // не грузим статус — уже редиректим
+        }
+      } catch {
+        // игнор, ниже всё равно попробуем подтянуть статус
+      }
+
+      // 2) Тянем статус для выбора экрана paywall
+      try {
+        setLoading(true);
+        setErr(null);
+        const tg = getTelegramUserId();
+        const u = new URL(apiUrl("/api/payments/status"), window.location.origin);
+        if (tg) u.searchParams.set("tg_user_id", String(tg));
+        const res = await fetch(u.toString(), { credentials: "omit" });
+        if (!res.ok) throw new Error(String(res.status));
+        const dto = (await res.json()) as StatusDTO;
+        if (!cancelled) setStatus(dto);
       } catch (e: any) {
         if (!cancelled) setErr(e?.message || "Не удалось получить статус. Обнови страницу.");
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [from, nav]);
 
-  // маппим на представление
+  // 3) Маппинг статуса на вью
   const view: View = useMemo(() => {
-    if (!access) return "loading";
+    if (loading) return "loading";
+    const s = status || {};
+    const untilMs = s.until ? new Date(s.until).getTime() : 0;
 
-    const subUntilMs = access.subscriptionUntil ? new Date(access.subscriptionUntil).getTime() : 0;
-    const hasSub = !!subUntilMs && subUntilMs > nowMs();
+    const hasByFlag = !!s.has_access;
+    const active = s.status === "active" && untilMs > nowMs();
+    const trial = s.status === "trial" && untilMs > nowMs();
 
-    const trialUntilMs = access.trialUntil ? new Date(access.trialUntil).getTime() : 0;
-    const trialActive = !!access.trialStartedAt && trialUntilMs > nowMs();
+    if (hasByFlag || active || trial) return "has-access";
 
-    if (hasSub || trialActive || access.hasAccess) return "has-access";
+    // если until прошёл — считаем «expired», иначе «pre-trial»
+    if (s.status && s.status !== "none" && untilMs && untilMs <= nowMs()) return "expired";
+    if (s.status === "none") return "pre-trial";
 
-    if (access.trialStartedAt && !trialActive && !hasSub) return "expired";
+    // по умолчанию: до запуска триала
     return "pre-trial";
-  }, [access]);
+  }, [status, loading]);
 
-  // доступ есть — ВОЗВРАЩАЕМ туда, откуда пришли (from), а не на "/"
+  // 4) Если во время показа страницы доступ внезапно появился — мягкий авто-редирект «обратно»
   useEffect(() => {
     if (view !== "has-access") return;
-    if (redirectingRef.current) return;
-    redirectingRef.current = true;
-
-    // маленькая задержка, чтобы не было «мигания» при быстрой загрузке
-    const t = setTimeout(() => {
-      nav(from, { replace: true });
-    }, 10);
-
+    if (redirectedRef.current) return;
+    redirectedRef.current = true;
+    const t = setTimeout(() => nav(from, { replace: true }), 10);
     return () => clearTimeout(t);
   }, [view, from, nav]);
 

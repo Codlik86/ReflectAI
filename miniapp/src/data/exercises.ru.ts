@@ -6,9 +6,6 @@ import type { AAPayload } from "../lib/aa.types";
  * Механика: дыхание / таймеры / списки шагов — совместимы с Exercises.tsx.
  */
 const payload: AAPayload = {
-  locale: "ru",
-  // фиксированная метка, чтобы не ловить гидрацию по времени сборки
-  updatedAt: "2025-11-06T00:00:00.000Z",
   categories: [
     {
       id: "quick",
@@ -19,35 +16,39 @@ const payload: AAPayload = {
           title: "Дыхание 4–6",
           subtitle: "Спокойствие, фокус, расслабление",
           duration: "2–3 минуты",
-          route: "/exercises/breath-46",  // откроет отдельную страницу
+          route: "/exercises/breath-46",
           steps: [
-            { type: "text", html: "<p>Спокойный вдох на 4 секунды и мягкий выдох на 6 секунд. Повторим 12 раз.</p>" }
-          ]
+            {
+              type: "text",
+              html:
+                "<p>Спокойный вдох на 4 секунды и мягкий выдох на 6 секунд. Повторим 12 раз.</p>",
+            },
+          ],
         },
-{
-  id: "box-breath-4-4-4-4",
-  title: "Дыхание 4-4-4-4",
-  subtitle: "Выравниваемся и снижаем напряжение",
-  duration: "2–3 минуты",
-  route: "/exercises/breath-4444",
-  steps: [ { type: "text", html: "<p>Дышим квадратом…</p>" } ],
-},
-{
-  id: "breath-4-7-8",
-  title: "Дыхание 4-7-8",
-  subtitle: "Переходим в спокойный режим",
-  duration: "1–2 минуты",
-  route: "/exercises/breath-478",
-  steps: [ { type: "text", html: "<p>Вдох 4 — пауза 7 — выдох 8…</p>" } ],
-},
-{
-  id: "breath-3-3-3",
-  title: "Дыхание 3-3-3",
-  subtitle: "Быстрый сброс",
-  duration: "1–2 минуты",
-  route: "/exercises/breath-333",
-  steps: [ { type: "text", html: "<p>Вдох 3 — пауза 3 — выдох 3…</p>" } ],
-},
+        {
+          id: "box-breath-4-4-4-4",
+          title: "Дыхание 4-4-4-4",
+          subtitle: "Выравниваемся и снижаем напряжение",
+          duration: "2–3 минуты",
+          route: "/exercises/breath-4444",
+          steps: [{ type: "text", html: "<p>Дышим «квадратом»…</p>" }],
+        },
+        {
+          id: "breath-4-7-8",
+          title: "Дыхание 4-7-8",
+          subtitle: "Переходим в спокойный режим",
+          duration: "1–2 минуты",
+          route: "/exercises/breath-478",
+          steps: [{ type: "text", html: "<p>Вдох 4 — пауза 7 — выдох 8…</p>" }],
+        },
+        {
+          id: "breath-3-3-3",
+          title: "Дыхание 3-3-3",
+          subtitle: "Быстрый сброс",
+          duration: "1–2 минуты",
+          route: "/exercises/breath-333",
+          steps: [{ type: "text", html: "<p>Вдох 3 — пауза 3 — выдох 3…</p>" }],
+        },
         {
           id: "grounding-54321",
           title: "Заземление 5-4-3-2-1",
@@ -119,20 +120,19 @@ const payload: AAPayload = {
           ],
         },
         {
-  id: "bodyscan-mini",
-  title: "Боди-скан (мини)",
-  subtitle: "Просканировать тело от головы до стоп",
-  duration: "6–8 минут",
-  route: "/exercises/body-scan", // откроет отдельную страницу
-  steps: [
-    {
-      type: "text",
-      html:
-        "<p>Устройся удобно и нажми «Начать» — откроется полная версия упражнения на отдельной странице.</p>"
-    }
-  ]
-},
-
+          id: "bodyscan-mini",
+          title: "Боди-скан (мини)",
+          subtitle: "Просканировать тело от головы до стоп",
+          duration: "6–8 минут",
+          route: "/exercises/body-scan",
+          steps: [
+            {
+              type: "text",
+              html:
+                "<p>Устройся удобно и нажми «Начать» — откроется полная версия упражнения на отдельной странице.</p>",
+            },
+          ],
+        },
       ],
     },
 
@@ -141,13 +141,13 @@ const payload: AAPayload = {
       title: "Мысли и дистанцирование",
       items: [
         {
-          id: "ThoughtLabeling",
+          id: "thought-labeling",
           title: "Маркировка мыслей",
           subtitle: "Отмечаем и отпускаем мысли без споров с ними",
           duration: "7–12 минут",
           route: "/exercises/thought-labeling",
-          steps: [] // для списка не обязателен, если карточка ведёт на отдельную страницу
-        }
+          steps: [],
+        },
       ],
     },
 

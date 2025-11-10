@@ -23,38 +23,43 @@ import Settings from "./pages/Settings";
 import Paywall from "./pages/Paywall";
 import MeditationPlayer from "./pages/MeditationPlayer";
 
-// 👇 добавлено: безопасная инициализация Telegram WebApp SDK
-import { initTelegram } from "./lib/telegram";
-initTelegram(); // вызвать ОДИН раз на старте приложения
+import "./index.css";
 
-const router = createBrowserRouter([
-  {
-    path: "/",
-    element: <App />,
-    children: [
-      { index: true, element: <Home /> },
-      { path: "exercises", element: <Exercises /> },
+// ВАЖНО: initTelegram вызывается один раз внутри App.tsx
 
-      // Новые маршруты упражнений
-      { path: "exercises/pmr", element: <PMR /> },
-      { path: "exercises/grounding", element: <Grounding54321 /> },
-      { path: "exercises/breath-46", element: <Breath46 /> },
-      { path: "exercises/breath-4444", element: <Breath4444 /> },
-      { path: "exercises/breath-478", element: <Breath478 /> },
-      { path: "exercises/body-scan", element: <BodyScan /> },
-      { path: "exercises/thought-labeling", element: <ThoughtLabeling /> },
-      { path: "exercises/breath-333", element: <Breath333 /> },
+const basename = (import.meta as any)?.env?.BASE_URL || "/";
 
-      { path: "meditations", element: <Meditations /> },
-      { path: "meditations/:id", element: <MeditationPlayer /> },
+const router = createBrowserRouter(
+  [
+    {
+      path: "/",
+      element: <App />,
+      children: [
+        { index: true, element: <Home /> },
+        { path: "exercises", element: <Exercises /> },
 
-      // новые
-      { path: "about", element: <About /> },
-      { path: "settings", element: <Settings /> },
-      { path: "paywall", element: <Paywall /> },
-    ],
-  },
-]);
+        // Маршруты упражнений
+        { path: "exercises/pmr", element: <PMR /> },
+        { path: "exercises/grounding", element: <Grounding54321 /> },
+        { path: "exercises/breath-46", element: <Breath46 /> },
+        { path: "exercises/breath-4444", element: <Breath4444 /> },
+        { path: "exercises/breath-478", element: <Breath478 /> },
+        { path: "exercises/body-scan", element: <BodyScan /> },
+        { path: "exercises/thought-labeling", element: <ThoughtLabeling /> },
+        { path: "exercises/breath-333", element: <Breath333 /> },
+
+        { path: "meditations", element: <Meditations /> },
+        { path: "meditations/:id", element: <MeditationPlayer /> },
+
+        // Прочее
+        { path: "about", element: <About /> },
+        { path: "settings", element: <Settings /> },
+        { path: "paywall", element: <Paywall /> },
+      ],
+    },
+  ],
+  { basename }
+);
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

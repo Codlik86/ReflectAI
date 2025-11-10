@@ -1,11 +1,11 @@
-// src/components/BackBar.tsx
+import * as React from "react";
 import { Link } from "react-router-dom";
 
 type Props = {
   title: string;
-  to?: string;                // необязательно
-  onBack?: () => void;        // если передан — используем его вместо Link
-  right?: React.ReactNode;    // опционально что-то справа
+  to?: string;                // если задан — используем Link
+  onBack?: () => void;        // если задан — приоритетнее Link
+  right?: React.ReactNode;    // опциональный слот справа
 };
 
 export default function BackBar({ title, to, onBack, right }: Props) {
@@ -17,7 +17,7 @@ export default function BackBar({ title, to, onBack, right }: Props) {
         className="h-10 w-10 rounded-full flex items-center justify-center select-none"
         aria-label="Назад"
       >
-        <span className="text-[20px] leading-none">←</span>
+        <span aria-hidden className="text-[20px] leading-none">←</span>
       </button>
     ) : to ? (
       <Link
@@ -25,7 +25,7 @@ export default function BackBar({ title, to, onBack, right }: Props) {
         className="h-10 w-10 rounded-full flex items-center justify-center select-none"
         aria-label="Назад"
       >
-        <span className="text-[20px] leading-none">←</span>
+        <span aria-hidden className="text-[20px] leading-none">←</span>
       </Link>
     ) : (
       <span className="h-10 w-10" />
@@ -38,9 +38,13 @@ export default function BackBar({ title, to, onBack, right }: Props) {
           <Left />
         </div>
 
-        {/* Заголовок — прижать к левому краю, как в макете, с 20px отступом */}
-        <div className="text-[18px] font-medium text-ink-900">
-          {title}
+        {/* Заголовок — прижат влево, с усечением, чтобы не «прыгала» таблетка */}
+        <div
+          className="flex-1 min-w-0 text-[18px] font-medium text-ink-900"
+          role="heading"
+          aria-level={1}
+        >
+          <span className="block truncate">{title}</span>
         </div>
 
         <div className="ml-auto pr-4">{right}</div>

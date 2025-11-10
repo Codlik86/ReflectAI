@@ -1,3 +1,4 @@
+# app/api/payments.py
 from __future__ import annotations
 
 import os
@@ -8,7 +9,7 @@ import hashlib
 from typing import Any, Optional, Literal, Dict, cast
 
 import httpx
-from fastapi import APIRouter, Request, HTTPException, Header
+from fastapi import APIRouter, Request, HTTPException, Header, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +27,7 @@ YK_SHOP_ID = (os.getenv("YK_SHOP_ID") or "").strip()                   # shopId 
 YK_SECRET_KEY = (os.getenv("YK_SECRET_KEY") or "").strip()             # секретный ключ API для /create
 MINIAPP_BASE = (os.getenv("MINIAPP_BASE") or "").rstrip("/")           # напр.: https://pomni-miniapp.vercel.app
 
-# Прайсы (RUB) — при необходимости поменяй
+# Прайсы (RUB)
 PRICES_RUB: Dict[str, str] = {
     "week": "499.00",
     "month": "1190.00",
@@ -379,13 +380,22 @@ async def list_plans():
 # 3) Статус доступа/подписки (для MiniApp Paywall)
 # ==============================
 
-from fastapi import Query  # использую только здесь
-
 def _iso(dtobj) -> Optional[str]:
     try:
         return dtobj.astimezone(None).isoformat()
     except Exception:
         return None
+
+def _trial_window(started, *, days: int = 5):
+    """Вернёт (is_active, expires_at|None) для окна триала."""
+    import datetime as dt
+    if not started:
+        return False, None
+    try:
+        expires = started + dt.timedelta(days=days)
+        return (expires > _utcnow()), expires
+    except Exception:
+        return False, None
 
 async def _load_user(session: AsyncSession, *, user_id: Optional[int], tg_user_id: Optional[int]):
     from app.db.models import User  # type: ignore
@@ -396,33 +406,22 @@ async def _load_user(session: AsyncSession, *, user_id: Optional[int], tg_user_i
         u = (await session.execute(select(User).where(User.tg_id == int(tg_user_id)))).scalar_one_or_none()
     return u
 
-def _trial_active(u, now) -> bool:
-    """
-    Пытаемся мягко определить активный триал.
-    Считаем 5 дней с момента trial_started_at, если поле есть.
-    """
-    import datetime as dt
-    started = getattr(u, "trial_started_at", None)
-    if not started:
-        return False
-    try:
-        return (started + dt.timedelta(days=5)) > now
-    except Exception:
-        return False
-
 @router.get("/status")
 async def payments_status(
     user_id: Optional[int] = Query(None, description="users.id (внутренний id)"),
     tg_user_id: Optional[int] = Query(None, description="Telegram id (users.tg_id)"),
+    start_trial: bool = Query(False, description="Авто-старт триала (delayed trial)"),
 ):
     """
     Универсальный статус доступа для мини-аппа.
     Возвращает:
       - has_access: bool
       - plan: str | None
-      - status: str | None
-      - until: ISO8601 | None
+      - status: "active" | "trial" | None
+      - until: ISO8601 | None  (подписка ИЛИ триал)
       - is_auto_renew: bool | None
+      - trial_started_at: ISO | None
+      - trial_expires_at: ISO | None
     """
     if user_id is None and tg_user_id is None:
         raise HTTPException(status_code=400, detail="provide user_id or tg_user_id")
@@ -430,32 +429,52 @@ async def payments_status(
     now = _utcnow()
     async with async_session() as _s:
         session = cast(AsyncSession, _s)
-        from app.db.models import Subscription  # type: ignore
+        from app.db.models import User, Subscription  # type: ignore
 
         u = await _load_user(session, user_id=user_id, tg_user_id=tg_user_id)
         if not u:
             raise HTTPException(status_code=404, detail="user not found")
 
+        # подписка
         sub = (await session.execute(
             select(Subscription).where(Subscription.user_id == u.id)
         )).scalar_one_or_none()
 
         plan = getattr(sub, "plan", None)
-        status = getattr(sub, "status", None)
+        sub_status = getattr(sub, "status", None)
         until = getattr(sub, "subscription_until", None)
         is_auto = getattr(sub, "is_auto_renew", None)
+        has_sub_access = bool(until and sub_status == "active" and until > now)
 
-        # доступ: активная подписка или активный триал
-        has_sub_access = bool(until and status == "active" and until > now)
-        has_trial = _trial_active(u, now)
-        has_access = has_sub_access or has_trial
+        # триал
+        started = getattr(u, "trial_started_at", None)
+        trial_active, trial_expires_at = _trial_window(started)
+
+        # delayed trial автозапуск (если попросили и доступа ещё нет)
+        if start_trial and (not has_sub_access) and (not trial_active):
+            # условие на принятие политики можно добавить при необходимости:
+            # if getattr(u, "policy_accepted_at", None):
+            from sqlalchemy import update as sa_update
+            await session.execute(
+                sa_update(User).where(User.id == u.id).values(trial_started_at=now)
+            )
+            await session.commit()
+            started = now
+            trial_active, trial_expires_at = _trial_window(started)
+
+        has_access = bool(has_sub_access or trial_active)
+
+        # итоговая «until» — от подписки, иначе от триала
+        unified_until = until if has_sub_access else trial_expires_at
 
         return {
             "has_access": has_access,
             "plan": plan,
-            "status": status if has_sub_access else ("trial" if has_trial else status),
-            "until": _iso(until) if until else None,
+            "status": sub_status if has_sub_access else ("trial" if trial_active else sub_status),
+            "until": _iso(unified_until) if unified_until else None,
             "is_auto_renew": bool(is_auto) if is_auto is not None else None,
+            "trial_started_at": _iso(started) if started else None,
+            "trial_expires_at": _iso(trial_expires_at) if trial_expires_at else None,
         }
 
 # Доп. алиас: совместимость с ожиданиями старого фронта
@@ -463,5 +482,6 @@ async def payments_status(
 async def access_status_alias(
     user_id: Optional[int] = Query(None),
     tg_user_id: Optional[int] = Query(None),
+    start_trial: bool = Query(False),
 ):
-    return await payments_status(user_id=user_id, tg_user_id=tg_user_id)
+    return await payments_status(user_id=user_id, tg_user_id=tg_user_id, start_trial=start_trial)

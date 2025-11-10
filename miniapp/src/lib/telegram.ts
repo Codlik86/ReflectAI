@@ -3,9 +3,14 @@
 
 import WebApp from "@twa-dev/sdk";
 
-/** Безопасная инициализация: вне Telegram — не падаем */
+let _inited = false;
+
+/** Безопасная, идемпотентная инициализация: вне Telegram — не падаем */
 export function initTelegram(): void {
+  if (_inited) return;
+  _inited = true;
   try {
+    // ready/expand могут бросать вне Telegram — поэтому в try/catch
     WebApp.ready?.();
     WebApp.expand?.();
   } catch {
@@ -15,8 +20,13 @@ export function initTelegram(): void {
 
 /** Достаём "сырое" API Telegram (если есть) */
 export function getTelegram() {
+  // в вебе объекта может не быть — вернуть undefined
   const tg = (window as any)?.Telegram?.WebApp as typeof WebApp | undefined;
-  if (tg && !tg.isExpanded) tg.expand?.();
+  try {
+    if (tg && !tg.isExpanded) tg.expand?.();
+  } catch {
+    /* noop */
+  }
   return tg;
 }
 
@@ -75,6 +85,7 @@ export function getStartParam(): string | null {
 
 function sanitizeStart(v: string): string {
   try {
+    // decodeURIComponent на случай, если пришёл код с экранированием
     return decodeURIComponent(v).trim();
   } catch {
     return v.trim();
@@ -146,13 +157,17 @@ export function showMainButton(text = "Открыть бот") {
     const tg = getTelegram();
     tg?.MainButton?.setText?.(text);
     tg?.MainButton?.show?.();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
 }
 
 export function hideMainButton() {
   try {
     getTelegram()?.MainButton?.hide?.();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
 }
 
 export function setBackButton(enabled: boolean, handler?: () => void) {
@@ -167,7 +182,9 @@ export function setBackButton(enabled: boolean, handler?: () => void) {
       tg.BackButton?.hide?.();
       if (handler) tg.BackButton?.offClick?.(handler);
     }
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
 }
 
 export function openExternalLink(url: string) {
@@ -181,7 +198,7 @@ export function openExternalLink(url: string) {
 }
 
 /* =========================
-   ДОБАВЛЕНО: raw initData + userId
+   ДОПОЛНИТЕЛЬНО: raw initData + userId
    ========================= */
 
 /** Сырые initData (строка) для подписи запросов на бэк */

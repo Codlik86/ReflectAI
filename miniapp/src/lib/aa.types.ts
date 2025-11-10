@@ -1,4 +1,4 @@
-// src/lib/aa.types.ts
+// Канон типов для упражнений/шагов Mini App
 
 export type AAStep =
   | { type: "text"; html: string }
@@ -6,12 +6,12 @@ export type AAStep =
   | { type: "timer"; seconds: number; label?: string }
   | {
       type: "breath";
-      label?: string;
       inhale: number;
       hold?: number;
       exhale: number;
-      hold2?: number;     // ← вторая пауза (для 4-4-4-4)
+      hold2?: number;
       cycles?: number;
+      label?: string;
     };
 
 export type AAExercise = {
@@ -20,17 +20,16 @@ export type AAExercise = {
   subtitle?: string;
   duration?: string;
   steps: AAStep[];
-  route?: string;         // если есть — карточка ведёт на отдельную страницу
+  /** Если задан — карточка ведёт на отдельный роут, а не на «деталку» */
+  route?: string;
+};
+
+export type AACategory = {
+  id: string;
+  title: string;
+  items: AAExercise[];
 };
 
 export type AAPayload = {
-  // ↓ новые опциональные поля — чтобы не ругался TS
-  locale?: string;
-  updatedAt?: string;
-
-  categories: {
-    id: string;
-    title: string;
-    items: AAExercise[];
-  }[];
+  categories: AACategory[];
 };

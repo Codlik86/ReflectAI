@@ -21,7 +21,7 @@ export default function Exercises() {
 
     (async () => {
       try {
-        const snap = await ensureAccess(false); // без автозапуска триала
+        const snap = await ensureAccess({ startTrial: false }); // без автозапуска триала
         if (!cancelled && !snap.has_access) {
           navigate(`/paywall?from=${encodeURIComponent("/exercises")}`, { replace: true });
         }
@@ -32,7 +32,9 @@ export default function Exercises() {
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [navigate]);
 
   // ====== Список упражнений ======

@@ -102,7 +102,8 @@ export default function Meditations() {
 
     (async () => {
       try {
-        const snap = await ensureAccess(false); // без автозапуска триала
+        // без автозапуска триала
+        const snap = await ensureAccess({ startTrial: false });
         if (!cancelled && !snap.has_access) {
           navigate(`/paywall?from=${encodeURIComponent("/meditations")}`, { replace: true });
         }
@@ -113,7 +114,9 @@ export default function Meditations() {
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [navigate]);
 
   return (

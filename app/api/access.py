@@ -1,7 +1,7 @@
 # app/api/access.py
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends
@@ -14,109 +14,165 @@ from app.db.models import User, Subscription
 
 router = APIRouter(prefix="/api/access", tags=["access"])
 
-# ---- DB dependency (унифицировано под наш проект) --------------------------
+TRIAL_DAYS = 5  # канонично: 5-дневный отложенный триал
+
+
+# ---- DB dependency ----------------------------------------------------------
 async def get_db() -> AsyncIterator[AsyncSession]:
     async with async_session() as s:
         yield s
 
-# ---- Схемы для POST /check -------------------------------------------------
+
+# ---- Схемы -----------------------------------------------------------------
 class AccessCheckIn(BaseModel):
-    tg_user_id: int  # это именно Telegram id пользователя (users.tg_id)
+    tg_user_id: int  # Telegram id пользователя (users.tg_id)
+    start_trial: bool | None = None  # опционально: запустить триал (если не запущен)
 
-class AccessCheckOut(BaseModel):
-    ok: bool
+
+class AccessStatusOut(BaseModel):
+    has_access: bool
+    status: str  # "active" | "trial" | "none"
     until: datetime | None = None
-    has_auto_renew: bool | None = None
+    plan: str | None = None  # "week" | "month" | "quarter" | "year" | None
+    is_auto_renew: bool | None = None
 
-# ---- Вспомогательная функция ----------------------------------------------
-async def _status_for_user(
+
+class AccessCheckOut(AccessStatusOut):
+    ok: bool
+
+
+# ---- Вспомогательная бизнес-логика -----------------------------------------
+def _trial_until(user: User | None) -> datetime | None:
+    if not user or not getattr(user, "trial_started_at", None):
+        return None
+    return user.trial_started_at + timedelta(days=TRIAL_DAYS)
+
+
+async def _compose_status(
     session: AsyncSession,
     user: User | None,
-) -> dict:
+) -> AccessStatusOut:
     now = datetime.now(timezone.utc)
-    plan = None
-    trial_started_at = getattr(user, "trial_started_at", None) if user else None
-    subscription_until = None
+    plan: str | None = None
+    is_auto_renew: bool | None = None
+    until: datetime | None = None
+    status = "none"
     has_access = False
 
     if user:
-        sub = (await session.execute(
-            select(Subscription).where(Subscription.user_id == user.id)
-        )).scalar_one_or_none()
+        # Подписка
+        sub = (
+            await session.execute(
+                select(Subscription).where(Subscription.user_id == user.id)
+            )
+        ).scalar_one_or_none()
 
-        if sub:
+        if sub and sub.subscription_until:
             plan = sub.plan
-            subscription_until = sub.subscription_until
-            has_access = bool(subscription_until and subscription_until > now)
+            is_auto_renew = sub.is_auto_renew
+            if sub.subscription_until > now:
+                until = sub.subscription_until
+                status = "active"
+                has_access = True
 
-    return {
-        "has_access": has_access,
-        "plan": plan,
-        "trial_started_at": trial_started_at,
-        "subscription_until": subscription_until,
-    }
+        # Если подписка не активна — пытаемся дать доступ по триалу
+        if not has_access:
+            t_until = _trial_until(user)
+            if t_until and t_until > now:
+                until = t_until
+                status = "trial"
+                has_access = True
 
-# ---- GET /api/access/status  ----------------------------------------------
-@router.get("/status")
+    return AccessStatusOut(
+        has_access=has_access,
+        status=status,
+        until=until,
+        plan=plan,
+        is_auto_renew=is_auto_renew,
+    )
+
+
+# ---- GET /api/access/status -------------------------------------------------
+@router.get("/status", response_model=AccessStatusOut)
 async def get_access_status(
-    user_id: int | None = None,       # внутренний users.id (для быстрого теста)
-    tg_id: int | None = None,         # альтернативно можно передать Telegram id
+    user_id: int | None = None,        # users.id (для тестов/админок)
+    tg_user_id: int | None = None,     # Telegram id (основной путь)
+    tg_id: int | None = None,          # b/c совместимость (если на фронте оставался tg_id)
     session: AsyncSession = Depends(get_db),
 ):
     user: User | None = None
-
     if user_id is not None:
-        user = (await session.execute(
-            select(User).where(User.id == user_id)
-        )).scalar_one_or_none()
-    elif tg_id is not None:
-        user = (await session.execute(
-            select(User).where(User.tg_id == tg_id)   # ВАЖНО: поле называется tg_id
-        )).scalar_one_or_none()
+        user = (
+            await session.execute(select(User).where(User.id == user_id))
+        ).scalar_one_or_none()
+    else:
+        # принимаем tg_user_id или устаревший tg_id
+        the_tg = tg_user_id if tg_user_id is not None else tg_id
+        if the_tg is not None:
+            user = (
+                await session.execute(select(User).where(User.tg_id == the_tg))
+            ).scalar_one_or_none()
 
-    return await _status_for_user(session, user)
+    return await _compose_status(session, user)
 
-# ---- POST /api/access/check  ----------------------------------------------
+
+# ---- POST /api/access/check -------------------------------------------------
 @router.post("/check", response_model=AccessCheckOut)
 async def check_access(
     payload: AccessCheckIn,
     session: AsyncSession = Depends(get_db),
 ):
-    # Ищем по Telegram id (tg_id), а не выдуманному tg_user_id в модели
-    user = (await session.execute(
-        select(User).where(User.tg_id == payload.tg_user_id)  # <-- правильное поле
-    )).scalar_one_or_none()
+    # Ищем по Telegram id (users.tg_id)
+    user = (
+        await session.execute(
+            select(User).where(User.tg_id == payload.tg_user_id)
+        )
+    ).scalar_one_or_none()
 
-    now = datetime.now(timezone.utc)
     if not user:
-        return AccessCheckOut(ok=False)
+        return AccessCheckOut(
+            ok=False,
+            has_access=False,
+            status="none",
+            until=None,
+            plan=None,
+            is_auto_renew=None,
+        )
 
-    sub = (await session.execute(
-        select(Subscription).where(Subscription.user_id == user.id)
-    )).scalar_one_or_none()
+    # Опционально: авто-старт триала (delayed trial) по запросу клиента
+    # Важно: это не «первое осмысленное действие», но фронту иногда удобно
+    # инициировать запуск (например, по явному действию пользователя).
+    if payload.start_trial and not getattr(user, "trial_started_at", None):
+        await session.execute(
+            text("UPDATE users SET trial_started_at = CURRENT_TIMESTAMP WHERE id = :uid"),
+            {"uid": int(user.id)},
+        )
+        await session.commit()
+        # user.trial_started_at в ORM может быть не обновлён — статус ниже посчитается по БД
 
-    if sub and sub.subscription_until and sub.subscription_until > now:
-        return AccessCheckOut(ok=True, until=sub.subscription_until, has_auto_renew=sub.is_auto_renew)
+    status_out = await _compose_status(session, user)
+    return AccessCheckOut(ok=True, **status_out.dict())
 
-    return AccessCheckOut(ok=False, until=sub.subscription_until if sub else None)
 
-# --- POST /api/access/accept -----------------------------------------------
+# ---- POST /api/access/accept ------------------------------------------------
 class AccessAcceptIn(BaseModel):
     tg_user_id: int
+
 
 @router.post("/accept")
 async def accept_policy(
     payload: AccessAcceptIn,
     session: AsyncSession = Depends(get_db),
 ):
-    user = (await session.execute(
-        select(User).where(User.tg_id == payload.tg_user_id)
-    )).scalar_one_or_none()
+    user = (
+        await session.execute(select(User).where(User.tg_id == payload.tg_user_id))
+    ).scalar_one_or_none()
     if not user:
         return {"ok": False, "error": "user_not_found"}
+
     await session.execute(
         text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"),
-        {"uid": int(user.id)}
+        {"uid": int(user.id)},
     )
     await session.commit()
     return {"ok": True}

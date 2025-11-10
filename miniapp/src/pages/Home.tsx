@@ -12,37 +12,56 @@ export default function Home() {
     return `${base}${p}`.replace(/\/+/, "/");
   }, []);
 
-  // универсальный гард: проверяем доступ → либо идём в path, либо на paywall
-  const guardTo = React.useCallback(
-    async (path: string) => {
-      try {
-        const snap = await ensureAccess(true); // автостарт триала по клику из Home
-        if (snap.has_access) {
-          navigate(path);
-        } else {
-          const ret = encodeURIComponent(path);
-          navigate(`/paywall?from=${ret}`);
-        }
-      } catch {
-        const ret = encodeURIComponent(path);
-        navigate(`/paywall?from=${ret}`);
-      }
+  // защита от повторных кликов/дубль-навигации
+  const busyRef = React.useRef(false);
+  const navigatedRef = React.useRef(false);
+  const safeNavigate = React.useCallback(
+    (to: string) => {
+      if (navigatedRef.current) return;
+      navigatedRef.current = true;
+      navigate(to);
+      // снимем флаг чуть позже, чтобы не словить мгновенный дубль
+      setTimeout(() => (navigatedRef.current = false), 300);
     },
     [navigate]
+  );
+
+  // универсальный гард: проверяем доступ → либо идём в path, либо на paywall
+  // ВАЖНО: со страницы Home НЕ запускаем триал автоматически.
+  const guardTo = React.useCallback(
+    async (path: string) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      try {
+        const snap = await ensureAccess({ startTrial: false });
+        if (snap.has_access) {
+          safeNavigate(path);
+        } else {
+          safeNavigate(`/paywall?from=${encodeURIComponent(path)}`);
+        }
+      } catch {
+        safeNavigate(`/paywall?from=${encodeURIComponent(path)}`);
+      } finally {
+        // лёгкая задержка, чтобы не провоцировать повтор
+        setTimeout(() => (busyRef.current = false), 150);
+      }
+    },
+    [safeNavigate]
   );
 
   const onExercises = () => guardTo("/exercises");
   const onMeditations = () => guardTo("/meditations");
 
+  // «Поговорить»: считаем осмысленным действием → разрешаем автозапуск триала
   const onTalk = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     try {
-      const snap = await ensureAccess(true);
+      const snap = await ensureAccess({ startTrial: true });
       if (!snap.has_access) {
-        const ret = encodeURIComponent("/");
-        navigate(`/paywall?from=${ret}`);
+        safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
         return;
       }
-      // доступ есть — открываем бота
       const bot = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
       const url = `https://t.me/${bot}?start=miniapp`;
       const wa = (window as any)?.Telegram?.WebApp;
@@ -53,8 +72,9 @@ export default function Home() {
         window.open(url, "_blank", "noopener,noreferrer");
       }
     } catch {
-      const ret = encodeURIComponent("/");
-      navigate(`/paywall?from=${ret}`);
+      safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
+    } finally {
+      setTimeout(() => (busyRef.current = false), 150);
     }
   };
 

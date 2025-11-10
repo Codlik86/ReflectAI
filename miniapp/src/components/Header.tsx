@@ -1,7 +1,23 @@
-// src/components/Header.tsx
-import React from "react";
-// Положи сюда свой файл 24x24 (png/svg/webp) и поправь имя, если нужно
-import logoUrl from "../assets/logo pomni.svg";
+import * as React from "react";
+import { getTelegram } from "../lib/telegram";
+
+// Для логотипа используем public/ и BASE_URL — так не будет проблем с импортом файлов и пробелами
+const base = (import.meta as any)?.env?.BASE_URL || "/";
+const pub = (p: string) => `${base}${p}`.replace(/\/+/, "/");
+
+// Имя бота — из ENV, с дефолтом
+const BOT_USERNAME = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
+
+function openBot(start?: string) {
+  const url = `https://t.me/${BOT_USERNAME}${start ? `?start=${encodeURIComponent(start)}` : ""}`;
+  try {
+    const tg = getTelegram() as any;
+    if (tg?.openTelegramLink) tg.openTelegramLink(url);
+    else window.open(url, "_blank", "noopener,noreferrer");
+  } catch {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
 
 export default function Header() {
   return (
@@ -10,23 +26,29 @@ export default function Header() {
                  flex items-center justify-between select-none"
     >
       <div className="flex items-center gap-2">
-        {/* Логотип. Если файла нет — блок просто схлопнется и останется текст */}
-        {logoUrl ? (
-          <img
-            src={logoUrl}
-            alt="Помни"
-            width={24}
-            height={24}
-            className="w-6 h-6 object-contain"
-            draggable={false}
-          />
-        ) : null}
+        {/* Логотип из public/ (logo-pomni.svg) */}
+        <img
+          src={pub("logo-pomni.svg")}
+          alt="Помни"
+          width={24}
+          height={24}
+          className="w-6 h-6 object-contain"
+          draggable={false}
+          onError={(e) => {
+            // если файла нет — скрываем img, оставляем только текст
+            (e.currentTarget as HTMLImageElement).style.display = "none";
+          }}
+        />
         <div className="text-[16px] font-semibold">ПОМНИ</div>
       </div>
 
-      <a href="#" className="text-[16px]">
+      <button
+        type="button"
+        onClick={() => openBot("miniapp")}
+        className="text-[16px] font-medium text-ink-900 hover:opacity-80 active:opacity-70"
+      >
         Открыть бот
-      </a>
+      </button>
     </header>
   );
 }

@@ -7,7 +7,7 @@ import { getStartParam } from "./telegram";
 const NAV_MAP: Record<string, string> = {
   // медитации
   "med": "/meditations",
-  "med-sleep": "/meditations", // при желании можно сделать /meditations/:id
+  "med-sleep": "/meditations",
 
   // упражнения
   "ex": "/exercises",
@@ -29,6 +29,8 @@ function normalize(code: string) {
   return code.trim();
 }
 
+const START_ROUTED_KEY = "START_ROUTED_CODE";
+
 /** Хук: единожды читает start-код и, если нужно, делает навигацию */
 export function useStartRouter() {
   const navigate = useNavigate();
@@ -37,25 +39,41 @@ export function useStartRouter() {
   useEffect(() => {
     if (done.current) return;
 
+    // Анти-дубль для StrictMode и повторных маунтов
+    const already = sessionStorage.getItem(START_ROUTED_KEY);
+    if (already === "1") {
+      done.current = true;
+      return;
+    }
+
     const raw = getStartParam();
     if (!raw) return;
 
     const key = normalize(raw);
     const dest = NAV_MAP[key];
 
-    if (dest) {
-      navigate(dest, { replace: true });
+    // Помечаем ВПЕРЕД, чтобы навигация/ремонт не вызвали повтор
+    const markDone = () => {
       done.current = true;
+      sessionStorage.setItem(START_ROUTED_KEY, "1");
+    };
+
+    if (dest) {
+      markDone();
+      navigate(dest, { replace: true });
       return;
     }
 
-    // Если это рекламный код — можно просто оставить на главной,
-    // но добавить query (?ad=B01a) — пригодится для сбора атрибуции
+    // Если это рекламный код — оставляем на текущем экране,
+    // но аккуратно добавляем ?ad=... без лишних перерисовок
     if (looksLikeAdCode(key)) {
       const url = new URL(window.location.href);
-      url.searchParams.set("ad", key);
-      navigate(`${url.pathname}${url.search}`, { replace: true });
-      done.current = true;
+      if (url.searchParams.get("ad") !== key) {
+        url.searchParams.set("ad", key);
+        // replace без смены роута — минимальная мутация истории
+        window.history.replaceState({}, "", `${url.pathname}${url.search}`);
+      }
+      markDone();
     }
   }, [navigate]);
 }

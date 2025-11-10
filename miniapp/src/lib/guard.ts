@@ -6,6 +6,7 @@ type StatusDTO = {
   status?: "active" | "trial" | "none" | null;
   until?: string | null;
   plan?: "week" | "month" | "quarter" | "year" | null;
+  has_access?: boolean;
 };
 
 export type AccessSnapshot = {
@@ -15,17 +16,24 @@ export type AccessSnapshot = {
   until: string | null;
 };
 
+// ====== API base detection ======
+function normalizeBase(s?: string | null) {
+  if (!s) return "";
+  return s.replace(/\/+$/, "");
+}
 const API_BASE =
-  (import.meta.env.VITE_API_BASE?.replace(/\/$/, "") ||
-    window.localStorage.getItem("VITE_API_BASE")?.replace(/\/$/, "") ||
-    "");
+  normalizeBase((import.meta as any)?.env?.VITE_API_BASE) ||
+  normalizeBase(window.localStorage.getItem("VITE_API_BASE")) ||
+  ""; // пусто = same-origin
+
+const apiUrl = (path: string) => (API_BASE ? `${API_BASE}${path}` : path);
 
 // ====== кэши/ограничители ======
-const POSITIVE_CACHE_KEY = "ACCESS_OK_UNTIL";     // ms timestamp
-const NEGATIVE_CACHE_KEY = "ACCESS_NO_UNTIL";     // ms timestamp (короткий)
-const COOLDOWN_MS = 400;                          // не дергать чаще, чем раз в 400мс
-const POSITIVE_CACHE_MS = 60_000;                 // «зелёное» окно 60с
-const NEGATIVE_CACHE_MS = 1_000;                  // анти-луп на 1с
+const POSITIVE_CACHE_KEY = "ACCESS_OK_UNTIL"; // ms timestamp
+const NEGATIVE_CACHE_KEY = "ACCESS_NO_UNTIL"; // ms timestamp
+const COOLDOWN_MS = 400;
+const POSITIVE_CACHE_MS = 60_000; // 60s «зелёный»
+const NEGATIVE_CACHE_MS = 5_000; // 5s «красный» (анти-луп)
 
 let inflight: Promise<AccessSnapshot> | null = null;
 let lastCallAt = 0;
@@ -41,15 +49,15 @@ const getTS = (key: string) => Number(sessionStorage.getItem(key) || "0");
 const putTS = (key: string, msAhead: number) =>
   sessionStorage.setItem(key, String(nowMs() + msAhead));
 
-function getPositiveCachedOk(): boolean {
+function positiveCached(): boolean {
   return getTS(POSITIVE_CACHE_KEY) > nowMs();
 }
-function getNegativeCachedNo(): boolean {
+function negativeCached(): boolean {
   return getTS(NEGATIVE_CACHE_KEY) > nowMs();
 }
 
 /** ждём появления tg_id (WebApp иногда даёт его с задержкой) */
-async function waitTelegramId(maxTries = 5, delayMs = 120): Promise<number | null> {
+async function waitTelegramId(maxTries = 12, delayMs = 120): Promise<number | null> {
   for (let i = 0; i < maxTries; i++) {
     const id = getTelegramUserId();
     if (id) return id;
@@ -58,83 +66,121 @@ async function waitTelegramId(maxTries = 5, delayMs = 120): Promise<number | nul
   return getTelegramUserId();
 }
 
-/** Единый гард. Возвращает снимок доступа. Дедупликация + кэши. */
-export async function ensureAccess(autoStartTrial: boolean = true): Promise<AccessSnapshot> {
-  // 1) короткий «анти-луп», если нас уже недавно трогали
+/**
+ * Единый гард. Возвращает снимок доступа. Без редиректов.
+ * Совместим с двумя сигнатурами:
+ *  - ensureAccess(false)                // не запускать триал
+ *  - ensureAccess({ startTrial:false }) // то же
+ */
+export async function ensureAccess(
+  opts: boolean | { startTrial?: boolean } = true
+): Promise<AccessSnapshot> {
+  const autoStartTrial = typeof opts === "boolean" ? opts : opts.startTrial ?? true;
+
+  // 1) короткий «анти-луп»
   const since = nowMs() - lastCallAt;
   if (since < COOLDOWN_MS) {
-    // отдаём, чем можем: если есть положительный кэш — «проход»,
-    // если отрицательный — «нет доступа», иначе продолжаем.
-    if (getPositiveCachedOk()) {
+    if (positiveCached()) {
       return { ok: true, has_access: true, reason: "subscription", until: null };
     }
-    if (getNegativeCachedNo()) {
+    if (negativeCached()) {
       return { ok: true, has_access: false, reason: "none", until: null };
     }
   }
   lastCallAt = nowMs();
 
-  // 2) если уже есть выполняющийся запрос — возвращаем его (без параллельных дублей)
+  // 2) single-flight
   if (inflight) return inflight;
 
-  inflight = (async () => {
-    // 3) быстрый «зелёный» кэш (после подтверждённого доступа)
-    if (getPositiveCachedOk()) {
+  inflight = (async (): Promise<AccessSnapshot> => {
+    // быстрые кэши
+    if (positiveCached()) {
       return { ok: true, has_access: true, reason: "subscription", until: null };
     }
-
-    // 4) быстрый «красный» кэш (короткий, защищает от петель)
-    if (getNegativeCachedNo()) {
+    if (negativeCached()) {
       return { ok: true, has_access: false, reason: "none", until: null };
     }
 
     const tg = await waitTelegramId();
-    if (!API_BASE || !tg) {
-      // сетевой/иниц. сбой — не валим пользователя, но ставим короткий «красный» кэш
+    if (!tg) {
       putTS(NEGATIVE_CACHE_KEY, NEGATIVE_CACHE_MS);
       return { ok: false, has_access: false, reason: "none", until: null };
     }
 
-    // ВАЖНО: оставляем твой эндпойнт как есть
-    const url = new URL(`${API_BASE}/api/payments/status`);
-    url.searchParams.set("tg_user_id", String(tg));
-    if (autoStartTrial) url.searchParams.set("start_trial", "1");
-
-    let dto: StatusDTO | null = null;
+    // 3) основной статус: GET /api/payments/status?tg_user_id=...(&start_trial=1)
     try {
-      const res = await fetch(url.toString(), { credentials: "omit" });
-      if (!res.ok) throw new Error(String(res.status));
-      dto = (await res.json()) as StatusDTO;
-    } catch {
-      // если положительный кэш был — пропускаем, иначе — короткий «красный»
-      if (getPositiveCachedOk()) {
-        return { ok: true, has_access: true, reason: "subscription", until: null };
+      const u = new URL(apiUrl("/api/payments/status"), window.location.origin);
+      u.searchParams.set("tg_user_id", String(tg));
+      if (autoStartTrial) u.searchParams.set("start_trial", "1");
+
+      const res = await fetch(u.toString(), { credentials: "omit" });
+      if (res.ok) {
+        const dto = (await res.json()) as StatusDTO;
+
+        const until = dto?.until ?? null;
+        const subActive = dto?.status === "active" && isFuture(until);
+        const trialActive = dto?.status === "trial" && isFuture(until);
+        const has =
+          typeof dto.has_access === "boolean"
+            ? dto.has_access
+            : subActive || trialActive;
+
+        if (has) {
+          putTS(POSITIVE_CACHE_KEY, POSITIVE_CACHE_MS);
+          return {
+            ok: true,
+            has_access: true,
+            reason: trialActive ? "trial" : "subscription",
+            until,
+          };
+        }
+        // нет доступа → пробуем fallback
       }
+    } catch {
+      // молча уходим на fallback
+    }
+
+    // 4) fallback: POST /api/access/check (без start_trial — его нет по контракту)
+    try {
+      const res = await fetch(apiUrl("/api/access/check"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "omit",
+        body: JSON.stringify({ tg_user_id: tg }),
+      });
+      if (res.ok) {
+        // access.check возвращает { ok, until, ... } БЕЗ status
+        const dto = (await res.json()) as { ok?: boolean; until?: string | null };
+        const until = (dto?.until ?? null) as string | null;
+        const has = Boolean(dto?.ok) && isFuture(until);
+
+        if (has) {
+          putTS(POSITIVE_CACHE_KEY, POSITIVE_CACHE_MS);
+          return {
+            ok: true,
+            has_access: true,
+            // через /check мы не знаем точно trial/sub — считаем подпиской
+            reason: "subscription",
+            until,
+          };
+        }
+        putTS(NEGATIVE_CACHE_KEY, NEGATIVE_CACHE_MS);
+        return { ok: true, has_access: false, reason: "none", until };
+      }
+    } catch {
+      // любые сбои → короткий «красный» кэш
       putTS(NEGATIVE_CACHE_KEY, NEGATIVE_CACHE_MS);
       return { ok: false, has_access: false, reason: "none", until: null };
     }
 
-    const subActive = dto?.status === "active" && isFuture(dto?.until);
-    const trialActive = dto?.status === "trial" && isFuture(dto?.until);
-
-    if (subActive || trialActive) {
-      putTS(POSITIVE_CACHE_KEY, POSITIVE_CACHE_MS); // 60с окно без повторных проверок
-      return {
-        ok: true,
-        has_access: true,
-        reason: subActive ? "subscription" : "trial",
-        until: dto?.until ?? null,
-      };
-    }
-
-    // нет доступа — ставим короткий «красный» кэш, чтобы не было лупов
+    // дефолт: считаем, что доступа нет (и не лупим)
     putTS(NEGATIVE_CACHE_KEY, NEGATIVE_CACHE_MS);
-    return { ok: true, has_access: false, reason: "none", until: dto?.until ?? null };
+    return { ok: true, has_access: false, reason: "none", until: null };
   })();
 
   try {
     return await inflight;
   } finally {
-    inflight = null; // снимаем «занято»
+    inflight = null;
   }
 }
