@@ -1,50 +1,53 @@
 // src/lib/guard.ts
-// Централизованный гейт для упражнений/медитаций/переходов
+// Единая проверка доступа для Mini App (синхронно с /api/access/check)
 
-import { getAccessStatus } from "./access";
+import { getTelegramUserId } from "./telegram";
 
-type AccessStatus = {
-  ok: boolean;
-  has_access: boolean;              // дублируем для удобства в UI
-  trial_started?: boolean;          // (опц.) если решишь расширить /check
-  trial_until?: string | null;      // (опц.)
-  sub_active?: boolean;             // (опц.)
-  sub_until?: string | null;        // (опц.)
-  until?: string | null;            // текущая дата окончания доступа (из API)
-  has_auto_renew?: boolean | null;  // автопродление подписки
+const API_BASE =
+  (import.meta.env.VITE_API_BASE?.replace(/\/$/, "") ||
+    window.localStorage.getItem("VITE_API_BASE")?.replace(/\/$/, "") ||
+    "");
+
+// Ответ бэка /api/access/check
+export type AccessSnapshot = {
+  ok: boolean;                      // есть доступ (подписка ИЛИ активный триал)
+  until?: string | null;            // дата окончания доступа (если есть)
+  has_auto_renew?: boolean | null;  // автопродление подписки (если есть подписка)
 };
 
-// Базовые пути (если где-то логгируешь события — оставил как заготовку)
-const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/$/, "") || "";
-const API_LOG = API_BASE ? `${API_BASE}/api/miniapp/log` : "";
+// Основная функция: true/false + полезные поля
+export async function checkAccess(): Promise<AccessSnapshot> {
+  const tg = getTelegramUserId();
+  if (!API_BASE || !tg) return { ok: false };
 
-// Универсальная функция: проверяем доступ.
-// Параметр autoStartTrial оставил на будущее (когда подключим эндпоинт автозапуска триала),
-// сейчас он не используется — /api/access/check только читает статус.
-export async function ensureAccess(_autoStartTrial?: boolean): Promise<AccessStatus> {
-  const res = await getAccessStatus();
+  const r = await fetch(`${API_BASE}/api/access/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "omit",
+    body: JSON.stringify({ tg_user_id: tg }),
+  });
 
-  // Маппинг в формат, который уже использует твой UI
-  const status: AccessStatus = {
-    ok: !!res.ok,
-    has_access: !!res.ok,
-    until: res.until ?? null,
-    has_auto_renew: res.has_auto_renew ?? null,
+  if (!r.ok) return { ok: false };
+
+  const data = (await r.json()) as {
+    ok: boolean;
+    until?: string | null;
+    has_auto_renew?: boolean | null;
   };
 
-  return status;
+  return {
+    ok: !!data.ok,
+    until: data.until ?? null,
+    has_auto_renew: data.has_auto_renew ?? null,
+  };
 }
 
-// Опциональный мягкий лог (можно вырубить/переименовать на бекенде)
-export function track(event: string, extra?: Record<string, any>) {
-  if (!API_LOG) return;
+/** Удобный шорткат только для булевого признака */
+export async function hasAccess(): Promise<boolean> {
   try {
-    fetch(API_LOG, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event, ...extra }),
-    }).catch(() => {});
+    const s = await checkAccess();
+    return !!s.ok;
   } catch {
-    /* noop */
+    return false;
   }
 }
