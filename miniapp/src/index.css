@@ -190,3 +190,11 @@ body{
 @keyframes floatY   { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-10px) } }
 
 .isolate { isolation: isolate; }
+
+button, .btn {
+  touch-action: manipulation;           /* гасит двойной-тап-клик эмуляцию */
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: pointer;
+}

@@ -1,10 +1,27 @@
 // src/pages/BodyScan.tsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import body from "../data/bodyscan.ru";
 
 type Phase = "intro" | "idle" | "scan" | "done";
+
+// === TAЧ-ХЕЛПЕРЫ: убираем «двойной тап» на мобильных ===
+const touchBtnStyle: CSSProperties = {
+  WebkitTapHighlightColor: "transparent",
+  touchAction: "manipulation",
+};
+const onPress =
+  (fn: () => void) =>
+  (e: React.PointerEvent | React.MouseEvent) => {
+    if ("pointerType" in e && (e as React.PointerEvent).pointerType === "touch") {
+      e.preventDefault();
+      e.stopPropagation();
+      fn();
+      return;
+    }
+    if (!(e as any).pointerType) fn();
+  };
 
 export default function BodyScan() {
   const navigate = useNavigate();
@@ -187,7 +204,15 @@ export default function BodyScan() {
               <li>Двигайся сверху вниз: голова → плечи → руки → корпус → таз → ноги → всё тело.</li>
             </ul>
             <div className="flex items-center justify-center">
-              <button onClick={begin} className="btn btn-primary">Начать</button>
+              <button
+                type="button"
+                onClick={begin}
+                onPointerDown={onPress(begin)}
+                className="btn btn-primary"
+                style={touchBtnStyle}
+              >
+                Начать
+              </button>
             </div>
           </div>
         )}
@@ -222,37 +247,68 @@ export default function BodyScan() {
             </div>
 
             {/* Кнопки управления */}
-            <div className="mt-5 flex items-center justify-center gap-3">
+            <div className="mt-5 flex items-center justify-center gap-3" style={{ position: "relative", zIndex: 2 }}>
               {phase === "idle" ? (
-                <button onClick={start} className="btn btn-primary">Старт</button>
+                <button
+                  type="button"
+                  onClick={start}
+                  onPointerDown={onPress(start)}
+                  className="btn btn-primary"
+                  style={touchBtnStyle}
+                >
+                  Старт
+                </button>
               ) : (
                 <button
+                  type="button"
                   onClick={pauseToggle}
+                  onPointerDown={onPress(pauseToggle)}
                   className={`btn ${paused ? "btn-neutral" : "btn-primary"}`}
+                  style={touchBtnStyle}
                 >
                   {paused ? "Продолжить" : "Пауза"}
                 </button>
               )}
-              <button onClick={stopAll} className="btn btn-stop">Остановить</button>
+              <button
+                type="button"
+                onClick={stopAll}
+                onPointerDown={onPress(stopAll)}
+                className="btn btn-stop"
+                style={touchBtnStyle}
+              >
+                Остановить
+              </button>
             </div>
 
             {/* Нижняя навигация */}
             <div className="mt-5 pt-4 border-t border-black/5">
               <div className="flex items-center justify-center gap-2">
-                <button onClick={goStart} className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80">
+                <button
+                  type="button"
+                  onClick={goStart}
+                  onPointerDown={onPress(goStart)}
+                  className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80"
+                  style={touchBtnStyle}
+                >
                   Сначала
                 </button>
                 <button
+                  type="button"
                   onClick={goPrev}
+                  onPointerDown={onPress(goPrev)}
                   disabled={idx === 0}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
+                  style={touchBtnStyle}
                 >
                   Назад
                 </button>
                 <button
+                  type="button"
                   onClick={goNext}
+                  onPointerDown={onPress(goNext)}
                   disabled={idx === groups.length - 1}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
+                  style={touchBtnStyle}
                 >
                   Вперёд
                 </button>
@@ -269,8 +325,22 @@ export default function BodyScan() {
               Ощути тело целиком, сделай медленный выдох. Можно повторить на отдельных зонах.
             </div>
             <div className="mt-4 flex items-center justify-center gap-3">
-              <button onClick={begin} className="btn btn-primary">Ещё раз</button>
-              <button onClick={() => navigate("/exercises")} className="h-10 px-4 rounded-xl bg-white text-ink-900">
+              <button
+                type="button"
+                onClick={begin}
+                onPointerDown={onPress(begin)}
+                className="btn btn-primary"
+                style={touchBtnStyle}
+              >
+                Ещё раз
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate("/exercises")}
+                onPointerDown={onPress(() => navigate("/exercises"))}
+                className="h-10 px-4 rounded-xl bg-white text-ink-900"
+                style={touchBtnStyle}
+              >
                 К списку упражнений
               </button>
             </div>

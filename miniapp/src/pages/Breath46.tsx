@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type CSSProperties } from "react";
 import BackBar from "../components/BackBar";
 
 type Phase = "intro" | "idle" | "inhale" | "exhale" | "done";
@@ -6,6 +6,26 @@ type Phase = "intro" | "idle" | "inhale" | "exhale" | "done";
 const INHALE_SEC = 4;
 const EXHALE_SEC = 6;
 const TOTAL_CYCLES = 12;
+
+// === TAЧ-ХЕЛПЕРЫ: ускоряем отклик на мобильном, убираем «двойной тап» ===
+const touchBtnStyle: CSSProperties = {
+  WebkitTapHighlightColor: "transparent",
+  touchAction: "manipulation",
+};
+
+const onPress =
+  (fn: () => void) =>
+  (e: React.PointerEvent | React.MouseEvent) => {
+    // мгновенно отрабатываем на тач-событии и гасим последующий эмулированный click
+    if ("pointerType" in e && (e as React.PointerEvent).pointerType === "touch") {
+      e.preventDefault();
+      e.stopPropagation();
+      fn();
+      return;
+    }
+    // мышь/клавиатура — обычный клик
+    if (!(e as any).pointerType) fn();
+  };
 
 export default function Breath46() {
   const [phase, setPhase] = useState<Phase>("intro");
@@ -147,7 +167,15 @@ export default function Breath46() {
               Спокойный вдох 4 секунды и мягкий выдох 6 секунд. Всего 12 циклов.
             </div>
             <div className="flex items-center justify-center">
-              <button onClick={begin} className="btn btn-primary">Начать</button>
+              <button
+                type="button"
+                onClick={begin}
+                onPointerDown={onPress(begin)}
+                className="btn btn-primary"
+                style={touchBtnStyle}
+              >
+                Начать
+              </button>
             </div>
           </div>
         )}
@@ -180,40 +208,71 @@ export default function Breath46() {
             </div>
 
             {/* управление */}
-            <div className="mt-5 flex items-center justify-center gap-3">
+            <div
+              className="mt-5 flex items-center justify-center gap-3"
+              style={{ position: "relative", zIndex: 2 }}
+            >
               {phase === "idle" ? (
-                <button onClick={start} className="btn btn-primary">Старт</button>
+                <button
+                  type="button"
+                  onClick={start}
+                  onPointerDown={onPress(start)}
+                  className="btn btn-primary"
+                  style={touchBtnStyle}
+                >
+                  Старт
+                </button>
               ) : (
                 <button
+                  type="button"
                   onClick={pauseToggle}
-                  className={`btn ${paused ? "btn-primary" : "btn-primary"}`} /* пауза/продолжить оставляем оранжевой */
+                  onPointerDown={onPress(pauseToggle)}
+                  className={`btn ${paused ? "btn-primary" : "btn-primary"}`}
+                  style={touchBtnStyle}
                 >
                   {paused ? "Продолжить" : "Пауза"}
                 </button>
               )}
-              <button onClick={stop} className="btn btn-stop">Остановить</button>
+              <button
+                type="button"
+                onClick={stop}
+                onPointerDown={onPress(stop)}
+                className="btn btn-stop"
+                style={touchBtnStyle}
+              >
+                Остановить
+              </button>
             </div>
 
             {/* нижняя навигация (необязательная, но как в PMR) */}
             <div className="mt-5 pt-4 border-t border-black/5">
               <div className="flex items-center justify-center gap-2">
                 <button
+                  type="button"
                   onClick={goStart}
+                  onPointerDown={onPress(goStart)}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80"
+                  style={touchBtnStyle}
                 >
                   Сначала
                 </button>
                 <button
+                  type="button"
                   onClick={goPrev}
+                  onPointerDown={onPress(goPrev)}
                   disabled={cycle === 1}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
+                  style={touchBtnStyle}
                 >
                   Назад
                 </button>
                 <button
+                  type="button"
                   onClick={goNext}
+                  onPointerDown={onPress(goNext)}
                   disabled={cycle === TOTAL_CYCLES}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
+                  style={touchBtnStyle}
                 >
                   Вперёд
                 </button>
@@ -229,11 +288,17 @@ export default function Breath46() {
             <div className="text-[15px] text-ink-700">Можно повторить ещё раз или вернуться к списку.</div>
             <div className="mt-4 flex items-center justify-center gap-3">
               <button
+                type="button"
                 onClick={() => {
                   setPhase("idle");
                   setCycle(1);
                 }}
+                onPointerDown={onPress(() => {
+                  setPhase("idle");
+                  setCycle(1);
+                })}
                 className="h-10 px-4 rounded-xl bg-[#FFA66B] text-white font-medium"
+                style={touchBtnStyle}
               >
                 Ещё раз
               </button>

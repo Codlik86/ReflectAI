@@ -1,10 +1,27 @@
 // src/pages/PMR.tsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import pmr from "../data/pmr.ru";
 
 type Phase = "intro" | "idle" | "tense" | "relax" | "done";
+
+// === TOUCH-ХЕЛПЕРЫ: фикс «дабл-тапа» на мобильных ===
+const touchBtnStyle: CSSProperties = {
+  WebkitTapHighlightColor: "transparent",
+  touchAction: "manipulation",
+};
+const onPress =
+  (fn: () => void) =>
+  (e: React.PointerEvent | React.MouseEvent) => {
+    if ("pointerType" in e && (e as React.PointerEvent).pointerType === "touch") {
+      e.preventDefault();
+      e.stopPropagation();
+      fn();
+      return;
+    }
+    if (!(e as any).pointerType) fn();
+  };
 
 export default function PMR() {
   const navigate = useNavigate();
@@ -224,7 +241,15 @@ export default function PMR() {
               <li>Бёдра → голени → стопы</li>
             </ul>
             <div className="flex items-center justify-center">
-              <button onClick={begin} className="btn btn-primary">Начать</button>
+              <button
+                type="button"
+                onClick={begin}
+                onPointerDown={onPress(begin)}
+                className="btn btn-primary"
+                style={touchBtnStyle}
+              >
+                Начать
+              </button>
             </div>
           </div>
         )}
@@ -259,22 +284,28 @@ export default function PMR() {
             <div className="mt-4 rounded-2xl border border-black/5 overflow-hidden">
               <div className="flex">
                 <button
+                  type="button"
                   onClick={() => setTab("tension")}
+                  onPointerDown={onPress(() => setTab("tension"))}
                   className={`flex-1 px-3 py-2 text-sm font-medium ${
                     tab === "tension" || phase === "tense"
                       ? "bg-red-50 text-ink-900 border-b-2 border-red-500"
                       : "bg-gray-50 text-ink-600"
                   }`}
+                  style={touchBtnStyle}
                 >
                   Шаги напряжения
                 </button>
                 <button
+                  type="button"
                   onClick={() => setTab("relaxation")}
+                  onPointerDown={onPress(() => setTab("relaxation"))}
                   className={`flex-1 px-3 py-2 text-sm font-medium ${
                     tab === "relaxation" || phase === "relax"
                       ? "bg-green-50 text-ink-900 border-b-2 border-green-500"
                       : "bg-gray-50 text-ink-600"
                   }`}
+                  style={touchBtnStyle}
                 >
                   Шаги расслабления
                 </button>
@@ -292,39 +323,67 @@ export default function PMR() {
             {/* управление фазой */}
             <div className="mt-5 flex items-center justify-center gap-3">
               {phase === "idle" ? (
-                <button onClick={start} className="btn btn-primary">Старт</button>
+                <button
+                  type="button"
+                  onClick={start}
+                  onPointerDown={onPress(start)}
+                  className="btn btn-primary"
+                  style={touchBtnStyle}
+                >
+                  Старт
+                </button>
               ) : (
                 <button
+                  type="button"
                   onClick={pauseToggle}
+                  onPointerDown={onPress(pauseToggle)}
                   className={`btn ${paused ? "btn-neutral" : "btn-primary"}`}
+                  style={touchBtnStyle}
                 >
                   {paused ? "Продолжить" : "Пауза"}
                 </button>
               )}
-              {/* ФИКС: была ссылка на несуществующий stop → заменил на stopAll */}
-              <button onClick={stopAll} className="btn btn-stop">Остановить</button>
+              {/* ФИКС: была ссылка на несуществующий stop → используем stopAll */}
+              <button
+                type="button"
+                onClick={stopAll}
+                onPointerDown={onPress(stopAll)}
+                className="btn btn-stop"
+                style={touchBtnStyle}
+              >
+                Остановить
+              </button>
             </div>
 
             {/* нижняя навигация */}
             <div className="mt-5 pt-4 border-t border-black/5">
               <div className="flex items-center justify-center gap-2">
                 <button
+                  type="button"
                   onClick={goStart}
+                  onPointerDown={onPress(goStart)}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80"
+                  style={touchBtnStyle}
                 >
                   Сначала
                 </button>
                 <button
+                  type="button"
                   onClick={goPrev}
+                  onPointerDown={onPress(goPrev)}
                   disabled={idx === 0}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
+                  style={touchBtnStyle}
                 >
                   Назад
                 </button>
                 <button
+                  type="button"
                   onClick={goNext}
+                  onPointerDown={onPress(goNext)}
                   disabled={idx === groups.length - 1}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
+                  style={touchBtnStyle}
                 >
                   Вперёд
                 </button>
@@ -341,10 +400,21 @@ export default function PMR() {
               Можно повторить на отдельных группах или вернуться к списку упражнений.
             </div>
             <div className="mt-4 flex items-center justify-center gap-3">
-              <button onClick={begin} className="btn btn-primary">Ещё раз</button>
               <button
+                type="button"
+                onClick={begin}
+                onPointerDown={onPress(begin)}
+                className="btn btn-primary"
+                style={touchBtnStyle}
+              >
+                Ещё раз
+              </button>
+              <button
+                type="button"
                 onClick={() => navigate("/exercises")}
+                onPointerDown={onPress(() => navigate("/exercises"))}
                 className="h-10 px-4 rounded-xl bg-white text-ink-900"
+                style={touchBtnStyle}
               >
                 К списку упражнений
               </button>
