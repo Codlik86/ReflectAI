@@ -1,6 +1,6 @@
 // src/pages/Paywall.tsx
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import { computeAccess } from "../lib/access";
 
@@ -22,6 +22,13 @@ const nowMs = () => Date.now();
 
 export default function Paywall() {
   const nav = useNavigate();
+  const loc = useLocation();
+  const navigatedRef = useRef(false);
+
+  // куда возвращать после получения доступа
+  const qs = new URLSearchParams(loc.search);
+  const fromPath = qs.get("from");
+  const returnTo = fromPath && fromPath.startsWith("/") ? fromPath : "/";
 
   const [access, setAccess] = useState<Awaited<ReturnType<typeof computeAccess>> | null>(null);
   const [loading, setLoading] = useState(true);
@@ -66,10 +73,13 @@ export default function Paywall() {
     return "pre-trial";
   }, [access]);
 
-  // доступ есть — впускаем
+  // доступ есть — впускаем (уважаем ?from=)
   useEffect(() => {
-    if (view === "has-access") nav("/", { replace: true });
-  }, [view, nav]);
+    if (view === "has-access" && !navigatedRef.current) {
+      navigatedRef.current = true;
+      nav(returnTo, { replace: true });
+    }
+  }, [view, nav, returnTo]);
 
   return (
     <div className="min-h-dvh flex flex-col">

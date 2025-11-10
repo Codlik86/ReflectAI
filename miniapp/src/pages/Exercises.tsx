@@ -1,12 +1,33 @@
 // src/pages/Exercises.tsx
 import * as React from "react";
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import data from "../data/exercises.ru";
 import type { AAPayload, AAExercise, AAStep } from "../lib/aa.types";
+import { ensureAccess } from "../lib/guard";
 
 export default function Exercises() {
+  const navigate = useNavigate();
+
+  // Защищаем страницу: если нет доступа — уводим на Paywall с возвратом
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const snap = await ensureAccess(true);
+        if (!cancelled && !snap.has_access) {
+          navigate(`/paywall?from=${encodeURIComponent("/exercises")}`, { replace: true });
+        }
+      } catch {
+        if (!cancelled) {
+          navigate(`/paywall?from=${encodeURIComponent("/exercises")}`, { replace: true });
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [navigate]);
+
   const payload: AAPayload = data;
   const [active, setActive] = useState<AAExercise | null>(null);
 
@@ -351,7 +372,7 @@ function BreathWidget({
       }
       return nc;
     });
-    return "inhale"; // ← вот это и ломалось раньше
+    return "inhale"; // ← важно для типобезопасности
   }
 
   const start = () => {

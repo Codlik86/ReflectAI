@@ -1,6 +1,9 @@
+// src/pages/Meditations.tsx
 import * as React from "react";
-import { Link } from "react-router-dom";
+import { useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
+import { ensureAccess } from "../lib/guard";
 
 export type Track = {
   id: string;
@@ -89,6 +92,26 @@ const LIB: { id: Track["catId"]; title: string; items: Track[] }[] = [
 ];
 
 export default function Meditations() {
+  const navigate = useNavigate();
+
+  // Защищаем страницу: если нет доступа — уводим на Paywall с возвратом
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const snap = await ensureAccess(true);
+        if (!cancelled && !snap.has_access) {
+          navigate(`/paywall?from=${encodeURIComponent("/meditations")}`, { replace: true });
+        }
+      } catch {
+        if (!cancelled) {
+          navigate(`/paywall?from=${encodeURIComponent("/meditations")}`, { replace: true });
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [navigate]);
+
   return (
     <div className="min-h-dvh flex flex-col">
       <BackBar title="Медитации" to="/" />
