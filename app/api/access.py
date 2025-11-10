@@ -6,7 +6,7 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.core import async_session
@@ -99,3 +99,24 @@ async def check_access(
         return AccessCheckOut(ok=True, until=sub.subscription_until, has_auto_renew=sub.is_auto_renew)
 
     return AccessCheckOut(ok=False, until=sub.subscription_until if sub else None)
+
+# --- POST /api/access/accept -----------------------------------------------
+class AccessAcceptIn(BaseModel):
+    tg_user_id: int
+
+@router.post("/accept")
+async def accept_policy(
+    payload: AccessAcceptIn,
+    session: AsyncSession = Depends(get_db),
+):
+    user = (await session.execute(
+        select(User).where(User.tg_id == payload.tg_user_id)
+    )).scalar_one_or_none()
+    if not user:
+        return {"ok": False, "error": "user_not_found"}
+    await session.execute(
+        text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"),
+        {"uid": int(user.id)}
+    )
+    await session.commit()
+    return {"ok": True}

@@ -213,7 +213,7 @@ export default function MeditationPlayer() {
         <div className="mt-5 rounded-3xl bg-white/70 backdrop-blur px-5 pt-6 pb-6">
           {/* Прогресс — фикс видимости (h-[6px]) */}
           <div
-            className="relative h-[6px] w-full rounded-full bg-black/12 select-none"
+            className="relative h-1,5 w-full rounded-full bg-black/12 select-none"
             onPointerDown={(e) => {
               if (!duration) return;
               dragging.current = true;

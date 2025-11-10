@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
-import { fetchPayStatus, type PayStatus } from "../lib/payments";
+import { computeAccess } from "../lib/access";
 
 /** Открыть чат бота с опциональным start-параметром */
 function openInBot(startParam?: string) {
@@ -17,31 +17,27 @@ function openInBot(startParam?: string) {
   }
 }
 
-// Варианты экранов
-type View =
-  | "loading"
-  | "has-access"                  // активная подписка ИЛИ активный триал → сразу впускаем в приложение
-  | "pre-trial"                   // ещё нет триала и подписки
-  | "expired";                    // закончился триал/подписка
-
+type View = "loading" | "has-access" | "pre-trial" | "expired";
 const nowMs = () => Date.now();
 
 export default function Paywall() {
   const nav = useNavigate();
-  const [status, setStatus] = useState<PayStatus | null>(null);
+
+  const [access, setAccess] = useState<Awaited<ReturnType<typeof computeAccess>> | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // грузим единый статус из /api/payments/status (он знает и про trial, и про подписку)
+  // грузим единый снимок доступа
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setLoading(true); setErr(null);
+      setLoading(true);
+      setErr(null);
       try {
-        const s = await fetchPayStatus();
-        if (!cancelled) setStatus(s);
-      } catch {
-        if (!cancelled) setErr("Не удалось получить статус. Обнови страницу.");
+        const s = await computeAccess();
+        if (!cancelled) setAccess(s);
+      } catch (e: any) {
+        if (!cancelled) setErr(e?.message || "Не удалось получить статус. Обнови страницу.");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -49,25 +45,28 @@ export default function Paywall() {
     return () => { cancelled = true; };
   }, []);
 
-  // маппим ответ на экран
+  // маппим на представление
   const view: View = useMemo(() => {
-    if (!status) return "loading";
+    if (!access) return "loading";
 
-    const trialActive =
-      !!status.trial_started &&
-      !!status.trial_until &&
-      new Date(status.trial_until).getTime() > nowMs();
+    // подписка
+    const subUntilMs = access.subscriptionUntil ? new Date(access.subscriptionUntil).getTime() : 0;
+    const hasSub = !!subUntilMs && subUntilMs > nowMs();
 
-    const hasSub = !!status.active;
+    // триал (по computeAccess — это started + 5дн)
+    const trialUntilMs = access.trialUntil ? new Date(access.trialUntil).getTime() : 0;
+    const trialActive = !!access.trialStartedAt && trialUntilMs > nowMs();
 
-    if (trialActive || hasSub) return "has-access";
-    if (status.trial_started && !trialActive && !hasSub) return "expired";
+    if (hasSub || trialActive || access.hasAccess) return "has-access";
 
-    // сюда попадают «совсем новые»
+    // триал когда-то был, но уже не активен
+    if (access.trialStartedAt && !trialActive && !hasSub) return "expired";
+
+    // совсем новый пользователь
     return "pre-trial";
-  }, [status]);
+  }, [access]);
 
-  // если есть доступ — переносим на главную
+  // доступ есть — впускаем
   useEffect(() => {
     if (view === "has-access") nav("/", { replace: true });
   }, [view, nav]);
@@ -89,40 +88,29 @@ export default function Paywall() {
           </div>
         )}
 
-        {/* 1) Ещё не запускался триал/нет подписки */}
+        {/* 1) Новый пользователь: policy ещё не принят ИЛИ принят, но триал не запускался */}
         {view === "pre-trial" && !loading && (
           <div className="rounded-3xl p-5 bg-white/90 border border-black/5 space-y-4">
             <div className="text-lg font-semibold">5 дней бесплатно</div>
             <div className="text-black/70">
-              Прими правила в боте и сделай любое действие — пробный период включится автоматически.
+              Открой бота, нажми <b>«Принимаю»</b> и сделай любое действие — пробный период включится автоматически.
               Автопродление можно отключить в <b>/pay</b>.
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2">
-              <button
-                onClick={() => openInBot()} // откроет онбординг; там «Принимаю ✅»
-                className="h-11 rounded-xl bg-black text-white active:scale-[0.99]"
-              >
-                Принять правила
-              </button>
-              <button
-                onClick={() => openInBot("WHAT_NEXT")} // вернёт на шаг с «Открыть меню»
-                className="h-11 rounded-xl bg-white border border-black/10 active:scale-[0.99]"
-              >
-                Запустить пробную версию
-              </button>
-            </div>
-
             <button
-              onClick={() => openInBot("pay")}
-              className="w-full h-11 rounded-xl bg-white border border-black/10 active:scale-[0.99]"
+              onClick={() => openInBot()} // онбординг → «Принимаю ✅»
+              className="w-full h-11 rounded-xl bg-black text-white active:scale-[0.99]"
             >
-              Оплатить подписку (в боте)
+              Принять правила в боте
             </button>
+
+            <div className="text-sm text-black/60">
+              После принятия правил вернись в мини-апп — доступ откроется автоматически.
+            </div>
           </div>
         )}
 
-        {/* 2) Истёк триал/подписка */}
+        {/* 2) Истёк триал или подписка */}
         {view === "expired" && !loading && (
           <div className="space-y-3">
             <div className="rounded-3xl p-5 bg-amber-50 border border-amber-100">
