@@ -144,12 +144,11 @@ export default function Paywall() {
           <div className="rounded-3xl p-5 bg-white/90 border border-black/5 space-y-4">
             <div className="text-lg font-semibold">Прими правила в боте</div>
             <div className="text-black/70">
-              Открой бота, нажми <b>«Принимаю»</b>. После первого действия триал включится автоматически.
-              Автопродление можно отключить в <b>/pay</b>.
+              Открой бот, нажми <b>«Принимаю»</b>. После первого действия триал включится автоматически.
             </div>
 
             <button
-              onClick={() => openInBot("talk")}
+              onClick={() => openInBot("start")}
               className="w-full h-11 rounded-xl bg-black text-white active:scale-[0.99]"
             >
               Вернуться в бот
@@ -162,13 +161,13 @@ export default function Paywall() {
           <div className="rounded-3xl p-5 bg-white/90 border border-black/5 space-y-4">
             <div className="text-lg font-semibold">5 дней бесплатно</div>
             <div className="text-black/70">
-              Сделай любое действие в боте — пробный период включится автоматически. Отключить автопродление можно в <b>/pay</b>.
+              Сделай любое действие в боте — пробный период включится автоматически.
             </div>
             <button
               onClick={() => openInBot("talk")}
               className="w-full h-11 rounded-xl bg-black text-white active:scale-[0.99]"
             >
-              Открыть бота
+              Открыть бот
             </button>
           </div>
         )}
