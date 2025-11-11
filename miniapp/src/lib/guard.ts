@@ -1,4 +1,3 @@
-// src/lib/guard.ts
 import { getTelegramUserId } from "./telegram";
 
 type StatusDTO = {
@@ -7,6 +6,7 @@ type StatusDTO = {
   until?: string | null;
   plan?: "week" | "month" | "quarter" | "year" | null;
   has_access?: boolean;
+  needs_policy?: boolean; // НОВОЕ
 };
 
 export type AccessSnapshot = {
@@ -14,6 +14,7 @@ export type AccessSnapshot = {
   has_access: boolean;
   reason: "subscription" | "trial" | "none";
   until: string | null;
+  needs_policy?: boolean; // НОВОЕ
 };
 
 // ====== API base detection ======
@@ -81,7 +82,7 @@ export async function ensureAccess(
   const since = nowMs() - lastCallAt;
   if (since < COOLDOWN_MS) {
     if (positiveCached()) {
-      return { ok: true, has_access: true, reason: "subscription", until: null };
+      return { ok: true, has_access: true, reason: "subscription", until: null, needs_policy: false };
     }
     if (negativeCached()) {
       return { ok: true, has_access: false, reason: "none", until: null };
@@ -95,7 +96,7 @@ export async function ensureAccess(
   inflight = (async (): Promise<AccessSnapshot> => {
     // быстрые кэши
     if (positiveCached()) {
-      return { ok: true, has_access: true, reason: "subscription", until: null };
+      return { ok: true, has_access: true, reason: "subscription", until: null, needs_policy: false };
     }
     if (negativeCached()) {
       return { ok: true, has_access: false, reason: "none", until: null };
@@ -125,6 +126,12 @@ export async function ensureAccess(
             ? dto.has_access
             : subActive || trialActive;
 
+        // если требуется политика — не зелёный кэш
+        if (dto.needs_policy) {
+          putTS(NEGATIVE_CACHE_KEY, NEGATIVE_CACHE_MS);
+          return { ok: true, has_access: false, reason: "none", until: null, needs_policy: true };
+        }
+
         if (has) {
           putTS(POSITIVE_CACHE_KEY, POSITIVE_CACHE_MS);
           return {
@@ -132,6 +139,7 @@ export async function ensureAccess(
             has_access: true,
             reason: trialActive ? "trial" : "subscription",
             until,
+            needs_policy: false,
           };
         }
         // нет доступа → пробуем fallback
@@ -149,7 +157,6 @@ export async function ensureAccess(
         body: JSON.stringify({ tg_user_id: tg }),
       });
       if (res.ok) {
-        // access.check возвращает { ok, until, ... } БЕЗ status
         const dto = (await res.json()) as { ok?: boolean; until?: string | null };
         const until = (dto?.until ?? null) as string | null;
         const has = Boolean(dto?.ok) && isFuture(until);
@@ -159,21 +166,20 @@ export async function ensureAccess(
           return {
             ok: true,
             has_access: true,
-            // через /check мы не знаем точно trial/sub — считаем подпиской
             reason: "subscription",
             until,
+            needs_policy: false,
           };
         }
         putTS(NEGATIVE_CACHE_KEY, NEGATIVE_CACHE_MS);
         return { ok: true, has_access: false, reason: "none", until };
       }
     } catch {
-      // любые сбои → короткий «красный» кэш
       putTS(NEGATIVE_CACHE_KEY, NEGATIVE_CACHE_MS);
       return { ok: false, has_access: false, reason: "none", until: null };
     }
 
-    // дефолт: считаем, что доступа нет (и не лупим)
+    // дефолт
     putTS(NEGATIVE_CACHE_KEY, NEGATIVE_CACHE_MS);
     return { ok: true, has_access: false, reason: "none", until: null };
   })();

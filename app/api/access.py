@@ -140,15 +140,12 @@ async def check_access(
         )
 
     # Опционально: авто-старт триала (delayed trial) по запросу клиента
-    # Важно: это не «первое осмысленное действие», но фронту иногда удобно
-    # инициировать запуск (например, по явному действию пользователя).
     if payload.start_trial and not getattr(user, "trial_started_at", None):
         await session.execute(
             text("UPDATE users SET trial_started_at = CURRENT_TIMESTAMP WHERE id = :uid"),
             {"uid": int(user.id)},
-        )
+        );
         await session.commit()
-        # user.trial_started_at в ORM может быть не обновлён — статус ниже посчитается по БД
 
     status_out = await _compose_status(session, user)
     return AccessCheckOut(ok=True, **status_out.dict())

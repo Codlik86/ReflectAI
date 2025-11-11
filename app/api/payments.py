@@ -1,4 +1,3 @@
-# app/api/payments.py
 from __future__ import annotations
 
 import os
@@ -16,28 +15,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.core import async_session
 
-# ---------------------------------------------------------
-# Общий роутер для платежей
-# ---------------------------------------------------------
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
-# Переменные окружения
-YK_WEBHOOK_SECRET = (os.getenv("YK_WEBHOOK_SECRET") or "").strip()     # секрет вебхука (HMAC или пароль Basic)
-YK_SHOP_ID = (os.getenv("YK_SHOP_ID") or "").strip()                   # shopId для Basic
-YK_SECRET_KEY = (os.getenv("YK_SECRET_KEY") or "").strip()             # секретный ключ API для /create
-MINIAPP_BASE = (os.getenv("MINIAPP_BASE") or "").rstrip("/")           # напр.: https://pomni-miniapp.vercel.app
+YK_WEBHOOK_SECRET = (os.getenv("YK_WEBHOOK_SECRET") or "").strip()
+YK_SHOP_ID = (os.getenv("YK_SHOP_ID") or "").strip()
+YK_SECRET_KEY = (os.getenv("YK_SECRET_KEY") or "").strip()
+MINIAPP_BASE = (os.getenv("MINIAPP_BASE") or "").rstrip("/")
 
-# Прайсы (RUB)
 PRICES_RUB: Dict[str, str] = {
     "week": "499.00",
     "month": "1190.00",
     "quarter": "2990.00",
     "year": "7990.00",
 }
-
-# ==============================
-# Вспомогательные функции
-# ==============================
 
 def _get(obj: Any, *path: str, default: Any = None) -> Any:
     cur = obj
@@ -48,11 +38,7 @@ def _get(obj: Any, *path: str, default: Any = None) -> Any:
             return default
     return cur
 
-
 def _as_kop(amount_str: str) -> int:
-    """
-    "1190.00" -> 119000 коп.
-    """
     s = str(amount_str).strip().replace(",", ".")
     if "." in s:
         r, c = s.split(".", 1)
@@ -63,11 +49,9 @@ def _as_kop(amount_str: str) -> int:
         r = "0"
     return int(r) * 100 + int(c)
 
-
 def _utcnow():
     import datetime as dt
     return dt.datetime.now(dt.timezone.utc)
-
 
 async def _verify_webhook(
     request: Request,
@@ -75,17 +59,9 @@ async def _verify_webhook(
     x_hmac: Optional[str],
     authorization: Optional[str],
 ) -> None:
-    """
-    Проверяем подлинность уведомления одним из способов (любой проходной):
-    1) HMAC по «сырым» байтам тела:   заголовок X-Content-HMAC-SHA256
-    2) Basic: Authorization: Basic base64(shopId:secret)
-
-    Если YK_WEBHOOK_SECRET пуст — проверку пропускаем.
-    """
     if not YK_WEBHOOK_SECRET:
         return
 
-    # --- 1) HMAC-подпись тела (если заголовок присутствует)
     if x_hmac:
         raw = await request.body()
         digest = hmac.new(
@@ -93,23 +69,20 @@ async def _verify_webhook(
             raw,
             hashlib.sha256,
         ).hexdigest()
-        # На всякий: сравним и с base64 от hex
         digest_b64 = base64.b64encode(bytes.fromhex(digest)).decode("ascii")
         if hmac.compare_digest(x_hmac.strip(), digest) or hmac.compare_digest(x_hmac.strip(), digest_b64):
-            return  # ok
+            return
 
-    # --- 2) Basic авторизация
     if authorization and authorization.startswith("Basic "):
         try:
             creds = base64.b64decode(authorization.split(" ", 1)[1]).decode("utf-8")
             login, pwd = creds.split(":", 1)
             if (not YK_SHOP_ID) or (login.strip() == YK_SHOP_ID and pwd.strip() == YK_WEBHOOK_SECRET):
-                return  # ok
+                return
         except Exception:
             pass
 
     raise HTTPException(status_code=401, detail="invalid webhook signature")
-
 
 def _auth_header() -> str:
     if not (YK_SHOP_ID and YK_SECRET_KEY):
@@ -117,38 +90,27 @@ def _auth_header() -> str:
     token = base64.b64encode(f"{YK_SHOP_ID}:{YK_SECRET_KEY}".encode("utf-8")).decode("ascii")
     return f"Basic {token}"
 
-
-# ==============================
-# 1) Вебхук YooKassa
-# ==============================
-
 @router.post("/yookassa/webhook")
 async def yookassa_webhook(
     request: Request,
-    # alias — реальные имена заголовков в HTTP
     x_content_hmac_sha256: Optional[str] = Header(None, alias="X-Content-HMAC-SHA256"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
-    # на случай кастомного прокси — совместимость с прежним именем
     x_yookassa_signature: Optional[str] = Header(None),
 ):
-    # --- Подпись: поддерживаем оба заголовка (приоритет у X-Content-HMAC-SHA256)
     x_hmac = x_content_hmac_sha256 or x_yookassa_signature
     await _verify_webhook(request, x_hmac=x_hmac, authorization=authorization)
 
-    # --- JSON тела
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="invalid json")
 
     obj = _get(body, "object", default={})
-    event = _get(body, "event", default="")
-
     provider_payment_id = _get(obj, "id")
     status = _get(obj, "status", default="unknown")
     amount_str = _get(obj, "amount", "value", default="0")
     currency = _get(obj, "amount", "currency", default="RUB")
-    pm_id = _get(obj, "payment_method", "id")                 # может быть None
+    pm_id = _get(obj, "payment_method", "id")
     meta_user_id = _get(obj, "metadata", "user_id")
     plan = (_get(obj, "metadata", "plan", default="") or "").lower()
 
@@ -164,7 +126,6 @@ async def yookassa_webhook(
         session = cast(AsyncSession, _s)
         from app.db.models import User, Payment, Subscription  # type: ignore
 
-        # --- находим пользователя (сначала по users.id; если прислали tg_id — пробуем вторым шагом)
         u = (await session.execute(select(User).where(User.id == int(meta_user_id)))).scalar_one_or_none()
         if not u:
             try:
@@ -174,13 +135,11 @@ async def yookassa_webhook(
         if not u:
             raise HTTPException(status_code=404, detail="user not found")
 
-        # --- апсерт платежа по уникальному provider_payment_id
         existing = (await session.execute(
             select(Payment).where(Payment.provider_payment_id == provider_payment_id)
         )).scalar_one_or_none()
 
         if existing:
-            # обновляем только то, что может меняться по тому же id (статус/сырое тело/время)
             existing.status = status
             existing.updated_at = now
             try:
@@ -202,9 +161,7 @@ async def yookassa_webhook(
             )
             session.add(p)
 
-        # --- успешный платёж: продлеваем/создаём подписку + включаем флаг у пользователя
         if status == "succeeded":
-            # маппинг плана в количество дней
             add_days = 30
             if plan in ("week", "weekly"):
                 add_days = 7
@@ -248,8 +205,8 @@ async def yookassa_webhook(
                     status="active",
                     is_auto_renew=True,
                     subscription_until=new_until,
-                    is_premium=premium,   # NOT NULL-safe
-                    tier="basic",         # NOT NULL-safe
+                    is_premium=premium,
+                    tier="basic",
                     yk_payment_method_id=pm_id,
                     yk_customer_id=None,
                     created_at=now,
@@ -262,12 +219,10 @@ async def yookassa_webhook(
                     pass
                 session.add(sub)
 
-            # users.subscription_status -> active
             await session.execute(
                 update(User).where(User.id == u.id).values(subscription_status="active")
             )
 
-        # --- отменённый платёж: помечаем подписку как canceled (историю не трогаем)
         elif status in ("canceled", "cancellation_pending"):
             sub = (await session.execute(
                 select(Subscription).where(Subscription.user_id == u.id)
@@ -279,48 +234,33 @@ async def yookassa_webhook(
 
         await session.commit()
 
-    # YooKassa достаточно 200 OK без тела
     return ""
-
-
-# ==============================
-# 2) Создание платёжной ссылки (MiniApp)
-# ==============================
 
 class CreatePaymentReq(BaseModel):
     user_id: int = Field(..., description="Внутренний users.id или tg_id (кладём в metadata)")
     plan: Literal["week", "month", "quarter", "year"] = "month"
     description: Optional[str] = Field(None, description="Необязательное описание в чеке")
-    return_url: Optional[str] = None  # напр.: `${window.location.origin}/paywall?status=ok`
-    ad: Optional[str] = None          # рекламные метки и т.п.
-
+    return_url: Optional[str] = None
+    ad: Optional[str] = None
 
 class CreatePaymentResp(BaseModel):
     payment_id: str
     confirmation_url: str
 
-
 def _amount_for_plan(plan: str) -> str:
     return PRICES_RUB.get(plan, PRICES_RUB["month"])
 
-
 @router.post("/yookassa/create", response_model=CreatePaymentResp)
 async def create_yookassa_payment(req: CreatePaymentReq, request: Request):
-    """
-    Создаёт платёж в YooKassa и возвращает confirmation_url.
-    БД/подписку не трогаем — этим занимается webhook.
-    """
     if not (YK_SHOP_ID and YK_SECRET_KEY):
         raise HTTPException(status_code=500, detail="YK credentials are not configured")
 
     amount = _amount_for_plan(req.plan)
     idempotence_key = str(uuid.uuid4())
 
-    # Куда вернём пользователя после оплаты
     fallback_return = f"{MINIAPP_BASE}/paywall?status=ok" if MINIAPP_BASE else None
     return_url = (req.return_url or fallback_return)
     if not return_url:
-        # В крайнем случае собираем из заголовков запроса
         host = request.headers.get("x-forwarded-host") or request.headers.get("host")
         scheme = "https"
         if host:
@@ -332,23 +272,11 @@ async def create_yookassa_payment(req: CreatePaymentReq, request: Request):
         "amount": {"value": amount, "currency": "RUB"},
         "capture": True,
         "description": req.description or f"Помни — {req.plan}",
-        "confirmation": {
-            "type": "redirect",
-            "return_url": return_url,
-        },
-        "metadata": {
-            "user_id": str(req.user_id),
-            "plan": req.plan,
-            "ad": (req.ad or ""),
-            "source": "miniapp",
-        },
+        "confirmation": {"type": "redirect", "return_url": return_url},
+        "metadata": {"user_id": str(req.user_id), "plan": req.plan, "ad": (req.ad or ""), "source": "miniapp"},
     }
 
-    headers = {
-        "Authorization": _auth_header(),
-        "Idempotence-Key": idempotence_key,
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": _auth_header(), "Idempotence-Key": idempotence_key, "Content-Type": "application/json"}
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.post("https://api.yookassa.ru/v3/payments", json=payload, headers=headers)
@@ -364,22 +292,18 @@ async def create_yookassa_payment(req: CreatePaymentReq, request: Request):
     confirmation = (data.get("confirmation") or {})
     url = confirmation.get("confirmation_url")
     payment_id = data.get("id")
-
     if not url or not payment_id:
         raise HTTPException(status_code=502, detail="invalid response from YooKassa")
 
     return CreatePaymentResp(payment_id=payment_id, confirmation_url=url)
 
-
 @router.get("/yookassa/plans")
 async def list_plans():
-    """На фронт: показать прайсы, если нужно."""
     return {"currency": "RUB", "plans": PRICES_RUB}
 
 # ==============================
 # 3) Статус доступа/подписки (для MiniApp Paywall)
 # ==============================
-
 def _iso(dtobj) -> Optional[str]:
     try:
         return dtobj.astimezone(None).isoformat()
@@ -387,7 +311,6 @@ def _iso(dtobj) -> Optional[str]:
         return None
 
 def _trial_window(started, *, days: int = 5):
-    """Вернёт (is_active, expires_at|None) для окна триала."""
     import datetime as dt
     if not started:
         return False, None
@@ -417,11 +340,12 @@ async def payments_status(
     Возвращает:
       - has_access: bool
       - plan: str | None
-      - status: "active" | "trial" | None
+      - status: "active" | "trial" | "none"
       - until: ISO8601 | None  (подписка ИЛИ триал)
       - is_auto_renew: bool | None
       - trial_started_at: ISO | None
       - trial_expires_at: ISO | None
+      - needs_policy: bool
     """
     if user_id is None and tg_user_id is None:
         raise HTTPException(status_code=400, detail="provide user_id or tg_user_id")
@@ -435,7 +359,9 @@ async def payments_status(
         if not u:
             raise HTTPException(status_code=404, detail="user not found")
 
-        # подписка
+        policy_accepted = bool(getattr(u, "policy_accepted_at", None))
+        needs_policy = not policy_accepted
+
         sub = (await session.execute(
             select(Subscription).where(Subscription.user_id == u.id)
         )).scalar_one_or_none()
@@ -446,14 +372,11 @@ async def payments_status(
         is_auto = getattr(sub, "is_auto_renew", None)
         has_sub_access = bool(until and sub_status == "active" and until > now)
 
-        # триал
         started = getattr(u, "trial_started_at", None)
         trial_active, trial_expires_at = _trial_window(started)
 
-        # delayed trial автозапуск (если попросили и доступа ещё нет)
-        if start_trial and (not has_sub_access) and (not trial_active):
-            # условие на принятие политики можно добавить при необходимости:
-            # if getattr(u, "policy_accepted_at", None):
+        # delayed trial: НЕ стартуем до принятия политики
+        if start_trial and (not has_sub_access) and (not trial_active) and policy_accepted:
             from sqlalchemy import update as sa_update
             await session.execute(
                 sa_update(User).where(User.id == u.id).values(trial_started_at=now)
@@ -464,20 +387,28 @@ async def payments_status(
 
         has_access = bool(has_sub_access or trial_active)
 
-        # итоговая «until» — от подписки, иначе от триала
-        unified_until = until if has_sub_access else trial_expires_at
+        # нормализованный статус
+        if has_sub_access:
+            norm_status = "active"
+            unified_until = until
+        elif trial_active:
+            norm_status = "trial"
+            unified_until = trial_expires_at
+        else:
+            norm_status = "none"
+            unified_until = None
 
         return {
             "has_access": has_access,
             "plan": plan,
-            "status": sub_status if has_sub_access else ("trial" if trial_active else sub_status),
+            "status": norm_status,
             "until": _iso(unified_until) if unified_until else None,
             "is_auto_renew": bool(is_auto) if is_auto is not None else None,
             "trial_started_at": _iso(started) if started else None,
             "trial_expires_at": _iso(trial_expires_at) if trial_expires_at else None,
+            "needs_policy": needs_policy,
         }
 
-# Доп. алиас: совместимость с ожиданиями старого фронта
 @router.get("/alias/access-status")
 async def access_status_alias(
     user_id: Optional[int] = Query(None),

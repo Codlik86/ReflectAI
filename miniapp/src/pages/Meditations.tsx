@@ -114,9 +114,7 @@ export default function Meditations() {
       }
     })();
 
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [navigate]);
 
   return (

@@ -32,9 +32,7 @@ export default function Exercises() {
       }
     })();
 
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [navigate]);
 
   // ====== Список упражнений ======
@@ -202,9 +200,7 @@ function Timer({ seconds, label }: { seconds: number; label?: string }) {
   const startAt = React.useRef<number | null>(null);
   const rafRef = React.useRef<number | null>(null);
 
-  React.useEffect(() => {
-    runningRef.current = running;
-  }, [running]);
+  React.useEffect(() => { runningRef.current = running; }, [running]);
 
   const cancel = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -250,9 +246,7 @@ function Timer({ seconds, label }: { seconds: number; label?: string }) {
     <div className="w-full">
       <div className="flex items-center justify-between mb-2">
         <div className="text-[16px] text-ink-700">{label ?? "Таймер"}</div>
-        <div className="text-[16px] font-medium tabular-nums">
-          {mm}:{ss}
-        </div>
+        <div className="text-[16px] font-medium tabular-nums">{mm}:{ss}</div>
       </div>
 
       <div className="h-2 rounded-full bg-black/5 overflow-hidden">
@@ -268,13 +262,9 @@ function Timer({ seconds, label }: { seconds: number; label?: string }) {
 
       <div className="mt-3 flex justify-center">
         {!running ? (
-          <button onClick={start} className="btn btn-primary">
-            Начать
-          </button>
+          <button onClick={start} className="btn btn-primary">Начать</button>
         ) : (
-          <button onClick={stop} className="btn btn-stop">
-            Остановить
-          </button>
+          <button onClick={stop} className="btn btn-stop">Остановить</button>
         )}
       </div>
     </div>
@@ -307,9 +297,7 @@ function BreathWidget({
   const rafRef = React.useRef<number | null>(null);
   const lastT = React.useRef<number | null>(null);
 
-  React.useEffect(() => {
-    runningRef.current = running;
-  }, [running]);
+  React.useEffect(() => { runningRef.current = running; }, [running]);
 
   const phaseDur = React.useMemo(
     () => (phase === "inhale" ? inhale : phase === "hold" ? hold : phase === "exhale" ? exhale : hold2),

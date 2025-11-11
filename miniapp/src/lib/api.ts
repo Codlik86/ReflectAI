@@ -30,18 +30,14 @@ type JsonInit = RequestInit & { json?: unknown };
 /** Утилита: аккуратно собрать заголовки без лишнего Content-Type */
 function buildHeaders(init?: JsonInit): HeadersInit {
   const headers: Record<string, string> = {};
-  // Верификация мини-аппа на бэке (может быть пусто вне Telegram — это ок)
   const initData = getInitDataRaw();
   if (initData) headers["X-Telegram-Init-Data"] = initData;
 
-  // Если есть body/json — задаём Content-Type
   if (init?.json !== undefined || init?.body) {
-    // Не ставим Content-Type, если body — FormData/Blob и т.п.
     const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
     if (!isFormData) headers["Content-Type"] = "application/json";
   }
 
-  // Пользовательские заголовки поверх
   return { ...headers, ...(init?.headers || {}) };
 }
 
@@ -80,10 +76,8 @@ export async function fetchJson<T>(path: string, init?: JsonInit): Promise<T> {
     throw new Error(`${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`);
   }
 
-  // 204 No Content
   if (res.status === 204) return undefined as unknown as T;
 
-  // Иногда backend может вернуть пустую строку c 200 — обработаем мягко
   const raw = await res.text();
   if (!raw) return undefined as unknown as T;
 

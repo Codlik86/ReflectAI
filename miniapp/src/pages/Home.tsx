@@ -1,4 +1,3 @@
-// src/pages/Home.tsx
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import { ensureAccess } from "../lib/guard";
@@ -6,13 +5,11 @@ import { ensureAccess } from "../lib/guard";
 export default function Home() {
   const navigate = useNavigate();
 
-  // helper для путей из public/
   const pub = React.useCallback((p: string) => {
     const base = import.meta.env.BASE_URL || "/";
     return `${base}${p}`.replace(/\/+/, "/");
   }, []);
 
-  // защита от повторных кликов/дубль-навигации
   const busyRef = React.useRef(false);
   const navigatedRef = React.useRef(false);
   const safeNavigate = React.useCallback(
@@ -25,8 +22,7 @@ export default function Home() {
     [navigate]
   );
 
-  // универсальный гард: проверяем доступ → либо идём в path, либо на paywall
-  // ВАЖНО: со страницы Home НЕ запускаем триал автоматически.
+  // Унифицированный хелпер: решает, куда вести — к контенту, на paywall по policy, либо на paywall по оплате
   const guardTo = React.useCallback(
     async (path: string) => {
       if (busyRef.current) return;
@@ -36,7 +32,8 @@ export default function Home() {
         if (snap.has_access) {
           safeNavigate(path);
         } else {
-          safeNavigate(`/paywall?from=${encodeURIComponent(path)}`);
+          const reason = snap.needs_policy ? "policy" : "billing";
+          safeNavigate(`/paywall?from=${encodeURIComponent(path)}&reason=${reason}`);
         }
       } catch {
         safeNavigate(`/paywall?from=${encodeURIComponent(path)}`);
@@ -50,57 +47,44 @@ export default function Home() {
   const onExercises = () => guardTo("/exercises");
   const onMeditations = () => guardTo("/meditations");
 
-  // ===== helpers для открытия бота и мягкого закрытия webview =====
+  // ===== helper открытия бота и мягкого закрытия WebView =====
   const openBotWithStart = (startPayload: string) => {
     const bot = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
     const wa = (window as any)?.Telegram?.WebApp;
-
-    // 1) tg://resolve — предпочтительно внутри Telegram
     const tgDeep = `tg://resolve?domain=${encodeURIComponent(bot)}&start=${encodeURIComponent(startPayload)}`;
-    // 2) https-фоллбек
     const httpsUrl = `https://t.me/${bot}?start=${encodeURIComponent(startPayload)}`;
 
     try {
       if (wa?.openTelegramLink) {
-        // Многие клиенты умеют и tg://, и https://
         wa.openTelegramLink(tgDeep);
       } else if (typeof window !== "undefined") {
-        // Пытаемся прямой deep-link; если заблокирован — откроется https ниже
         window.location.href = tgDeep;
       }
+    } catch {}
+    try {
+      if (wa?.openTelegramLink) wa.openTelegramLink(httpsUrl);
+      else window.open(httpsUrl, "_blank", "noopener,noreferrer");
     } catch {
-      // noop — перейдём к https
-    } finally {
-      // Всегда даём https-фоллбек параллельно (на случай, если tg:// не сработал)
-      try {
-        if (wa?.openTelegramLink) {
-          wa.openTelegramLink(httpsUrl);
-        } else {
-          window.open(httpsUrl, "_blank", "noopener,noreferrer");
-        }
-      } catch {
-        window.open(httpsUrl, "_blank", "noopener,noreferrer");
-      }
-      // Мягко закрываем webview после запуска перехода
-      setTimeout(() => {
-        try { wa?.close?.(); } catch {}
-      }, 120);
+      window.location.href = httpsUrl;
     }
+    setTimeout(() => {
+      try { wa?.close?.(); } catch {}
+    }, 120);
   };
 
-  // «Поговорить»: осмысленное действие → можно автозапуск триала
+  // «Поговорить»: осмысленное действие → можно автозапуск триала; если нет доступа — пейвол.
   const onTalk = async () => {
     if (busyRef.current) return;
     busyRef.current = true;
 
     try {
       const snap = await ensureAccess({ startTrial: true });
-      if (!snap.has_access) {
-        safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
+      if (snap.has_access) {
+        openBotWithStart("talk");
         return;
       }
-      // Если доступ есть — открываем бота в режиме talk и закрываем webview
-      openBotWithStart("talk");
+      const reason = snap.needs_policy ? "policy" : "billing";
+      safeNavigate(`/paywall?from=${encodeURIComponent("/")}&reason=${reason}`);
     } catch {
       safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
     } finally {

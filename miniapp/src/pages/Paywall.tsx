@@ -1,24 +1,34 @@
-// src/pages/Paywall.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import { ensureAccess } from "../lib/guard";
 import { getTelegramUserId } from "../lib/telegram";
 
-/** Открыть чат бота с опциональным start-параметром */
+/** Открыть чат бота (tg:// → https фоллбек) и мягко закрыть WebView */
 function openInBot(startParam?: string) {
   const bot = (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
-  const url = `https://t.me/${bot}${startParam ? `?start=${encodeURIComponent(startParam)}` : ""}`;
   const wa = (window as any)?.Telegram?.WebApp;
+
+  const start = startParam ? `?start=${encodeURIComponent(startParam)}` : "";
+  const tgDeep = `tg://resolve?domain=${encodeURIComponent(bot)}${start}`;
+  const httpsUrl = `https://t.me/${bot}${start}`;
+
   try {
-    if (wa?.openTelegramLink) wa.openTelegramLink(url);
-    else window.location.href = url;
+    if (wa?.openTelegramLink) wa.openTelegramLink(tgDeep);
+    else if (typeof window !== "undefined") window.location.href = tgDeep;
+  } catch {}
+  try {
+    if (wa?.openTelegramLink) wa.openTelegramLink(httpsUrl);
+    else window.open(httpsUrl, "_blank", "noopener,noreferrer");
   } catch {
-    window.location.href = url;
+    window.location.href = httpsUrl;
   }
+  setTimeout(() => {
+    try { wa?.close?.(); } catch {}
+  }, 120);
 }
 
-type View = "loading" | "has-access" | "pre-trial" | "expired";
+type View = "loading" | "has-access" | "needs-policy" | "pre-trial" | "expired";
 
 type StatusDTO = {
   has_access?: boolean;
@@ -26,11 +36,11 @@ type StatusDTO = {
   until?: string | null;
   plan?: "week" | "month" | "quarter" | "year" | null;
   is_auto_renew?: boolean | null;
+  needs_policy?: boolean | null; // НОВОЕ
 };
 
 const nowMs = () => Date.now();
 
-// ---- API base (same as guard.ts) -------------------------------------------
 function normalizeBase(s?: string | null) {
   if (!s) return "";
   return s.replace(/\/+$/, "");
@@ -39,17 +49,13 @@ const API_BASE =
   normalizeBase((import.meta as any)?.env?.VITE_API_BASE) ||
   normalizeBase(window.localStorage.getItem("VITE_API_BASE")) ||
   "";
-
 const apiUrl = (path: string) => (API_BASE ? `${API_BASE}${path}` : path);
-
-// ----------------------------------------------------------------------------
 
 export default function Paywall() {
   const nav = useNavigate();
   const loc = useLocation();
   const redirectedRef = useRef(false);
 
-  // from=/exercises или /meditations — куда вернуть после подтверждения доступа
   const params = new URLSearchParams(loc.search);
   const from = params.get("from") || "/";
 
@@ -57,7 +63,6 @@ export default function Paywall() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // 1) Быстрый снимок — если уже есть доступ, тихо уходим «домой»
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -66,16 +71,14 @@ export default function Paywall() {
         if (!cancelled && snap.has_access) {
           if (!redirectedRef.current) {
             redirectedRef.current = true;
-            // маленькая задержка, чтобы не мигало
             setTimeout(() => nav(from, { replace: true }), 10);
           }
-          return; // не грузим статус — уже редиректим
+          return;
         }
       } catch {
-        // игнор, ниже всё равно попробуем подтянуть статус
+        // игнор
       }
 
-      // 2) Тянем статус для выбора экрана paywall
       try {
         setLoading(true);
         setErr(null);
@@ -92,32 +95,25 @@ export default function Paywall() {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [from, nav]);
 
-  // 3) Маппинг статуса на вью
   const view: View = useMemo(() => {
     if (loading) return "loading";
     const s = status || {};
-    const untilMs = s.until ? new Date(s.until).getTime() : 0;
+    if (s.needs_policy) return "needs-policy";
 
+    const untilMs = s.until ? new Date(s.until).getTime() : 0;
     const hasByFlag = !!s.has_access;
     const active = s.status === "active" && untilMs > nowMs();
     const trial = s.status === "trial" && untilMs > nowMs();
 
     if (hasByFlag || active || trial) return "has-access";
-
-    // если until прошёл — считаем «expired», иначе «pre-trial»
     if (s.status && s.status !== "none" && untilMs && untilMs <= nowMs()) return "expired";
     if (s.status === "none") return "pre-trial";
-
-    // по умолчанию: до запуска триала
     return "pre-trial";
   }, [status, loading]);
 
-  // 4) Если во время показа страницы доступ внезапно появился — мягкий авто-редирект «обратно»
   useEffect(() => {
     if (view !== "has-access") return;
     if (redirectedRef.current) return;
@@ -143,43 +139,48 @@ export default function Paywall() {
           </div>
         )}
 
-        {/* 1) Новый пользователь: policy ещё не принят ИЛИ принят, но триал не запускался */}
-        {view === "pre-trial" && !loading && (
+        {/* 1) Политика не принята → вернуть в бота принять правила */}
+        {view === "needs-policy" && !loading && (
           <div className="rounded-3xl p-5 bg-white/90 border border-black/5 space-y-4">
-            <div className="text-lg font-semibold">5 дней бесплатно</div>
+            <div className="text-lg font-semibold">Прими правила в боте</div>
             <div className="text-black/70">
-              Открой бота, нажми <b>«Принимаю»</b> и сделай любое действие — пробный период включится автоматически.
+              Открой бота, нажми <b>«Принимаю»</b>. После первого действия триал включится автоматически.
               Автопродление можно отключить в <b>/pay</b>.
             </div>
 
             <button
-              onClick={() => openInBot()} // онбординг → «Принимаю ✅»
+              onClick={() => openInBot("talk")}
               className="w-full h-11 rounded-xl bg-black text-white active:scale-[0.99]"
             >
-              Принять правила в боте
+              Вернуться в бот
             </button>
-
-            <div className="text-sm text-black/60">
-              После принятия правил вернись в мини-апп — доступ откроется автоматически.
-            </div>
           </div>
         )}
 
-        {/* 2) Истёк триал или подписка */}
+        {/* 2) Новый пользователь, политика уже принята, но триал ещё не стартовал */}
+        {view === "pre-trial" && !loading && (
+          <div className="rounded-3xl p-5 bg-white/90 border border-black/5 space-y-4">
+            <div className="text-lg font-semibold">5 дней бесплатно</div>
+            <div className="text-black/70">
+              Сделай любое действие в боте — пробный период включится автоматически. Отключить автопродление можно в <b>/pay</b>.
+            </div>
+            <button
+              onClick={() => openInBot("talk")}
+              className="w-full h-11 rounded-xl bg-black text-white active:scale-[0.99]"
+            >
+              Открыть бота
+            </button>
+          </div>
+        )}
+
+        {/* 3) Истёк триал или подписка */}
         {view === "expired" && !loading && (
           <div className="space-y-3">
             <div className="rounded-3xl p-5 bg-amber-50 border border-amber-100">
               <div className="text-lg font-semibold">Доступ закончился</div>
               <div className="text-black/70">
-                Чтобы продолжить, оформи подписку — оплата проходит в боте в разделе <b>/pay</b>.
+                Хочу продолжать помогать, но для этого нужна подписка. Вернись в бота и выбери удобный тариф.
               </div>
-            </div>
-
-            <div className="grid gap-3 sm:grid-cols-2">
-              <PriceCard title="Неделя"   price="499 ₽" />
-              <PriceCard title="Месяц"    price="1 190 ₽" note="Чаще выбирают" />
-              <PriceCard title="3 месяца" price="2 990 ₽" />
-              <PriceCard title="Год"      price="7 990 ₽" />
             </div>
 
             <button
@@ -191,16 +192,6 @@ export default function Paywall() {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function PriceCard({ title, price, note }: { title: string; price: string; note?: string }) {
-  return (
-    <div className="rounded-2xl border border-black/10 p-4 bg-white/90">
-      <div className="font-medium">{title}</div>
-      <div className="text-2xl font-semibold my-1">{price}</div>
-      {note && <div className="text-sm text-black/60">{note}</div>}
     </div>
   );
 }

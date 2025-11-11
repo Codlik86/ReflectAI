@@ -11,11 +11,7 @@ import { useStartRouter } from "./lib/startRouter";
 export default function App() {
   // 1) Инициализация WebApp (безопасно для обычного веба)
   React.useEffect(() => {
-    try {
-      initTelegram();
-    } catch {
-      // мягко игнорируем: в обычном вебе Telegram WebApp может быть недоступен
-    }
+    try { initTelegram(); } catch { /* noop */ }
   }, []);
 
   // 2) Авто-роутинг по start-параметру (хук сам защищён от повторов)
@@ -30,7 +26,6 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col bg-bg">
       <Header />
-      {/* Основной контент. Отступ снизу под BottomBar, чтобы карточки не перекрывались */}
       <main
         className="mt-4 flex-1"
         style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 98px)" }}

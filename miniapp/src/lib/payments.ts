@@ -1,5 +1,5 @@
 // src/lib/payments.ts
-// Хелперы для Paywall: статус доступа и (опц.) создание платежа
+// Хелперы для Paywall/оплаты: статус доступа и создание платежа
 
 import { getTelegramUserId } from "./telegram";
 
@@ -7,14 +7,20 @@ export type PayStatus = {
   ok: boolean;
   error?: string;
 
-  // триал
+  // нормализованный доступ
+  has_access?: boolean; // подписка ИЛИ активный триал
+  status?: "active" | "trial" | "none" | null;
+  plan?: "week" | "month" | "quarter" | "year" | null;
+  until?: string | null; // дедлайн подписки или триала (унифицированный)
+  is_auto_renew?: boolean | null;
+
+  // продуктовые флаги
+  needs_policy?: boolean | null; // НОВОЕ: требуются ли принятые правила
+
+  // обратная совместимость с очень старым бэком
+  active?: boolean; // есть активная подписка (устар.)
   trial_started?: boolean;
   trial_until?: string | null;
-
-  // подписка
-  active?: boolean; // есть активная подписка
-  plan?: "week" | "month" | "quarter" | "year" | null;
-  until?: string | null; // дата окончания (подписки или триала — в зависимости от ветки)
 };
 
 // ==== API base (как в guard.ts / access.ts) =================================
@@ -39,24 +45,23 @@ const addDaysISO = (iso: string, days: number) => {
   return d.toISOString();
 };
 
+const nowMs = () => Date.now();
 const isFuture = (iso?: string | null) => {
   if (!iso) return false;
   const t = new Date(iso).getTime();
-  return Number.isFinite(t) && t > Date.now();
+  return Number.isFinite(t) && t > nowMs();
 };
 
 // ==== 1) Получить статус оплаты/доступа =====================================
 
 /**
- * Бэкенд может вернуть один из форматов:
- *  a) { status: "active"|"trial"|"none", until, plan, is_auto_renew, has_access? }
- *  b) { has_access, plan, trial_started_at, trial_expires_at?, subscription_until }
+ * Пытаемся новый канон: /api/payments/status?tg_user_id=...
+ * Поддерживаем и старые форматы ответа.
  */
 export async function fetchPayStatus(): Promise<PayStatus> {
   const tg = getTelegramUserId();
 
   try {
-    // Пытаемся новый канон: /api/payments/status?tg_user_id=...
     const u = new URL(apiUrl("/api/payments/status"), window.location.origin);
     if (tg) u.searchParams.set("tg_user_id", String(tg));
 
@@ -67,43 +72,65 @@ export async function fetchPayStatus(): Promise<PayStatus> {
 
     const data = (await r.json()) as any;
 
-    // ----- Вариант (a): status/until -----
-    if (typeof data?.status === "string") {
-      const st = (data.status as string).toLowerCase();
-      const until = data?.until ?? null;
+    // ----- Канонический формат: { has_access, status, until, plan, is_auto_renew, needs_policy, ... }
+    if (
+      "status" in data ||
+      "has_access" in data ||
+      "until" in data ||
+      "plan" in data ||
+      "is_auto_renew" in data ||
+      "needs_policy" in data
+    ) {
+      const status = (data?.status ?? null) as PayStatus["status"];
+      const until = (data?.until ?? null) as string | null;
       const plan = (data?.plan ?? null) as PayStatus["plan"];
+      const needs_policy =
+        typeof data?.needs_policy === "boolean" ? (data.needs_policy as boolean) : null;
 
-      if (st === "active") {
-        return { ok: true, active: true, plan, until };
-      }
-      if (st === "trial") {
-        return { ok: true, active: false, plan, until, trial_started: true, trial_until: until };
-      }
-      // любой иной статус — считаем доступа нет
+      // доступ по флагу с бэка ИЛИ по (status+until)
+      const activeByStatus = status === "active" && isFuture(until);
+      const trialByStatus = status === "trial" && isFuture(until);
+      const has_access =
+        typeof data?.has_access === "boolean"
+          ? Boolean(data.has_access)
+          : activeByStatus || trialByStatus;
+
       return {
         ok: true,
-        active: false,
-        plan: plan ?? null,
-        until: until ?? null,
-        trial_started: false,
-        trial_until: null,
+        has_access,
+        status: status ?? null,
+        plan,
+        until,
+        is_auto_renew:
+          typeof data?.is_auto_renew === "boolean" ? (data.is_auto_renew as boolean) : null,
+        needs_policy,
+        // совместимость со старым потреблением
+        active: status === "active" ? has_access : false,
+        trial_started: status === "trial" ? has_access : Boolean(data?.trial_started_at),
+        trial_until: status === "trial" ? until : (data?.trial_expires_at ?? null),
       };
     }
 
-    // ----- Вариант (b): has_access / trial_started_at / subscription_until -----
-    const subUntilIso = data?.subscription_until ?? null;
+    // ----- Старый формат: { has_access, plan, trial_started_at, trial_expires_at?, subscription_until }
+    const subUntilIso = (data?.subscription_until ?? null) as string | null;
     const subActive = isFuture(subUntilIso);
 
-    const trialStartedAt = data?.trial_started_at ?? null;
-    const trialExpiresIso = data?.trial_expires_at ?? (trialStartedAt ? addDaysISO(trialStartedAt, 5) : null);
+    const trialStartedAt = (data?.trial_started_at ?? null) as string | null;
+    const trialExpiresIso = (data?.trial_expires_at ??
+      (trialStartedAt ? addDaysISO(trialStartedAt, 5) : null)) as string | null;
     const trialActive = Boolean(trialStartedAt) && isFuture(trialExpiresIso);
 
     if (subActive) {
       return {
         ok: true,
-        active: true,
+        has_access: true,
+        status: "active",
         plan: (data?.plan ?? null) as PayStatus["plan"],
         until: subUntilIso,
+        is_auto_renew:
+          typeof data?.is_auto_renew === "boolean" ? (data.is_auto_renew as boolean) : null,
+        needs_policy: null,
+        active: true,
         trial_started: Boolean(trialStartedAt),
         trial_until: trialExpiresIso ?? null,
       };
@@ -112,9 +139,14 @@ export async function fetchPayStatus(): Promise<PayStatus> {
     if (trialActive) {
       return {
         ok: true,
-        active: false,
+        has_access: true,
+        status: "trial",
         plan: (data?.plan ?? null) as PayStatus["plan"],
         until: trialExpiresIso,
+        is_auto_renew:
+          typeof data?.is_auto_renew === "boolean" ? (data.is_auto_renew as boolean) : null,
+        needs_policy: null,
+        active: false,
         trial_started: true,
         trial_until: trialExpiresIso,
       };
@@ -123,9 +155,14 @@ export async function fetchPayStatus(): Promise<PayStatus> {
     // по умолчанию — доступа нет
     return {
       ok: true,
-      active: false,
+      has_access: false,
+      status: "none",
       plan: (data?.plan ?? null) as PayStatus["plan"],
       until: null,
+      is_auto_renew:
+        typeof data?.is_auto_renew === "boolean" ? (data.is_auto_renew as boolean) : null,
+      needs_policy: null,
+      active: false,
       trial_started: Boolean(trialStartedAt),
       trial_until: trialExpiresIso ?? null,
     };
@@ -136,6 +173,11 @@ export async function fetchPayStatus(): Promise<PayStatus> {
 
 // ==== 2) Создать платёж и вернуть redirect URL на YooKassa ==================
 
+/**
+ * Соответствует нашему бэку:
+ * POST /api/payments/yookassa/create
+ * body: { user_id, plan, description?, return_url?, ad? }
+ */
 export async function createPaymentLink(
   plan: "week" | "month" | "quarter" | "year"
 ): Promise<string> {
@@ -149,13 +191,11 @@ export async function createPaymentLink(
     headers: { "Content-Type": "application/json" },
     credentials: "omit",
     body: JSON.stringify({
-      // шлём оба поля, чтобы бэк однозначно нашёл пользователя
-      tg_user_id: tg,
-      tg_id: tg,
+      user_id: tg,                   // ВАЖНО: наш бэк ждёт user_id (можно tg_id)
       plan,
       return_url,
       description: `Помни — ${plan}`,
-      source: "miniapp",
+      // ad: можно передать метку кампании при необходимости
     }),
   });
 

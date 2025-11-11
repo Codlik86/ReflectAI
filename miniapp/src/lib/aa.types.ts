@@ -1,5 +1,4 @@
-// Канон типов для упражнений/шагов Mini App
-
+// src/lib/aa.types.ts
 export type AAStep =
   | { type: "text"; html: string }
   | { type: "list"; items: string[] }

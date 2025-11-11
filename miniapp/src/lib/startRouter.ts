@@ -39,7 +39,6 @@ export function useStartRouter() {
   useEffect(() => {
     if (done.current) return;
 
-    // Анти-дубль для StrictMode и повторных маунтов
     const already = sessionStorage.getItem(START_ROUTED_KEY);
     if (already === "1") {
       done.current = true;
@@ -52,7 +51,6 @@ export function useStartRouter() {
     const key = normalize(raw);
     const dest = NAV_MAP[key];
 
-    // Помечаем ВПЕРЕД, чтобы навигация/ремонт не вызвали повтор
     const markDone = () => {
       done.current = true;
       sessionStorage.setItem(START_ROUTED_KEY, "1");
@@ -64,13 +62,10 @@ export function useStartRouter() {
       return;
     }
 
-    // Если это рекламный код — оставляем на текущем экране,
-    // но аккуратно добавляем ?ad=... без лишних перерисовок
     if (looksLikeAdCode(key)) {
       const url = new URL(window.location.href);
       if (url.searchParams.get("ad") !== key) {
         url.searchParams.set("ad", key);
-        // replace без смены роута — минимальная мутация истории
         window.history.replaceState({}, "", `${url.pathname}${url.search}`);
       }
       markDone();

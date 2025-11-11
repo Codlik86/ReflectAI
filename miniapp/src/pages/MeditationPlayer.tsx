@@ -16,7 +16,11 @@ function findById(id?: string) {
   return undefined;
 }
 
-const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !("MSStream" in window);
+const isIOS =
+  typeof navigator !== "undefined" &&
+  /iPad|iPhone|iPod/.test(navigator.userAgent) &&
+  typeof window !== "undefined" &&
+  !("MSStream" in (window as any));
 
 function PlayIcon({ size = 34 }: { size?: number }) {
   return (
@@ -47,7 +51,7 @@ export default function MeditationPlayer() {
     (meta as any)?.url ??
     "https://cdn.pixabay.com/download/audio/2022/03/15/audio_e4a79d.mp3?filename=calm-meditation-110624.mp3";
 
-  // --- гард доступа
+  // --- гард доступа (БЕЗ автозапуска триала)
   const checkedRef = React.useRef(false);
   React.useEffect(() => {
     if (checkedRef.current) return;
@@ -55,7 +59,7 @@ export default function MeditationPlayer() {
     let cancelled = false;
     (async () => {
       try {
-        const snap = await ensureAccess(false);
+        const snap = await ensureAccess({ startTrial: false });
         if (!cancelled && !snap.has_access) {
           navigate(`/paywall?from=${encodeURIComponent(`/meditations/${id || ""}`)}`, { replace: true });
         }
@@ -91,7 +95,7 @@ export default function MeditationPlayer() {
 
     html.style.overflow = "hidden";
     body.style.overflow = "hidden";
-    html.style.overscrollBehavior = "contain"; // гасим «перетяг»
+    html.style.overscrollBehavior = "contain";
     return () => {
       html.style.overflow = prevHtmlOverflow;
       body.style.overflow = prevBodyOverflow;
@@ -238,19 +242,15 @@ export default function MeditationPlayer() {
   const p = duration > 0 ? current / duration : 0;
 
   return (
-    // фиксируем высоту и режем лишнее
     <div className="flex flex-col" style={{ height: "100dvh", overflow: "hidden" }}>
       <BackBar title={title} to="/meditations" />
 
-      {/* скрытый источник */}
       <audio ref={audioRef} preload="auto" playsInline />
 
-      {/* Контент растягивается, но без прокрутки */}
       <div
         className="px-5 pb-6 flex-1 overflow-hidden"
         style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 98px)" }}
       >
-        {/* ... UI без изменений ... */}
         <div className="flex justify-center mt-2">
           <div
             className="w-[80%] max-w-[520px] aspect-square rounded-3xl"
@@ -270,7 +270,6 @@ export default function MeditationPlayer() {
         </div>
 
         <div className="mt-5 rounded-3xl bg-white/70 backdrop-blur px-5 pt-6 pb-6">
-          {/* Прогресс */}
           <div
             className="relative h-[6px] w-full rounded-full bg-black/12 select-none"
             style={{ touchAction: "none" }}
@@ -316,7 +315,6 @@ export default function MeditationPlayer() {
             <span aria-label="Длительность">{fmt(duration)}</span>
           </div>
 
-          {/* Кнопки */}
           <div className="mt-4 flex items-center justify-center gap-10">
             <button
               className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)]"
@@ -349,7 +347,6 @@ export default function MeditationPlayer() {
             </button>
           </div>
 
-          {/* Громкость */}
           <div className="mt-2">
             <input
               type="range"
@@ -368,9 +365,6 @@ export default function MeditationPlayer() {
           <Link to="/meditations" className="text-ink-500 text-[14px]">К списку медитаций</Link>
         </div>
       </div>
-
-      {/* нижняя панель управления (как была) */}
-      {/* если у тебя она fixed в другом месте — оставь как есть */}
     </div>
   );
 }
