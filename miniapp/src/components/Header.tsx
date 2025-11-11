@@ -10,8 +10,8 @@ const pub = (p: string) => `${base}${p}`.replace(/\/+/, "/");
 const BOT_USERNAME =
   (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
 
-function openBotHelp() {
-  const startPayload = "help";
+function openBotTalk() {
+  const startPayload = "talk";
   const tgDeep = `tg://resolve?domain=${encodeURIComponent(BOT_USERNAME)}&start=${encodeURIComponent(startPayload)}`;
   const httpsUrl = `https://t.me/${BOT_USERNAME}?start=${encodeURIComponent(startPayload)}`;
 
@@ -26,19 +26,16 @@ function openBotHelp() {
 
   try {
     if (wa?.openTelegramLink) {
-      // Пробуем deep-link (внутри Telegram предпочтительно)
       wa.openTelegramLink(tgDeep);
-      // Параллельно даём https-фоллбек (если deep-link не сработал)
+      // подстрахуемся https-ссылкой (иногда deep-схема игнорится)
       wa.openTelegramLink(httpsUrl);
     } else if (typeof window !== "undefined") {
-      // Обычный веб: сначала deep-link, потом https-фоллбек
       try { window.location.href = tgDeep; } catch {}
       window.open(httpsUrl, "_blank", "noopener,noreferrer");
     }
   } catch {
     window.open(httpsUrl, "_blank", "noopener,noreferrer");
   } finally {
-    // Мягко закрываем webview после запуска перехода
     setTimeout(safeClose, 120);
   }
 }
@@ -67,10 +64,10 @@ export default function Header() {
 
       <button
         type="button"
-        onClick={openBotHelp}
+        onClick={openBotTalk}
         className="text-[16px] font-medium text-ink-900 hover:opacity-80 active:opacity-70"
       >
-        Связаться
+        Поговорить
       </button>
     </header>
   );
