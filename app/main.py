@@ -226,7 +226,7 @@ async def on_startup():
             BotCommand(command="pay",          description="💳 Подписка"),
             BotCommand(command="settings",     description="⚙️ Настройки"),
             BotCommand(command="policy",       description="📜 Политика и правила"),
-            BotCommand(command="help",         description="🆘 Помощь"),
+            BotCommand(command="about",        description="ℹ️ О проекте"),
         ])
     except Exception as e:
         print("[startup] set_my_commands ERROR:", repr(e))
