@@ -1,3 +1,4 @@
+// src/pages/Home.tsx
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import { ensureAccess } from "../lib/guard";
@@ -22,26 +23,37 @@ export default function Home() {
     [navigate]
   );
 
+  // небольшой хелпер: почистить кэш гарда, чтобы не залипал "зелёный" статус
+  const clearAccessCache = React.useCallback(() => {
+    try {
+      sessionStorage.removeItem("ACCESS_OK_UNTIL");
+      sessionStorage.removeItem("ACCESS_NO_UNTIL");
+    } catch {}
+  }, []);
+
   // Унифицированный хелпер: решает, куда вести — к контенту, на paywall по policy, либо на paywall по оплате
   const guardTo = React.useCallback(
     async (path: string) => {
       if (busyRef.current) return;
       busyRef.current = true;
       try {
+        // ВАЖНО: без автозапуска триала
         const snap = await ensureAccess({ startTrial: false });
         if (snap.has_access) {
           safeNavigate(path);
         } else {
+          clearAccessCache();
           const reason = snap.needs_policy ? "policy" : "billing";
           safeNavigate(`/paywall?from=${encodeURIComponent(path)}&reason=${reason}`);
         }
       } catch {
+        clearAccessCache();
         safeNavigate(`/paywall?from=${encodeURIComponent(path)}`);
       } finally {
         setTimeout(() => (busyRef.current = false), 150);
       }
     },
-    [safeNavigate]
+    [safeNavigate, clearAccessCache]
   );
 
   const onExercises = () => guardTo("/exercises");
@@ -72,20 +84,22 @@ export default function Home() {
     }, 120);
   };
 
-  // «Поговорить»: осмысленное действие → можно автозапуск триала; если нет доступа — пейвол.
+  // «Поговорить»: БЕЗ автозапуска триала. Если доступа нет — идём на пейвол.
   const onTalk = async () => {
     if (busyRef.current) return;
     busyRef.current = true;
 
     try {
-      const snap = await ensureAccess({ startTrial: true });
+      const snap = await ensureAccess({ startTrial: false }); // <— ключевое изменение
       if (snap.has_access) {
         openBotWithStart("talk");
         return;
       }
+      clearAccessCache();
       const reason = snap.needs_policy ? "policy" : "billing";
       safeNavigate(`/paywall?from=${encodeURIComponent("/")}&reason=${reason}`);
     } catch {
+      clearAccessCache();
       safeNavigate(`/paywall?from=${encodeURIComponent("/")}`);
     } finally {
       setTimeout(() => (busyRef.current = false), 150);
