@@ -1,3 +1,4 @@
+// src/pages/Paywall.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import BackBar from "../components/BackBar";
@@ -106,10 +107,11 @@ export default function Paywall() {
     const untilMs = s.until ? new Date(s.until).getTime() : 0;
     const hasByFlag = !!s.has_access;
     const active = s.status === "active" && untilMs > nowMs();
-    const trial = s.status === "trial" && untilMs > nowMs();
+    const trial  = s.status === "trial"  && untilMs > nowMs();
+    const expired = Boolean(untilMs && untilMs <= nowMs()); // <-- считаем истёкшим по факту дедлайна
 
     if (hasByFlag || active || trial) return "has-access";
-    if (s.status && s.status !== "none" && untilMs && untilMs <= nowMs()) return "expired";
+    if (expired) return "expired";                             // <-- не зависим от status !== "none"
     if (s.status === "none") return "pre-trial";
     return "pre-trial";
   }, [status, loading]);
