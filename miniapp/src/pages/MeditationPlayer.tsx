@@ -81,6 +81,24 @@ export default function MeditationPlayer() {
   const sourceRef = React.useRef<MediaElementAudioSourceNode | null>(null);
   const gainRef = React.useRef<GainNode | null>(null);
 
+  // --- запрет скролла ТОЛЬКО на этой странице
+  React.useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtmlOverflow = html.style.overflow;
+    const prevBodyOverflow = body.style.overflow;
+    const prevHtmlOverscroll = html.style.overscrollBehavior;
+
+    html.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    html.style.overscrollBehavior = "contain"; // гасим «перетяг»
+    return () => {
+      html.style.overflow = prevHtmlOverflow;
+      body.style.overflow = prevBodyOverflow;
+      html.style.overscrollBehavior = prevHtmlOverscroll;
+    };
+  }, []);
+
   // --- RAF-тикер
   const rafIdRef = React.useRef<number | null>(null);
   const startTicker = () => {
@@ -220,13 +238,18 @@ export default function MeditationPlayer() {
   const p = duration > 0 ? current / duration : 0;
 
   return (
-    <div className="min-h-dvh flex flex-col">
+    // фиксируем высоту и режем лишнее
+    <div className="flex flex-col" style={{ height: "100dvh", overflow: "hidden" }}>
       <BackBar title={title} to="/meditations" />
 
       {/* скрытый источник */}
       <audio ref={audioRef} preload="auto" playsInline />
 
-      <div className="px-5 pb-6" style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 98px)" }}>
+      {/* Контент растягивается, но без прокрутки */}
+      <div
+        className="px-5 pb-6 flex-1 overflow-hidden"
+        style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 98px)" }}
+      >
         {/* ... UI без изменений ... */}
         <div className="flex justify-center mt-2">
           <div
@@ -250,11 +273,11 @@ export default function MeditationPlayer() {
           {/* Прогресс */}
           <div
             className="relative h-[6px] w-full rounded-full bg-black/12 select-none"
-            style={{ touchAction: "none" }}                    
+            style={{ touchAction: "none" }}
             onPointerDown={(e) => {
               if (!duration) return;
               dragging.current = true;
-              (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);  {/* ← захват указателя */}
+              (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
               const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
               const x = Math.min(rect.width, Math.max(0, e.clientX - rect.left));
               seekTo((duration || 0) * (x / rect.width));
@@ -297,9 +320,9 @@ export default function MeditationPlayer() {
           <div className="mt-4 flex items-center justify-center gap-10">
             <button
               className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)]"
-              style={{ touchAction: "manipulation" }}               
-              onPointerDown={(e) => e.preventDefault()}             
-              onPointerUp={() => skip(-15)}                        
+              style={{ touchAction: "manipulation" }}
+              onPointerDown={(e) => e.preventDefault()}
+              onPointerUp={() => skip(-15)}
               aria-label="Назад 15 секунд"
             >
               {"\u25C0\u25C0"}
@@ -309,7 +332,7 @@ export default function MeditationPlayer() {
               className="px-2 py-2 text-[rgba(47,47,47,.95)]"
               style={{ touchAction: "manipulation" }}
               onPointerDown={(e) => e.preventDefault()}
-              onPointerUp={togglePlay}                              
+              onPointerUp={togglePlay}
               aria-label={playing ? "Пауза" : "Пуск"}
             >
               {playing ? <PauseIcon /> : <PlayIcon />}
@@ -345,6 +368,9 @@ export default function MeditationPlayer() {
           <Link to="/meditations" className="text-ink-500 text-[14px]">К списку медитаций</Link>
         </div>
       </div>
+
+      {/* нижняя панель управления (как была) */}
+      {/* если у тебя она fixed в другом месте — оставь как есть */}
     </div>
   );
 }
