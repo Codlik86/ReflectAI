@@ -81,7 +81,7 @@ export default function MeditationPlayer() {
   const sourceRef = React.useRef<MediaElementAudioSourceNode | null>(null);
   const gainRef = React.useRef<GainNode | null>(null);
 
-  // --- RAF-тикер как резерв к timeupdate (в некоторых webview он редкий)
+  // --- RAF-тикер
   const rafIdRef = React.useRef<number | null>(null);
   const startTicker = () => {
     stopTicker();
@@ -115,7 +115,6 @@ export default function MeditationPlayer() {
         sourceRef.current = srcNode;
         gainRef.current = gain;
       } catch {
-        // нет CORS — просто выходим, останемся на системной громкости
         return;
       }
     }
@@ -130,15 +129,10 @@ export default function MeditationPlayer() {
     const a = audioRef.current;
     if (!a) return;
 
-    // ВАЖНО: назначаем CORS до src
     a.crossOrigin = "anonymous";
 
-    const onLoaded = () => {
-      setDuration(Number.isFinite(a.duration) ? a.duration : 0);
-    };
-    const onTime = () => {
-      if (!dragging.current) setCurrent(a.currentTime || 0);
-    };
+    const onLoaded = () => setDuration(Number.isFinite(a.duration) ? a.duration : 0);
+    const onTime = () => { if (!dragging.current) setCurrent(a.currentTime || 0); };
     const onPlay = () => { setPlaying(true); startTicker(); };
     const onPause = () => { setPlaying(false); stopTicker(); };
     const onEnded = () => { setPlaying(false); stopTicker(); setCurrent(a.duration || 0); };
@@ -151,7 +145,6 @@ export default function MeditationPlayer() {
     a.addEventListener("ended", onEnded);
     a.addEventListener("error", onError);
 
-    // полный сброс при смене src
     setPlaying(false);
     setCurrent(0);
     a.pause();
@@ -183,7 +176,7 @@ export default function MeditationPlayer() {
     }
   }, [volume]);
 
-  // Чистка WebAudio при размонтировании
+  // Чистка WebAudio
   React.useEffect(() => {
     return () => {
       try {
@@ -198,21 +191,14 @@ export default function MeditationPlayer() {
   const togglePlay = async () => {
     const a = audioRef.current;
     if (!a) return;
-    await ensureWebAudio(); // iOS «пинок»
+    await ensureWebAudio();
 
-    if (playing) {
-      a.pause();
-      return;
-    }
+    if (playing) { a.pause(); return; }
     try {
       if (a.readyState < 2) a.load();
       await a.play();
     } catch {
-      // если play() отклонён — дождёмся canplay и повторим
-      const once = () => {
-        a.removeEventListener("canplay", once);
-        a.play().catch(() => {});
-      };
+      const once = () => { a.removeEventListener("canplay", once); a.play().catch(() => {}); };
       a.addEventListener("canplay", once, { once: true });
     }
   };
@@ -264,9 +250,11 @@ export default function MeditationPlayer() {
           {/* Прогресс */}
           <div
             className="relative h-[6px] w-full rounded-full bg-black/12 select-none"
+            style={{ touchAction: "none" }}                    
             onPointerDown={(e) => {
               if (!duration) return;
               dragging.current = true;
+              (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);  {/* ← захват указателя */}
               const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
               const x = Math.min(rect.width, Math.max(0, e.clientX - rect.left));
               seekTo((duration || 0) * (x / rect.width));
@@ -307,14 +295,49 @@ export default function MeditationPlayer() {
 
           {/* Кнопки */}
           <div className="mt-4 flex items-center justify-center gap-10">
-            <button className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)]" onClick={() => skip(-15)} aria-label="Назад 15 секунд">{"\u25C0\u25C0"}</button>
-            <button className="px-2 py-2 text-[rgba(47,47,47,.95)]" onClick={togglePlay} onPointerDown={(e) => e.preventDefault()} aria-label={playing ? "Пауза" : "Пуск"}>{playing ? <PauseIcon /> : <PlayIcon />}</button>
-            <button className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)]" onClick={() => skip(+15)} aria-label="Вперёд 15 секунд">{"\u25B6\u25B6"}</button>
+            <button
+              className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)]"
+              style={{ touchAction: "manipulation" }}               
+              onPointerDown={(e) => e.preventDefault()}             
+              onPointerUp={() => skip(-15)}                        
+              aria-label="Назад 15 секунд"
+            >
+              {"\u25C0\u25C0"}
+            </button>
+
+            <button
+              className="px-2 py-2 text-[rgba(47,47,47,.95)]"
+              style={{ touchAction: "manipulation" }}
+              onPointerDown={(e) => e.preventDefault()}
+              onPointerUp={togglePlay}                              
+              aria-label={playing ? "Пауза" : "Пуск"}
+            >
+              {playing ? <PauseIcon /> : <PlayIcon />}
+            </button>
+
+            <button
+              className="px-2 py-2 text-[22px] text-[rgba(47,47,47,.95)]"
+              style={{ touchAction: "manipulation" }}
+              onPointerDown={(e) => e.preventDefault()}
+              onPointerUp={() => skip(+15)}
+              aria-label="Вперёд 15 секунд"
+            >
+              {"\u25B6\u25B6"}
+            </button>
           </div>
 
           {/* Громкость */}
           <div className="mt-2">
-            <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-full accent-[rgba(47,47,47,.95)]" aria-label="Громкость" />
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={volume}
+              onChange={(e) => setVolume(parseFloat(e.target.value))}
+              className="w-full accent-[rgba(47,47,47,.95)]"
+              aria-label="Громкость"
+            />
           </div>
         </div>
 
