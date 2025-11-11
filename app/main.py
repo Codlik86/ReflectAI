@@ -223,14 +223,10 @@ async def on_startup():
         await bot.set_my_commands([
             BotCommand(command="start",        description="▶️ Старт"),
             BotCommand(command="talk",         description="💬 Поговорить"),
-            BotCommand(command="work",         description="🌿 Разобраться"),
-            BotCommand(command="meditations",  description="🎧 Медитации"),
-            BotCommand(command="settings",     description="⚙️ Настройки"),
-            BotCommand(command="privacy",      description="🔒 Приватность (панель)"),
-            BotCommand(command="policy",       description="📜 Политика и правила"),
-            BotCommand(command="about",        description="ℹ️ О проекте"),
-            BotCommand(command="help",         description="🆘 Помощь"),
             BotCommand(command="pay",          description="💳 Подписка"),
+            BotCommand(command="settings",     description="⚙️ Настройки"),
+            BotCommand(command="policy",       description="📜 Политика и правила"),
+            BotCommand(command="help",         description="🆘 Помощь"),
         ])
     except Exception as e:
         print("[startup] set_my_commands ERROR:", repr(e))

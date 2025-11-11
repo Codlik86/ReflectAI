@@ -1419,7 +1419,7 @@ async def on_settings(m: Message):
 
 @router.callback_query(F.data == "menu:main")
 async def on_menu_main(cb: CallbackQuery):
-    await cb.message.answer("\u2063", reply_markup=kb_main_menu()); await cb.answer()
+    await cb.message.answer("Открываю меню", reply_markup=kb_main_menu()); await cb.answer()
 
 @router.callback_query(F.data == "menu:settings")
 async def on_menu_settings(cb: CallbackQuery):
