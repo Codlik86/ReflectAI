@@ -22,6 +22,7 @@ import About from "./pages/About";
 import Settings from "./pages/Settings";
 import Paywall from "./pages/Paywall";
 import MeditationPlayer from "./pages/MeditationPlayer";
+import Contact from "./pages/Contact"; // ← добавлено
 
 import "./index.css";
 
@@ -53,6 +54,7 @@ const router = createBrowserRouter(
 
         // Прочее
         { path: "about", element: <About /> },
+        { path: "contact", element: <Contact /> }, // ← добавлено
         { path: "settings", element: <Settings /> },
         { path: "paywall", element: <Paywall /> },
       ],

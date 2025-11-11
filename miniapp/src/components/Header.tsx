@@ -1,12 +1,11 @@
 // src/components/Header.tsx
 import * as React from "react";
 import { getTelegram } from "../lib/telegram";
+import { Link } from "react-router-dom"; // +++ добавили
 
-// Для логотипа используем public/ и BASE_URL — так не будет проблем с импортом файлов и пробелами
 const base = (import.meta as any)?.env?.BASE_URL || "/";
 const pub = (p: string) => `${base}${p}`.replace(/\/+/, "/");
 
-// Имя бота — из ENV, с дефолтом
 const BOT_USERNAME =
   (import.meta as any)?.env?.VITE_BOT_USERNAME || "reflectttaibot";
 
@@ -27,7 +26,6 @@ function openBotTalk() {
   try {
     if (wa?.openTelegramLink) {
       wa.openTelegramLink(tgDeep);
-      // подстрахуемся https-ссылкой (иногда deep-схема игнорится)
       wa.openTelegramLink(httpsUrl);
     } else if (typeof window !== "undefined") {
       try { window.location.href = tgDeep; } catch {}
@@ -47,7 +45,6 @@ export default function Header() {
                  flex items-center justify-between select-none"
     >
       <div className="flex items-center gap-2">
-        {/* Логотип из public/ (logo-pomni.svg) */}
         <img
           src={pub("logo-pomni.svg")}
           alt="Помни"
@@ -62,13 +59,13 @@ export default function Header() {
         <div className="text-[16px] font-semibold">ПОМНИ</div>
       </div>
 
-      <button
-        type="button"
-        onClick={openBotTalk}
+      {/* Было: кнопка «Поговорить» → стало: ссылка на /contact «Связаться» */}
+      <Link
+        to="/contact"
         className="text-[16px] font-medium text-ink-900 hover:opacity-80 active:opacity-70"
       >
-        Поговорить
-      </button>
+        Связаться
+      </Link>
     </header>
   );
 }
