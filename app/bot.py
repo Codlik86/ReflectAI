@@ -14,7 +14,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
- ReplyKeyboardRemove)
+    ReplyKeyboardRemove)
 # алиасы для клавиатуры (используются в нескольких местах, в т.ч. deep-link)
 from aiogram.types import InlineKeyboardMarkup as _IKM, InlineKeyboardButton as _IKB
 
@@ -2069,9 +2069,9 @@ async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
 class GateMiddleware(BaseMiddleware):
     """
     1) Пока не принят policy — разрешены только /start и onb:* (остальное — экран policy).
-    2) Policy принят, НО доступа нет — первое ДЕЙСТВИЕ пользователя автозапускает триал,
-       затем пропускаем исходный хендлер. Исключения: /pay и платёжные/служебные cb —
-       их пропускаем как есть (без автозапуска).
+    2) Policy принят, НО доступа нет:
+       • если триал ещё НИКОГДА не запускался — первое действие автозапускает триал и пропускается;
+       • если триал уже был (и закончился) — показываем пейволл и НИЧЕГО не пропускаем, кроме /pay и платёжных/служебных cb.
     3) Доступ открыт — пропускаем всё.
     """
     async def __call__(self, handler, event, data):
@@ -2093,23 +2093,47 @@ class GateMiddleware(BaseMiddleware):
 
             # 2) policy принят, но доступа нет
             if not access_ok:
+                # --- определяем: был ли когда-либо триал ---
+                trial_ever = False
+                try:
+                    async for session in get_session():
+                        from app.db.models import User
+                        u = (await session.execute(select(User).where(User.tg_id == int(tg_id)))).scalar_one_or_none()
+                        trial_ever = bool(getattr(u, "trial_started_at", None))
+                except Exception:
+                    trial_ever = False
+
                 if isinstance(event, Message):
                     t = (event.text or "")
-                    # /pay пропускаем без автозапуска триала
+
+                    # /pay пропускаем всегда
                     if t.startswith("/pay"):
                         return await handler(event, data)
-                    # любое другое первое действие — автостарт триала (если его ещё не было)
-                    await _maybe_start_trial_on_first_action(event)
-                    return await handler(event, data)
+
+                    # FIX: если триал ещё НИКОГДА не запускался — автозапуск и пропуск
+                    if not trial_ever:
+                        await _maybe_start_trial_on_first_action(event)
+                        return await handler(event, data)
+
+                    # FIX: триал уже был (и закончился) — только пейволл, без прохождения дальше
+                    await _gate_send_paywall(event)
+                    return
 
                 if isinstance(event, CallbackQuery):
                     d = (event.data or "")
-                    # платёжные/служебные — пропускаем без автостарта
+
+                    # платёжные/служебные cb пропускаем
                     if d.startswith(ALLOWED_CB_PREFIXES):
                         return await handler(event, data)
-                    # любые другие кнопки — автостарт триала
-                    await _maybe_start_trial_on_first_action(event)
-                    return await handler(event, data)
+
+                    # FIX: если триал ещё не запускался — автозапуск
+                    if not trial_ever:
+                        await _maybe_start_trial_on_first_action(event)
+                        return await handler(event, data)
+
+                    # FIX: триал уже был — блокируем пейволлом
+                    await _gate_send_paywall(event)
+                    return
 
             # 3) доступ открыт
             return await handler(event, data)
