@@ -346,7 +346,7 @@ def _looks_like_memory_question(txt: str) -> bool:
         return True
     if ("о чем" in t or "о чём" in t) and any(s in t for s in syn):
         return True
-    if "не помнишь" in t and ("о чем" in t or "о чём" in t or "что было" in t):
+    if "не помнишь" in t and (("о чем" in t) or ("о чём" in t) or ("что было" in t)):
         return True
     return False
 
@@ -910,7 +910,7 @@ async def on_settings_tone(cb: CallbackQuery):
 async def on_settings_privacy(cb: CallbackQuery):
     async for session in get_session():
         u = await _get_user_by_tg(session, cb.from_user.id)
-        if not u or not await _enforce_access_or_paywall(cb, session, u.id):
+        if (not u) or (not await _enforce_access_or_paywall(cb, session, u.id)):
             return
     rm = await kb_privacy_for(cb.message.chat.id)
     await _safe_edit(cb.message, "Приватность:", reply_markup=rm); await cb.answer()
@@ -1310,6 +1310,7 @@ async def _gate_send_policy(event: AllowedEvent) -> None:
     target = event.message if isinstance(event, CallbackQuery) else event
     await target.answer(text_msg, reply_markup=kb)
 
+# ---------- ПРАВКА №2: усилили защиту автозапуска триала ----------
 async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
     try:
         tg_id = getattr(getattr(event, "from_user", None), "id", None)
@@ -1318,12 +1319,27 @@ async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
         async for session in get_session():
             from app.db.models import User
             u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
-            if not u: return
-            if await check_access(session, u.id): return
-            if getattr(u, "trial_started_at", None) is not None: return
+            if not u:
+                return
+            # 0) есть доступ — выходим
+            if await check_access(session, u.id):
+                return
+            # 1) если триал когда-либо запускался ИЛИ есть зафиксированный его конец — не новый
+            if getattr(u, "trial_started_at", None) is not None or getattr(u, "trial_expires_at", None) is not None:
+                return
+            # 2) если есть ЛЮБАЯ запись в subscriptions — не новый
+            row = await session.execute(
+                text("SELECT 1 FROM subscriptions WHERE user_id = :uid LIMIT 1"),
+                {"uid": int(u.id)},
+            )
+            if row.first() is not None:
+                return
+
+            # 3) только теперь можно автозапускать триал
             started, expires = await start_trial_for_user(session, u.id)
             await session.commit()
-            if not started: return
+            if not started:
+                return
         target_msg = event.message if isinstance(event, CallbackQuery) else event
         try:
             await target_msg.answer(
@@ -1334,6 +1350,7 @@ async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
             pass
     except Exception:
         return
+# -------------------------------------------------------
 
 class GateMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -1352,14 +1369,24 @@ class GateMiddleware(BaseMiddleware):
                 await _gate_send_policy(event); return
 
             if not access_ok:
+                # ---------- ПРАВКА №1: корректно определяем trial_ever ----------
                 trial_ever = False
                 try:
                     async for session in get_session():
                         from app.db.models import User
                         u = (await session.execute(select(User).where(User.tg_id == int(tg_id)))).scalar_one_or_none()
-                        trial_ever = bool(getattr(u, "trial_started_at", None))
+                        if u:
+                            if getattr(u, "trial_started_at", None) is not None or getattr(u, "trial_expires_at", None) is not None:
+                                trial_ever = True
+                            else:
+                                r = await session.execute(
+                                    text("SELECT 1 FROM subscriptions WHERE user_id = :uid LIMIT 1"),
+                                    {"uid": int(u.id)},
+                                )
+                                trial_ever = r.first() is not None
                 except Exception:
                     trial_ever = False
+                # ---------------------------------------------------------------
 
                 if isinstance(event, Message):
                     t = (event.text or "")
