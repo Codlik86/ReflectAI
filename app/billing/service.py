@@ -24,7 +24,7 @@ PRICES_RUB: dict[Plan, int] = {
 # На сколько продлеваем подписку
 PLAN_TO_DELTA: dict[Plan, timedelta] = {
     "week": timedelta(days=7),
-    "month": timedelta(days=30),     # календарные месяцы можно позже заменить на dateutil.relativedelta
+    "month": timedelta(days=30),
     "quarter": timedelta(days=90),
     "year": timedelta(days=365),
 }
@@ -42,7 +42,7 @@ def plan_price_rub(plan: str | None) -> int:
 
 
 # -------------------------------
-# Основная фиксация успешного платежа (webhook может звать/переиспользовать)
+# Основная фиксация успешного платежа
 # -------------------------------
 
 async def apply_success_payment(
@@ -52,50 +52,64 @@ async def apply_success_payment(
     payment_method_id: Optional[str],
     customer_id: Optional[str],
     session: AsyncSession,
-    raw_event: Optional[dict] = None,  # <--- можно прокинуть тело ответа ЮKassa
+    raw_event: Optional[dict] = None,
+    *,
+    provider: str = "yookassa",
+    currency: str = "RUB",
+    is_recurring: bool = True,
+    amount_override: Optional[int] = None,
 ) -> None:
     """
     Фиксируем успешный платёж и продлеваем подписку.
     Таблицы: payments, subscriptions (и users только читаем).
+
+    provider/currency/is_recurring/amount_override позволяют переиспользовать
+    функцию для разных провайдеров (YooKassa, Telegram Stars и т.п.).
     """
     if plan not in PRICES_RUB:
         raise ValueError(f"Unknown plan: {plan}")
 
     now = datetime.now(timezone.utc)
-    amount = PRICES_RUB[plan]
+    amount = amount_override if amount_override is not None else PRICES_RUB[plan]
     delta = PLAN_TO_DELTA[plan]
 
     # 1) Записываем платёж
-    insert_payment_sql = text("""
+    insert_payment_sql = text(
+        """
         INSERT INTO payments (
             user_id, provider, provider_payment_id,
             amount, currency, status, is_recurring, created_at, updated_at, raw
         ) VALUES (
-            :user_id, 'yookassa', :provider_payment_id,
-            :amount, 'RUB', 'succeeded', true, :now, :now, CAST(:raw_json AS JSON)
+            :user_id, :provider, :provider_payment_id,
+            :amount, :currency, 'succeeded', :is_recurring, :now, :now, CAST(:raw_json AS JSON)
         )
         ON CONFLICT DO NOTHING
-    """)
+    """
+    )
     await session.execute(
         insert_payment_sql,
         {
             "user_id": user_id,
+            "provider": provider,
             "provider_payment_id": provider_payment_id,
             "amount": amount,
+            "currency": currency,
+            "is_recurring": is_recurring,
             "now": now,
-            # ВАЖНО: сериализуем dict -> JSON-строку (иначе psycopg не примет)
             "raw_json": json.dumps(raw_event or {}),
         },
     )
 
     # 2) Читаем текущую подписку пользователя (если есть)
-    select_sub_sql = text("""
+    select_sub_sql = text(
+        """
         SELECT id, subscription_until
         FROM subscriptions
         WHERE user_id = :user_id
         ORDER BY id DESC
         LIMIT 1
-    """)
+    """
+    )
     row = (await session.execute(select_sub_sql, {"user_id": user_id})).first()
     current_until = row[1] if row else None
 
@@ -104,17 +118,19 @@ async def apply_success_payment(
     new_until = base_start + delta
 
     if row:
-        update_sql = text("""
+        update_sql = text(
+            """
             UPDATE subscriptions
             SET plan = :plan,
                 status = 'active',
-                is_auto_renew = true,
+                is_auto_renew = :is_recurring,
                 subscription_until = :new_until,
                 yk_payment_method_id = COALESCE(:pm_id, yk_payment_method_id),
                 yk_customer_id = COALESCE(:cust_id, yk_customer_id),
                 updated_at = :now
             WHERE user_id = :user_id
-        """)
+        """
+        )
         await session.execute(
             update_sql,
             {
@@ -124,20 +140,23 @@ async def apply_success_payment(
                 "cust_id": customer_id,
                 "now": now,
                 "user_id": user_id,
+                "is_recurring": is_recurring,
             },
         )
     else:
-        insert_sub_sql = text("""
+        insert_sub_sql = text(
+            """
             INSERT INTO subscriptions (
                 user_id, plan, status, is_auto_renew,
                 subscription_until, yk_payment_method_id, yk_customer_id,
                 created_at, updated_at
             ) VALUES (
-                :user_id, :plan, 'active', true,
+                :user_id, :plan, 'active', :is_recurring,
                 :new_until, :pm_id, :cust_id,
                 :now, :now
             )
-        """)
+        """
+        )
         await session.execute(
             insert_sub_sql,
             {
@@ -147,6 +166,7 @@ async def apply_success_payment(
                 "pm_id": payment_method_id,
                 "cust_id": customer_id,
                 "now": now,
+                "is_recurring": is_recurring,
             },
         )
 

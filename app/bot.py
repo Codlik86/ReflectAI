@@ -1,4 +1,3 @@
-# app/bot.py
 from __future__ import annotations
 
 import os
@@ -15,6 +14,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardRemove,
+    LabeledPrice,
+    PreCheckoutQuery,
 )
 
 # алиасы для клавиатуры (используются в нескольких местах, в т.ч. deep-link)
@@ -53,8 +54,15 @@ from app.rag_summaries import search_summaries, delete_user_summaries
 from sqlalchemy import text, select
 from app.db.core import async_session, get_session
 from app.billing.yookassa_client import create_payment_link
-from app.billing.service import start_trial_for_user, check_access, is_trial_active
-from app.billing.service import disable_auto_renew, cancel_subscription_now, get_active_subscription_row
+from app.billing.service import (
+    start_trial_for_user,
+    check_access,
+    is_trial_active,
+    disable_auto_renew,
+    cancel_subscription_now,
+    get_active_subscription_row,
+    apply_success_payment,
+)
 
 from zoneinfo import ZoneInfo
 from collections import deque
@@ -79,6 +87,7 @@ class LogIncomingMiddleware(BaseMiddleware):
             print("[log-mw] error:", repr(e))
         return await handler(event, data)
 
+
 async def _log_message_by_tg(tg_id: int, role: str, text_: str) -> None:
     try:
         mode = (await _db_get_privacy(int(tg_id)) or "insights").lower()
@@ -95,10 +104,12 @@ async def _log_message_by_tg(tg_id: int, role: str, text_: str) -> None:
 
         async with async_session() as s:
             await s.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO bot_messages (user_id, role, text, created_at)
                     VALUES (:u, :r, :t, CURRENT_TIMESTAMP)
-                """),
+                """
+                ),
                 {"u": int(uid), "r": role_norm, "t": safe},
             )
             await s.commit()
@@ -106,6 +117,7 @@ async def _log_message_by_tg(tg_id: int, role: str, text_: str) -> None:
         _buf_push(int(tg_id), role_norm, safe)
     except Exception as e:
         print("[log-db] error:", repr(e))
+
 
 async def send_and_log(message: Message, text_: str, **kwargs):
     kwargs.setdefault("disable_web_page_preview", True)
@@ -115,6 +127,7 @@ async def send_and_log(message: Message, text_: str, **kwargs):
     except Exception as e:
         print("[send-log] error:", repr(e))
     return sent
+
 
 # ===== /start с paid_* deeplink =====
 @router.message(F.text.regexp(r"^/start\s+paid_(ok|canceled|fail)$"))
@@ -128,14 +141,17 @@ async def on_start_payment_deeplink(m: Message):
         )
         return
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:open")],
-        [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
-    ])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:open")],
+            [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
+        ]
+    )
     await m.answer(
         "Похоже, оплата не завершилась или была отменена.\nМожно попробовать ещё раз — это безопасно и займёт минуту.",
         reply_markup=kb,
     )
+
 
 # === /start <payload> (deeplink из рекламы и служебные) ===
 @router.message(F.text.regexp(r"^/start(\s+.+)?$"))
@@ -162,11 +178,18 @@ async def on_start_with_payload(m: Message):
             if MINIAPP_URL:
                 kb = InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="Открыть мини-приложение", web_app=WebAppInfo(url=MINIAPP_URL))],
+                        [
+                            InlineKeyboardButton(
+                                text="Открыть мини-приложение",
+                                web_app=WebAppInfo(url=MINIAPP_URL),
+                            )
+                        ],
                         [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
                     ]
                 )
-                await m.answer("Открой мини-приложение, там «Упражнения» и «Медитации».", reply_markup=kb)
+                await m.answer(
+                    "Открой мини-приложение, там «Упражнения» и «Медитации».", reply_markup=kb
+                )
             else:
                 await m.answer("Ссылка на мини-приложение не настроена. Укажи MINIAPP_URL в ENV.")
         except Exception:
@@ -180,25 +203,35 @@ async def on_start_with_payload(m: Message):
             async with async_session() as s:
                 ad_id = None
                 if ad_code and ad_code.isalnum():
-                    r = await s.execute(_sql("SELECT id FROM ads WHERE code = :c LIMIT 1"), {"c": ad_code})
-                    row = r.first(); ad_id = int(row[0]) if row else None
+                    r = await s.execute(
+                        _sql("SELECT id FROM ads WHERE code = :c LIMIT 1"), {"c": ad_code}
+                    )
+                    row = r.first()
+                    ad_id = int(row[0]) if row else None
 
                 raw_j = {
                     "text": m.text,
-                    "date": getattr(m, "date", None).isoformat() if getattr(m, "date", None) else None,
+                    "date": getattr(m, "date", None).isoformat()
+                    if getattr(m, "date", None)
+                    else None,
                     "chat_id": m.chat.id,
                 }
-                await s.execute(_sql("""
+                await s.execute(
+                    _sql(
+                        """
                     INSERT INTO ad_starts (ad_id, start_code, tg_user_id, username, first_name, ref_channel, raw_payload, created_at)
                     VALUES (:ad_id, :code, :tg, :un, :fn, NULL, :raw, NOW())
-                """), {
-                    "ad_id": ad_id,
-                    "code": payload,
-                    "tg": int(m.from_user.id),
-                    "un": getattr(m.from_user, "username", None),
-                    "fn": getattr(m.from_user, "first_name", None),
-                    "raw": json.dumps(raw_j, ensure_ascii=False),
-                })
+                """
+                    ),
+                    {
+                        "ad_id": ad_id,
+                        "code": payload,
+                        "tg": int(m.from_user.id),
+                        "un": getattr(m.from_user, "username", None),
+                        "fn": getattr(m.from_user, "first_name", None),
+                        "raw": json.dumps(raw_j, ensure_ascii=False),
+                    },
+                )
                 await s.commit()
                 saved = True
         except Exception as e:
@@ -215,6 +248,7 @@ async def on_start_with_payload(m: Message):
             pass
     await m.answer(prefix + ONB_1_TEXT, reply_markup=kb_onb_step1())
 
+
 # ===== async DB helpers / privacy / history =====
 async def _ensure_user_id(tg_id: int) -> int:
     async with async_session() as s:
@@ -222,20 +256,26 @@ async def _ensure_user_id(tg_id: int) -> int:
         uid = r.scalar()
         if uid is None:
             r = await s.execute(
-                text("""
+                text(
+                    """
                     INSERT INTO users (tg_id, privacy_level, style_profile, created_at)
                     VALUES (:tg, 'ask', 'default', NOW())
                     RETURNING id
-                """),
+                """
+                ),
                 {"tg": int(tg_id)},
             )
             uid = r.scalar_one()
             await s.commit()
         return int(uid)
 
+
 from sqlalchemy import text as _t
 
-async def _load_history_from_db(tg_id: int, *, limit: int = 120, hours: int = 24*30) -> list[dict]:
+
+async def _load_history_from_db(
+    tg_id: int, *, limit: int = 120, hours: int = 24 * 30
+) -> list[dict]:
     uid = await _ensure_user_id(tg_id)
     try:
         mode = (await _db_get_privacy(int(tg_id)) or "insights").lower()
@@ -251,17 +291,21 @@ async def _load_history_from_db(tg_id: int, *, limit: int = 120, hours: int = 24
         return out
 
     async with async_session() as s:
-        rows = (await s.execute(
-            _t("""
+        rows = (
+            await s.execute(
+                _t(
+                    """
                 SELECT role, text
                 FROM bot_messages
                 WHERE user_id = :uid
                   AND created_at >= NOW() - (:hours::text || ' hours')::interval
                 ORDER BY id ASC
                 LIMIT :lim
-            """),
-            {"uid": int(uid), "hours": int(hours), "lim": int(limit)}
-        )).mappings().all()
+            """
+                ),
+                {"uid": int(uid), "hours": int(hours), "lim": int(limit)},
+            )
+        ).mappings().all()
 
     msgs: list[dict] = []
     for r in rows:
@@ -277,31 +321,43 @@ async def _load_history_from_db(tg_id: int, *, limit: int = 120, hours: int = 24
                 content = r.get("text") or ""
                 key = (role, content)
                 if key not in seen:
-                    msgs.append({"role": role, "content": content}); seen.add(key)
+                    msgs.append({"role": role, "content": content})
+                    seen.add(key)
     except Exception:
         pass
     return msgs
 
+
 async def _db_get_privacy(tg_id: int) -> str:
     async with async_session() as s:
-        r = await s.execute(text("SELECT privacy_level FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+        r = await s.execute(
+            text("SELECT privacy_level FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)}
+        )
         val = r.scalar()
     return (val or "insights")
 
+
 async def _db_set_privacy(tg_id: int, mode: str) -> None:
     async with async_session() as s:
-        await s.execute(text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"),
-                        {"m": mode, "tg": int(tg_id)})
+        await s.execute(
+            text("UPDATE users SET privacy_level = :m WHERE tg_id = :tg"),
+            {"m": mode, "tg": int(tg_id)},
+        )
         await s.commit()
+
 
 async def _purge_user_history(tg_id: int) -> int:
     deleted = 0
     try:
         async with async_session() as s:
-            r = await s.execute(text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+            r = await s.execute(
+                text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)}
+            )
             uid = r.scalar()
             if uid:
-                res = await s.execute(text("DELETE FROM bot_messages WHERE user_id = :u"), {"u": int(uid)})
+                res = await s.execute(
+                    text("DELETE FROM bot_messages WHERE user_id = :u"), {"u": int(uid)}
+                )
                 await s.commit()
                 try:
                     deleted = int(getattr(res, "rowcount", 0) or 0)
@@ -312,8 +368,10 @@ async def _purge_user_history(tg_id: int) -> int:
     RECENT_BUFFER.pop(int(tg_id), None)
     return deleted
 
+
 # --- Memory Q hook («что мы говорили X назад?») ---
 _TIME_NUM = re.compile(r"(\d+)")
+
 
 def _pick_window(txt: str) -> tuple[int, int, int, int]:
     t = (txt or "").lower()
@@ -321,34 +379,56 @@ def _pick_window(txt: str) -> tuple[int, int, int, int]:
     if "недавн" in t:
         hours = 3
     elif "мин" in t or "мину" in t:
-        m = _TIME_NUM.search(t); mins = int(m.group(1)) if m else 10
+        m = _TIME_NUM.search(t)
+        mins = int(m.group(1)) if m else 10
     elif "час" in t:
-        m = _TIME_NUM.search(t); hours = int(m.group(1)) if m else 3
+        m = _TIME_NUM.search(t)
+        hours = int(m.group(1)) if m else 3
     elif "дн" in t:
-        m = _TIME_NUM.search(t); days = int(m.group(1)) if m else 1
+        m = _TIME_NUM.search(t)
+        days = int(m.group(1)) if m else 1
     elif "недел" in t:
-        m = _TIME_NUM.search(t); weeks = int(m.group(1)) if m else 1
+        m = _TIME_NUM.search(t)
+        weeks = int(m.group(1)) if m else 1
     else:
         mins = 10
     return mins, hours, days, weeks
 
+
 def _looks_like_memory_question(txt: str) -> bool:
     t = (txt or "").lower()
     keys = [
-        "помнишь", "вспомни", "что мы говорили", "о чем мы говорили", "о чём мы говорили",
-        "что я говорил", "что я писал", "что я спрашивал",
-        "что было раньше", "мы обсуждали",
-        "мин назад", "час назад", "день назад", "неделю назад", "вчера", "сегодня",
-        "прошлый раз", "последний раз", "недавно",
+        "помнишь",
+        "вспомни",
+        "что мы говорили",
+        "о чем мы говорили",
+        "о чём мы говорили",
+        "что я говорил",
+        "что я писал",
+        "что я спрашивал",
+        "что было раньше",
+        "мы обсуждали",
+        "мин назад",
+        "час назад",
+        "день назад",
+        "неделю назад",
+        "вчера",
+        "сегодня",
+        "прошлый раз",
+        "последний раз",
+        "недавно",
     ]
     syn = ["разговаривали", "общались", "переписывались", "болтали"]
     if any(k in t for k in keys):
         return True
     if ("о чем" in t or "о чём" in t) and any(s in t for s in syn):
         return True
-    if "не помнишь" in t and (("о чем" in t) or ("о чём" in t) or ("что было" in t)):
+    if "не помнишь" in t and (
+        ("о чем" in t) or ("о чём" in t) or ("что было" in t)
+    ):
         return True
     return False
+
 
 async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
     if not _looks_like_memory_question(user_text):
@@ -356,28 +436,39 @@ async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
 
     uid = await _ensure_user_id(m.from_user.id)
     mins, h, d, w = _pick_window(user_text)
-    total_minutes = mins + h*60 + d*24*60 + w*7*24*60
+    total_minutes = mins + h * 60 + d * 24 * 60 + w * 7 * 24 * 60
     if total_minutes <= 0:
         total_minutes = 10
     interval_txt = f"{total_minutes} minutes"
 
     async with async_session() as s:
-        rows = (await s.execute(text("""
+        rows = (
+            await s.execute(
+                text(
+                    """
             SELECT role, text, created_at
             FROM bot_messages
             WHERE user_id = :uid
               AND created_at >= NOW() - (:ival::text)::interval
             ORDER BY id ASC
             LIMIT 120
-        """), {"uid": int(uid), "ival": interval_txt})).mappings().all()
+        """
+                ),
+                {"uid": int(uid), "ival": interval_txt},
+            )
+        ).mappings().all()
 
     if not rows:
-        await send_and_log(m, "За этот промежуток ничего не вижу в истории. Подскажи тему — подхвачу.", reply_markup=kb_main_menu())
+        await send_and_log(
+            m,
+            "За этот промежуток ничего не вижу в истории. Подскажи тему — подхвачу.",
+            reply_markup=kb_main_menu(),
+        )
         return True
 
     def _short(s: str, n: int = 220) -> str:
         s = (s or "").strip().replace("\n", " ")
-        return s if len(s) <= n else s[:n - 1] + "…"
+        return s if len(s) <= n else s[: n - 1] + "…"
 
     parts = []
     for r in rows[-14:]:
@@ -391,35 +482,49 @@ async def _maybe_answer_memory_question(m: Message, user_text: str) -> bool:
     await send_and_log(m, header + body + tail, reply_markup=kb_main_menu())
     return True
 
+
 # --- Summaries helpers ---
 from sqlalchemy import text as _sql_text
+
 
 async def _fetch_summary_texts_by_ids(ids: List[int]) -> List[dict]:
     if not ids:
         return []
     async with async_session() as s:
-        rows = (await s.execute(_sql_text("""
+        rows = (
+            await s.execute(
+                _sql_text(
+                    """
             SELECT id, kind, period_start, period_end, text
             FROM dialog_summaries
             WHERE id = ANY(:ids)
-        """), {"ids": ids})).mappings().all()
+        """
+                ),
+                {"ids": ids},
+            )
+        ).mappings().all()
     by_id = {r["id"]: r for r in rows}
     out: List[dict] = []
     for i in ids:
         r = by_id.get(i)
         if not r:
             continue
-        out.append({
-            "id": r["id"],
-            "kind": r["kind"],
-            "period": f"{_fmt_dt(r['period_start'])} — {_fmt_dt(r['period_end'])}",
-            "text": r["text"],
-        })
+        out.append(
+            {
+                "id": r["id"],
+                "kind": r["kind"],
+                "period": f"{_fmt_dt(r['period_start'])} — {_fmt_dt(r['period_end'])}",
+                "text": r["text"],
+            }
+        )
     return out
+
 
 async def _purge_user_summaries_all(tg_id: int) -> int:
     async with async_session() as s:
-        r = await s.execute(_sql_text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+        r = await s.execute(
+            _sql_text("SELECT id FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)}
+        )
         uid = r.scalar()
         if not uid:
             return 0
@@ -427,32 +532,47 @@ async def _purge_user_summaries_all(tg_id: int) -> int:
             await delete_user_summaries(int(uid))
         except Exception:
             pass
-        res = await s.execute(_sql_text("DELETE FROM dialog_summaries WHERE user_id = :uid"), {"uid": int(uid)})
+        res = await s.execute(
+            _sql_text("DELETE FROM dialog_summaries WHERE user_id = :uid"),
+            {"uid": int(uid)},
+        )
         await s.commit()
         try:
             return int(getattr(res, "rowcount", 0) or 0)
         except Exception:
             return 0
 
+
 # ===== Онбординг: ссылки и картинки =====
 POLICY_URL = os.getenv("POLICY_URL", "").strip()
-TERMS_URL  = os.getenv("TERMS_URL", "").strip()
+TERMS_URL = os.getenv("TERMS_URL", "").strip()
 MINIAPP_URL = os.getenv("MINIAPP_URL", "").strip()  # <<< ДОБАВЛЕНО
 
 DEFAULT_ONB_IMAGES = {
-    "cover": os.getenv("ONB_IMG_COVER", "https://file.garden/aML3M6Sqrg21TaIT/kind-creature-min.jpg"),
-    "talk":  os.getenv("ONB_IMG_TALK", "https://file.garden/aML3M6Sqrg21TaIT/warm-conversation-min.jpg"),
+    "cover": os.getenv(
+        "ONB_IMG_COVER",
+        "https://file.garden/aML3M6Sqrg21TaIT/kind-creature-min.jpg",
+    ),
+    "talk": os.getenv(
+        "ONB_IMG_TALK",
+        "https://file.garden/aML3M6Sqrg21TaIT/warm-conversation-min.jpg",
+    ),
 }
+
+
 def get_onb_image(key: str) -> str:
     return DEFAULT_ONB_IMAGES.get(key, "") or ""
 
+
 # ===== Глобальные состояния чата =====
-CHAT_MODE: Dict[int, str] = {}        # "talk" | "reflection"
-USER_TONE: Dict[int, str] = {}        # "default" | "friend" | "therapist" | "18plus"
+CHAT_MODE: Dict[int, str] = {}  # "talk" | "reflection"
+USER_TONE: Dict[int, str] = {}  # "default" | "friend" | "therapist" | "18plus"
 
 # ===== Эфемерный буфер (priv=none) =====
 RECENT_BUFFER: Dict[int, deque] = {}
 BUFFER_MAX = 120
+
+
 def _buf_push(chat_id: int, role: str, text_: str) -> None:
     if not chat_id or not text_:
         return
@@ -463,21 +583,29 @@ def _buf_push(chat_id: int, role: str, text_: str) -> None:
     role_norm = "assistant" if (role or "").lower() == "bot" else "user"
     q.append({"role": role_norm, "content": (text_ or "").strip()})
 
+
 def _buf_get(chat_id: int, limit: int = 90) -> List[dict]:
     q = RECENT_BUFFER.get(chat_id)
-    if not q: return []
-    return list(q)[-int(limit):]
+    if not q:
+        return []
+    return list(q)[-int(limit) :]
+
 
 # --- paywall helpers ---
 async def _get_user_by_tg(session, tg_id: int):
     from app.db.models import User
+
     q = await session.execute(select(User).where(User.tg_id == tg_id))
     return q.scalar_one_or_none()
 
+
 def _kb_paywall(_: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")]
+        ]
     )
+
 
 async def _enforce_access_or_paywall(msg_or_call, session, user_id: int) -> bool:
     if await check_access(session, user_id):
@@ -488,20 +616,26 @@ async def _enforce_access_or_paywall(msg_or_call, session, user_id: int) -> bool
         "Доступ к разделу открыт по подписке.\n"
         "Оформи любой план — отменить автопродление можно в /pay в любой момент."
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")],
-    ])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")],
+        ]
+    )
     if isinstance(msg_or_call, Message):
         await msg_or_call.answer(text_, reply_markup=kb)
     else:
         await msg_or_call.message.answer(text_, reply_markup=kb)
     return False
 
+
 # --- pay status helpers ---
 async def _access_status_text(session, user_id: int) -> str | None:
     try:
         from app.db.models import User
-        u = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+
+        u = (
+            await session.execute(select(User).where(User.id == user_id))
+        ).scalar_one_or_none()
     except Exception:
         u = None
     if u and (getattr(u, "subscription_status", None) or "") == "active":
@@ -512,34 +646,52 @@ async def _access_status_text(session, user_id: int) -> str | None:
         return f"Пробный период активен{tail} ✅\nДоступ ко всем функциям открыт."
     return None
 
+
 # --- локализация времени ---
 _TZ = ZoneInfo(os.getenv("BOT_TZ", "Europe/Moscow"))
+
+
 def _fmt_dt(dt) -> str:
     try:
         if getattr(dt, "tzinfo", None) is None:
             dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        return dt.astimezone(_TZ).strftime('%d.%m.%Y %H:%M')
+        return dt.astimezone(_TZ).strftime("%d.%m.%Y %H:%M")
     except Exception:
         return str(dt)
+
 
 # === Length hint picker + «один вопрос» ===
 def _pick_len_hint(user_text: str, mode: str) -> str:
     t = (user_text or "").lower()
-    deep_keywords = ("подроб", "деталь", "развернут", "план", "структур", "пошаг", "инструкц")
+    deep_keywords = (
+        "подроб",
+        "деталь",
+        "развернут",
+        "план",
+        "структур",
+        "пошаг",
+        "инструкц",
+    )
     if any(k in t for k in deep_keywords):
         return "deep"
     n = len(t.strip())
-    if n <= 50: return "micro"
-    if n <= 220: return "short"
-    if mode == "reflection": return "medium"
+    if n <= 50:
+        return "micro"
+    if n <= 220:
+        return "short"
+    if mode == "reflection":
+        return "medium"
     return "medium"
 
+
 def _enforce_single_question(text: str) -> str:
-    if not text: return text
+    if not text:
+        return text
     while "??" in text:
         text = text.replace("??", "?")
     last_q = text.rfind("?")
-    if last_q == -1: return text
+    if last_q == -1:
+        return text
     chars = list(text)
     for i, ch in enumerate(chars):
         if ch == "?" and i != last_q:
@@ -547,46 +699,75 @@ def _enforce_single_question(text: str) -> str:
     out = "".join(chars)
     return out.replace(" .", ".").replace(" ,", ",")
 
+
 async def _get_active_subscription(session, user_id: int):
-    row = await session.execute(text("""
+    row = await session.execute(
+        text(
+            """
         SELECT id, subscription_until, COALESCE(is_auto_renew, true) AS is_auto_renew
         FROM subscriptions
         WHERE user_id = :uid AND status = 'active'
         ORDER BY subscription_until DESC
         LIMIT 1
-    """), {"uid": user_id})
+    """
+        ),
+        {"uid": user_id},
+    )
     return row.mappings().first()
 
+
 def _kb_trial_pay() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")],
-        [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Оформить подписку 💳", callback_data="pay:plans")],
+            [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
+        ]
+    )
+
 
 def _kb_active_sub_actions() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Отменить подписку ❌", callback_data="sub:cancel")],
-        [InlineKeyboardButton(text="Отключить автопродление ⏹", callback_data="sub:auto_off")],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Отменить подписку ❌", callback_data="sub:cancel")],
+            [
+                InlineKeyboardButton(
+                    text="Отключить автопродление ⏹", callback_data="sub:auto_off"
+                )
+            ],
+        ]
+    )
+
 
 def _kb_confirm(action: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Да, подтвердить", callback_data=f"sub:{action}:yes"),
-            InlineKeyboardButton(text="Назад", callback_data="sub:cancel_back"),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, подтвердить", callback_data=f"sub:{action}:yes"
+                ),
+                InlineKeyboardButton(text="Назад", callback_data="sub:cancel_back"),
+            ],
+        ]
+    )
+
 
 @router.callback_query(lambda c: c.data == "sub:cancel_back")
 async def cb_sub_cancel_back(call: CallbackQuery):
     await on_pay(call.message)
     await call.answer()
 
+
 # ===== safe_edit =====
-async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
+async def _safe_edit(
+    msg: Message,
+    text: Optional[str] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+):
     try:
         if text is not None and reply_markup is not None:
-            await msg.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=True)
+            await msg.edit_text(
+                text, reply_markup=reply_markup, disable_web_page_preview=True
+            )
         elif text is not None:
             await msg.edit_text(text, disable_web_page_preview=True)
         elif reply_markup is not None:
@@ -605,6 +786,7 @@ async def _safe_edit(msg: Message, text: Optional[str] = None, reply_markup: Opt
             except Exception:
                 pass
 
+
 # ===== Правое меню (ровно 4 кнопки) =====
 def kb_main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -617,6 +799,7 @@ def kb_main_menu() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
+
 def kb_settings() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -625,30 +808,49 @@ def kb_settings() -> InlineKeyboardMarkup:
         ]
     )
 
+
 def kb_tone_picker() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✨ Универсальный (по умолчанию)", callback_data="tone:default")],
-            [InlineKeyboardButton(text="🤝 Друг/подруга",                   callback_data="tone:friend")],
-            [InlineKeyboardButton(text="🧠 Психологичный",                  callback_data="tone:therapist")],
-            [InlineKeyboardButton(text="🌶️ 18+",                           callback_data="tone:18plus")],
+            [
+                InlineKeyboardButton(
+                    text="✨ Универсальный (по умолчанию)", callback_data="tone:default"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤝 Друг/подруга", callback_data="tone:friend"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧠 Психологичный", callback_data="tone:therapist"
+                )
+            ],
+            [InlineKeyboardButton(text="🌶️ 18+", callback_data="tone:18plus")],
         ]
     )
+
 
 async def kb_privacy_for(chat_id: int) -> InlineKeyboardMarkup:
     try:
         mode = (await _db_get_privacy(chat_id) or "insights").lower()
     except Exception:
         mode = "insights"
-    save_on = (mode != "none")
+    save_on = mode != "none"
     toggle_text = "🔔 Вкл. хранение" if not save_on else "🔕 Выкл. хранение"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=toggle_text,          callback_data="privacy:toggle")],
-            [InlineKeyboardButton(text="🗑 Очистить историю", callback_data="privacy:clear")],
-            [InlineKeyboardButton(text="⬅️ Назад",            callback_data="menu:settings")],
+            [InlineKeyboardButton(text=toggle_text, callback_data="privacy:toggle")],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Очистить историю", callback_data="privacy:clear"
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:settings")],
         ]
     )
+
 
 # ===== Триал: ручной старт (остаётся) =====
 @router.callback_query(lambda c: c.data == "trial:start")
@@ -656,6 +858,7 @@ async def cb_trial_start(call: CallbackQuery):
     tg_id = call.from_user.id
     async for session in get_session():
         from app.db.models import User
+
         q = await session.execute(select(User).where(User.tg_id == tg_id))
         u = q.scalar_one_or_none()
         if not u:
@@ -683,12 +886,18 @@ async def cb_trial_start(call: CallbackQuery):
         await call.message.answer(text)
     await call.answer()
 
+
 @router.callback_query(lambda c: c.data in ("pay:open", "pay:plans"))
 async def cb_pay_open_or_plans(call: CallbackQuery):
     try:
         async for session in get_session():
             from app.db.models import User
-            u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+
+            u = (
+                await session.execute(
+                    select(User).where(User.tg_id == call.from_user.id)
+                )
+            ).scalar_one_or_none()
         trial_ever = getattr(u, "trial_started_at", None) is not None if u else False
     except Exception:
         trial_ever = False
@@ -700,39 +909,62 @@ async def cb_pay_open_or_plans(call: CallbackQuery):
     )
     await call.answer()
 
+
 # --- автопродление / отмена подписки ---
 @router.callback_query(lambda c: c.data == "sub:auto_off")
 async def cb_sub_auto_off(call: CallbackQuery):
     async for session in get_session():
         from app.db.models import User
-        u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+
+        u = (
+            await session.execute(
+                select(User).where(User.tg_id == call.from_user.id)
+            )
+        ).scalar_one_or_none()
         if not u:
-            await call.answer("Пользователь не найден", show_alert=True); return
+            await call.answer("Пользователь не найден", show_alert=True)
+            return
         sub = await get_active_subscription_row(session, u.id)
 
     if not sub:
-        await call.answer("Активной подписки нет.", show_alert=True); return
+        await call.answer("Активной подписки нет.", show_alert=True)
+        return
 
     until_str = _fmt_dt(sub["subscription_until"])
     await _safe_edit(
         call.message,
-        text=f"Отключить автопродление?\nТекущий доступ останется до <b>{until_str}</b>, дальше продлений не будет.",
+        text=(
+            "Отключить автопродление?\nТекущий доступ останется до"
+            f" <b>{until_str}</b>, дальше продлений не будет."
+        ),
         reply_markup=_kb_confirm("auto_off"),
     )
     await call.answer()
+
 
 @router.callback_query(lambda c: c.data == "sub:auto_off:yes")
 async def cb_sub_auto_off_yes(call: CallbackQuery):
     async for session in get_session():
         from app.db.models import User
-        u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+
+        u = (
+            await session.execute(
+                select(User).where(User.tg_id == call.from_user.id)
+            )
+        ).scalar_one_or_none()
         if not u:
-            await call.answer("Пользователь не найден", show_alert=True); return
+            await call.answer("Пользователь не найден", show_alert=True)
+            return
         changed, until = await disable_auto_renew(session, u.id)
 
     if not changed:
-        await _safe_edit(call.message, text="Автопродление уже было отключено ⏹", reply_markup=_kb_active_sub_actions())
-        await call.answer(); return
+        await _safe_edit(
+            call.message,
+            text="Автопродление уже было отключено ⏹",
+            reply_markup=_kb_active_sub_actions(),
+        )
+        await call.answer()
+        return
 
     until_str = _fmt_dt(until) if until else "конца периода"
     await _safe_edit(
@@ -741,6 +973,7 @@ async def cb_sub_auto_off_yes(call: CallbackQuery):
         reply_markup=_kb_active_sub_actions(),
     )
     await call.answer()
+
 
 @router.callback_query(lambda c: c.data == "sub:cancel")
 async def cb_sub_cancel(call: CallbackQuery):
@@ -751,25 +984,41 @@ async def cb_sub_cancel(call: CallbackQuery):
     )
     await call.answer()
 
+
 @router.callback_query(lambda c: c.data == "sub:cancel:yes")
 async def cb_sub_cancel_yes(call: CallbackQuery):
     async for session in get_session():
         from app.db.models import User
-        u = (await session.execute(select(User).where(User.tg_id == call.from_user.id))).scalar_one_or_none()
+
+        u = (
+            await session.execute(
+                select(User).where(User.tg_id == call.from_user.id)
+            )
+        ).scalar_one_or_none()
         if not u:
-            await call.answer("Пользователь не найден", show_alert=True); return
+            await call.answer("Пользователь не найден", show_alert=True)
+            return
         ok = await cancel_subscription_now(session, u.id)
 
     if not ok:
-        await _safe_edit(call.message, text="Активной подписки не найдено.", reply_markup=_kb_pay_plans())
-        await call.answer(); return
+        await _safe_edit(
+            call.message,
+            text="Активной подписки не найдено.",
+            reply_markup=_kb_pay_plans(),
+        )
+        await call.answer()
+        return
 
     await _safe_edit(
         call.message,
-        text="Подписка отменена ❌\nЕсли захочешь вернуться — оформи новую в разделе /pay.",
+        text=(
+            "Подписка отменена ❌\nЕсли захочешь вернуться — оформи новую в разделе"
+            " /pay."
+        ),
         reply_markup=_kb_pay_plans(),
     )
     await call.answer()
+
 
 # ===== /policy =====
 @router.message(Command("policy"))
@@ -780,8 +1029,11 @@ async def cmd_policy(m: Message):
     if POLICY_URL:
         parts.append(f"• <a href='{POLICY_URL}'>Политика конфиденциальности</a>")
     if not TERMS_URL and not POLICY_URL:
-        parts.append("Ссылки не настроены. Добавь переменные окружения POLICY_URL и TERMS_URL.")
+        parts.append(
+            "Ссылки не настроены. Добавь переменные окружения POLICY_URL и TERMS_URL."
+        )
     await m.answer("\n".join(parts), disable_web_page_preview=True)
+
 
 # ===== Онбординг =====
 ONB_1_TEXT = (
@@ -789,15 +1041,18 @@ ONB_1_TEXT = (
     "Я рядом и помогу — бережно и без оценок."
 )
 
+
 def kb_onb_step1() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Вперёд ➜", callback_data="onb:step2")]]
     )
 
+
 ONB_2_TEXT = (
     "Прежде чем мы познакомимся, подтвердим правила и политику. "
     "Это нужно, чтобы нам обоим было спокойно и безопасно."
 )
+
 
 def kb_onb_step2() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -811,6 +1066,7 @@ def kb_onb_step2() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 WHAT_NEXT_TEXT = """С чего начнём? 💛
 
 💬 «Поговорить» — выговориться, навести ясность и наметить маленький шаг.
@@ -818,12 +1074,17 @@ WHAT_NEXT_TEXT = """С чего начнём? 💛
 
 <b>5 дней бесплатно</b> — пробная версия запустится после нажатия на любую кнопку или команду. После — можно выбрать удобный план."""
 
+
 def kb_onb_step3() -> InlineKeyboardMarkup:
     """Кнопки финального шага онбординга: Mini App + fallback."""
     if MINIAPP_URL:
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="Открыть мини-приложение", web_app=WebAppInfo(url=MINIAPP_URL))],
+                [
+                    InlineKeyboardButton(
+                        text="Открыть мини-приложение", web_app=WebAppInfo(url=MINIAPP_URL)
+                    )
+                ],
                 [InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")],
             ]
         )
@@ -832,11 +1093,13 @@ def kb_onb_step3() -> InlineKeyboardMarkup:
         inline_keyboard=[[InlineKeyboardButton(text="Открыть меню", callback_data="menu:main")]]
     )
 
+
 PAYWALL_POST_TEXT = (
     "Хочу продолжить помогать, но для этого нужна подписка.\n"
     "Оформи её в /pay и получи полный доступ ко всем функциям.\n\n"
     "🔒 Приватно и бережно, без оценок; историю можно очистить в /privacy.\n"
 )
+
 
 @router.callback_query(F.data == "onb:step2")
 async def on_onb_step2(cb: CallbackQuery):
@@ -855,6 +1118,7 @@ async def on_onb_step2(cb: CallbackQuery):
             pass
     await cb.message.answer(ONB_2_TEXT, reply_markup=kb_onb_step2())
 
+
 @router.callback_query(F.data == "onb:agree")
 async def on_onb_agree(cb: CallbackQuery):
     tg_id = cb.from_user.id
@@ -862,7 +1126,9 @@ async def on_onb_agree(cb: CallbackQuery):
     try:
         async with async_session() as s:
             await s.execute(
-                text("UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"),
+                text(
+                    "UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP WHERE id = :uid"
+                ),
                 {"uid": uid},
             )
             await s.commit()
@@ -875,10 +1141,13 @@ async def on_onb_agree(cb: CallbackQuery):
     # <<< ЗДЕСЬ МЕНЯЕМ КНОПКИ ШАГА 3
     await cb.message.answer(WHAT_NEXT_TEXT, reply_markup=kb_onb_step3())
 
+
 # ===== Меню / навигация (правое меню) =====
 @router.callback_query(F.data == "menu:main")
 async def on_menu_main(cb: CallbackQuery):
-    await cb.message.answer("Открываю меню", reply_markup=kb_main_menu()); await cb.answer()
+    await cb.message.answer("Открываю меню", reply_markup=kb_main_menu())
+    await cb.answer()
+
 
 @router.message(F.text == "⚙️ Настройки")
 @router.message(Command("settings"))
@@ -890,13 +1159,16 @@ async def on_settings(m: Message):
             return
     await m.answer("Настройки:", reply_markup=kb_settings())
 
+
 @router.callback_query(F.data == "menu:settings")
 async def on_menu_settings(cb: CallbackQuery):
     async for session in get_session():
         u = await _get_user_by_tg(session, cb.from_user.id)
         if not u or not await _enforce_access_or_paywall(cb, session, u.id):
             return
-    await _safe_edit(cb.message, "Настройки:", reply_markup=kb_settings()); await cb.answer()
+    await _safe_edit(cb.message, "Настройки:", reply_markup=kb_settings())
+    await cb.answer()
+
 
 @router.callback_query(F.data == "settings:tone")
 async def on_settings_tone(cb: CallbackQuery):
@@ -904,7 +1176,9 @@ async def on_settings_tone(cb: CallbackQuery):
         u = await _get_user_by_tg(session, cb.from_user.id)
         if not u or not await _enforce_access_or_paywall(cb, session, u.id):
             return
-    await _safe_edit(cb.message, "Выбери тон общения:", reply_markup=kb_tone_picker()); await cb.answer()
+    await _safe_edit(cb.message, "Выбери тон общения:", reply_markup=kb_tone_picker())
+    await cb.answer()
+
 
 @router.callback_query(F.data == "settings:privacy")
 async def on_settings_privacy(cb: CallbackQuery):
@@ -913,7 +1187,9 @@ async def on_settings_privacy(cb: CallbackQuery):
         if (not u) or (not await _enforce_access_or_paywall(cb, session, u.id)):
             return
     rm = await kb_privacy_for(cb.message.chat.id)
-    await _safe_edit(cb.message, "Приватность:", reply_markup=rm); await cb.answer()
+    await _safe_edit(cb.message, "Приватность:", reply_markup=rm)
+    await cb.answer()
+
 
 @router.callback_query(F.data == "privacy:toggle")
 async def on_privacy_toggle(cb: CallbackQuery):
@@ -927,8 +1203,13 @@ async def on_privacy_toggle(cb: CallbackQuery):
     await _db_set_privacy(chat_id, new_mode)
     state_txt = "выключено" if new_mode == "none" else "включено"
     rm = await kb_privacy_for(chat_id)
-    await _safe_edit(cb.message, f"Хранение истории сейчас: <b>{state_txt}</b>.", reply_markup=rm)
+    await _safe_edit(
+        cb.message,
+        f"Хранение истории сейчас: <b>{state_txt}</b>.",
+        reply_markup=rm,
+    )
     await cb.answer("Настройка применена")
+
 
 @router.callback_query(F.data == "privacy:clear")
 async def on_privacy_clear(cb: CallbackQuery):
@@ -939,7 +1220,8 @@ async def on_privacy_clear(cb: CallbackQuery):
     try:
         msg_count = await _purge_user_history(cb.from_user.id)
     except Exception:
-        await cb.answer("Не получилось очистить историю", show_alert=True); return
+        await cb.answer("Не получилось очистить историю", show_alert=True)
+        return
     try:
         sum_count = await _purge_user_summaries_all(cb.from_user.id)
     except Exception:
@@ -953,6 +1235,7 @@ async def on_privacy_clear(cb: CallbackQuery):
     rm = await kb_privacy_for(cb.message.chat.id)
     await _safe_edit(cb.message, text_, reply_markup=rm)
 
+
 @router.message(Command("privacy"))
 async def on_privacy_cmd(m: Message):
     async for session in get_session():
@@ -962,19 +1245,26 @@ async def on_privacy_cmd(m: Message):
     mode = (await _db_get_privacy(m.chat.id) or "insights").lower()
     state = "выключено" if mode == "none" else "включено"
     rm = await kb_privacy_for(m.chat.id)
-    await m.answer(f"Хранение истории сейчас: <b>{state}</b>.", reply_markup=rm)
+    await m.answer(
+        f"Хранение истории сейчас: <b>{state}</b>.", reply_markup=rm
+    )
+
 
 @router.message(Command("help"))
 async def on_help(m: Message):
-    await m.answer("Если нужна помощь по сервису, напиши на selflect@proton.me — мы ответим.")
+    await m.answer(
+        "Если нужна помощь по сервису, напиши на selflect@proton.me — мы ответим."
+    )
+
 
 @router.message(Command("menu"))
 async def on_menu(m: Message):
-    msg = await m.answer('Меню', reply_markup=kb_main_menu())
+    msg = await m.answer("Меню", reply_markup=kb_main_menu())
     try:
         await msg.delete()
     except Exception:
         pass
+
 
 # ===== Тон и «Поговорить» =====
 @router.message(F.text == "💬 Поговорить")
@@ -987,18 +1277,30 @@ async def on_talk(m: Message):
         if not await _enforce_access_or_paywall(m, session, u.id):
             return
     CHAT_MODE[m.chat.id] = "talk"
-    await m.answer("Я рядом и слушаю. О чём хочется поговорить?", reply_markup=kb_main_menu())
+    await m.answer(
+        "Я рядом и слушаю. О чём хочется поговорить?", reply_markup=kb_main_menu()
+    )
+
 
 @router.message(Command("tone"))
 async def on_tone_cmd(m: Message):
     await m.answer("Выбери тон общения:", reply_markup=kb_tone_picker())
+
 
 @router.callback_query(F.data.startswith("tone:"))
 async def on_tone_pick(cb: CallbackQuery):
     style = cb.data.split(":", 1)[1]
     USER_TONE[cb.message.chat.id] = style
     await cb.answer("Стиль обновлён ✅", show_alert=False)
-    await _safe_edit(cb.message, f"Тон общения установлен: <b>{style}</b> ✅", reply_markup=kb_settings())
+    await _safe_edit(
+        cb.message,
+        f"Тон общения установлен: <b>{style}</b> ✅",
+        reply_markup=kb_settings(),
+    )
+
+# ============================
+# LLM-ответы (как было)
+# ============================
 
 async def _answer_with_llm(m: Message, user_text: str):
     import random
@@ -1150,9 +1452,11 @@ async def _answer_with_llm(m: Message, user_text: str):
 async def on_pay_btn(m: Message):
     await on_pay(m)
 
+
 @router.message(F.text == "ℹ️ О проекте")
 async def on_about_btn(m: Message):
     await cmd_about(m)
+
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
@@ -1162,23 +1466,38 @@ async def on_text(m: Message):
         return
     await m.answer("Я рядом и на связи. Нажми «Поговорить».", reply_markup=kb_main_menu())
 
+
 # === /pay — планы =========================================
 from aiogram.filters import Command as _CmdPay
 
 _PLANS = {
-    "week":  (499,  "Подписка на 1 неделю"),
+    "week": (499, "Подписка на 1 неделю"),
     "month": (1190, "Подписка на 1 месяц"),
-    "q3":    (2990, "Подписка на 3 месяца"),
-    "year":  (7990, "Подписка на 1 год"),
+    "quarter": (2990, "Подписка на 3 месяца"),
+    "q3": (2990, "Подписка на 3 месяца"),
+    "year": (7990, "Подписка на 1 год"),
 }
 
+# Цены в Telegram Stars (XTR), 1 единица = 1 звезда.
+# Можно при желании потом поменять.
+_STARS_PRICES = {
+    "week": 499,
+    "month": 1190,
+    "quarter": 2990,
+    "year": 7990,
+}
+
+
 def _kb_pay_plans() -> _IKM:
-    return _IKM(inline_keyboard=[
-        [_IKB(text="Неделя — 499 ₽",    callback_data="pay:plan:week")],
-        [_IKB(text="Месяц — 1190 ₽",    callback_data="pay:plan:month")],
-        [_IKB(text="3 месяца — 2990 ₽", callback_data="pay:plan:q3")],
-        [_IKB(text="Год — 7990 ₽",      callback_data="pay:plan:year")],
-    ])
+    return _IKM(
+        inline_keyboard=[
+            [_IKB(text="Неделя — 499 ₽", callback_data="pay:plan:week")],
+            [_IKB(text="Месяц — 1190 ₽", callback_data="pay:plan:month")],
+            [_IKB(text="3 месяца — 2990 ₽", callback_data="pay:plan:quarter")],
+            [_IKB(text="Год — 7990 ₽", callback_data="pay:plan:year")],
+        ]
+    )
+
 
 def _pay_plans_text(trial_ever_started: bool) -> str:
     head = "Подписка «Помни»\n• Все функции без ограничений\n"
@@ -1191,30 +1510,39 @@ def _pay_plans_text(trial_ever_started: bool) -> str:
     else:
         return f"{head}• 5 дней бесплатно, далее по тарифу\n\n{tail}"
 
+
 @router.message(_CmdPay("pay"))
 async def on_pay(m: Message):
     tg_id = m.from_user.id
     async for session in get_session():
         from app.db.models import User
-        u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
+
+        u = (
+            await session.execute(select(User).where(User.tg_id == tg_id))
+        ).scalar_one_or_none()
         if not u:
-            await m.answer("Нажми /start, чтобы завершить онбординг.", reply_markup=kb_main_menu())
+            await m.answer(
+                "Нажми /start, чтобы завершить онбординг.", reply_markup=kb_main_menu()
+            )
             return
         active_sub = await _get_active_subscription(session, u.id)
         if active_sub:
             until = active_sub["subscription_until"]
             await m.answer(
-                f"Подписка активна ✅\nДоступ открыт до <b>{_fmt_dt(until)}</b>.\n\nЧто дальше?",
-                reply_markup=_kb_active_sub_actions()
+                "Подписка активна ✅\nДоступ открыт до"
+                f" <b>{_fmt_dt(until)}</b>.\n\nЧто дальше?",
+                reply_markup=_kb_active_sub_actions(),
             )
             return
         if await is_trial_active(session, u.id):
             until = getattr(u, "trial_expires_at", None)
             tail = f"до <b>{_fmt_dt(until)}</b>" if until else "сейчас"
             await m.answer(
-                f"Пробный период активирован — {tail}. ✅\nВсе функции открыты.\n\n"
-                f"Хочешь оформить подписку сразу? (Автопродление можно отключить в /pay.)",
-                reply_markup=_kb_trial_pay()
+                "Пробный период активирован — {tail}. ✅\nВсе функции открыты.\n\n"
+                "Хочешь оформить подписку сразу? (Автопродление можно отключить в /pay.)".format(
+                    tail=tail
+                ),
+                reply_markup=_kb_trial_pay(),
             )
             return
         trial_ever = getattr(u, "trial_started_at", None) is not None
@@ -1224,28 +1552,94 @@ async def on_pay(m: Message):
             parse_mode="HTML",
         )
 
+
 @router.callback_query(F.data.startswith("pay:plan:"))
 async def on_pick_plan(cb: CallbackQuery):
     try:
         raw_plan = (cb.data or "").split(":", 2)[-1].strip().lower()
     except Exception:
-        await cb.answer("Некорректный запрос", show_alert=True); return
+        await cb.answer("Некорректный запрос", show_alert=True)
+        return
 
     PLAN_ALIAS = {
-        "q3": "quarter", "3m": "quarter", "quarter": "quarter",
-        "week": "week", "weekly": "week", "month": "month",
-        "year": "year", "annual": "year", "y": "year", "q": "quarter",
+        "q3": "quarter",
+        "3m": "quarter",
+        "quarter": "quarter",
+        "week": "week",
+        "weekly": "week",
+        "month": "month",
+        "year": "year",
+        "annual": "year",
+        "y": "year",
+        "q": "quarter",
     }
     plan = PLAN_ALIAS.get(raw_plan, raw_plan)
     if plan not in _PLANS:
-        await cb.answer("Неизвестный план", show_alert=True); return
+        await cb.answer("Неизвестный план", show_alert=True)
+        return
+
+    amount, desc = _PLANS[plan]
+    kb = _IKM(
+        inline_keyboard=[
+            [
+                _IKB(
+                    text=f"Оплатить картой 💳 ({amount} ₽)",
+                    callback_data=f"pay:yk:{plan}",
+                )
+            ],
+            [
+                _IKB(
+                    text="Оплатить звёздами ⭐️",
+                    callback_data=f"pay:stars:{plan}",
+                )
+            ],
+        ]
+    )
+    await cb.message.answer(
+        f"<b>{desc}</b>\nСумма: <b>{amount} ₽</b>\n\nВыбери способ оплаты:",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("pay:yk:"))
+async def on_pick_plan_yk(cb: CallbackQuery):
+    try:
+        raw_plan = (cb.data or "").split(":", 2)[-1].strip().lower()
+    except Exception:
+        await cb.answer("Некорректный запрос", show_alert=True)
+        return
+
+    PLAN_ALIAS = {
+        "q3": "quarter",
+        "3m": "quarter",
+        "quarter": "quarter",
+        "week": "week",
+        "weekly": "week",
+        "month": "month",
+        "year": "year",
+        "annual": "year",
+        "y": "year",
+        "q": "quarter",
+    }
+    plan = PLAN_ALIAS.get(raw_plan, raw_plan)
+    if plan not in _PLANS:
+        await cb.answer("Неизвестный план", show_alert=True)
+        return
 
     amount, desc = _PLANS[plan]
     async for session in get_session():
         from app.db.models import User
-        u = (await session.execute(select(User).where(User.tg_id == cb.from_user.id))).scalar_one_or_none()
+
+        u = (
+            await session.execute(
+                select(User).where(User.tg_id == cb.from_user.id)
+            )
+        ).scalar_one_or_none()
         if not u:
-            await cb.answer("Нажми /start, чтобы начать.", show_alert=True); return
+            await cb.answer("Нажми /start, чтобы начать.", show_alert=True)
+            return
         try:
             pay_url = create_payment_link(
                 amount_rub=int(amount),
@@ -1257,15 +1651,157 @@ async def on_pick_plan(cb: CallbackQuery):
             pay_url = None
 
     if not pay_url:
-        await cb.message.answer("Не удалось сформировать платёж. Попробуй ещё раз позже.")
-        await cb.answer(); return
+        await cb.message.answer(
+            "Не удалось сформировать платёж. Попробуй ещё раз позже."
+        )
+        await cb.answer()
+        return
 
-    kb = _IKM(inline_keyboard=[[ _IKB(text="Оплатить 💳", url=pay_url) ]])
+    kb = _IKM(inline_keyboard=[[_IKB(text="Оплатить 💳", url=pay_url)]])
     await cb.message.answer(
         f"<b>{desc}</b>\nСумма: <b>{amount} ₽</b>\n\nНажми «Оплатить 💳», чтобы перейти к форме.",
-        reply_markup=kb
+        reply_markup=kb,
+        parse_mode="HTML",
     )
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("pay:stars:"))
+async def on_pick_plan_stars(cb: CallbackQuery):
+    try:
+        raw_plan = (cb.data or "").split(":", 2)[-1].strip().lower()
+    except Exception:
+        await cb.answer("Некорректный запрос", show_alert=True)
+        return
+
+    PLAN_ALIAS = {
+        "q3": "quarter",
+        "3m": "quarter",
+        "quarter": "quarter",
+        "week": "week",
+        "weekly": "week",
+        "month": "month",
+        "year": "year",
+        "annual": "year",
+        "y": "year",
+        "q": "quarter",
+    }
+    plan = PLAN_ALIAS.get(raw_plan, raw_plan)
+    if plan not in _PLANS or plan not in _STARS_PRICES:
+        await cb.answer("Неизвестный план", show_alert=True)
+        return
+
+    _, desc = _PLANS[plan]
+    stars_amount = _STARS_PRICES[plan]
+
+    prices = [LabeledPrice(label=desc, amount=stars_amount)]
+
+    await cb.message.answer_invoice(
+        title=desc,
+        description="Оплата подписки через Telegram Stars.",
+        provider_token="",  # пустая строка для Telegram Stars
+        currency="XTR",
+        prices=prices,
+        payload=f"stars:{plan}",
+        start_parameter=f"stars_{plan}",
+    )
+    await cb.answer()
+
+
+# --- Telegram Payments: pre_checkout + успешная оплата Stars ---
+@router.pre_checkout_query()
+async def on_pre_checkout(pre_q: PreCheckoutQuery):
+    try:
+        await pre_q.answer(ok=True)
+    except Exception as e:
+        print("[stars] pre_checkout error:", e)
+
+
+@router.message(F.successful_payment)
+async def on_successful_payment(m: Message):
+    sp = m.successful_payment
+    if not sp:
+        return
+    # Нас интересуют только звёзды
+    if (sp.currency or "").upper() != "XTR":
+        return
+
+    payload = sp.invoice_payload or ""
+    plan = None
+    if payload.startswith("stars:"):
+        plan = payload.split(":", 1)[1].strip().lower()
+
+    PLAN_ALIAS = {
+        "q3": "quarter",
+        "3m": "quarter",
+        "quarter": "quarter",
+        "week": "week",
+        "weekly": "week",
+        "month": "month",
+        "year": "year",
+        "annual": "year",
+        "y": "year",
+        "q": "quarter",
+    }
+    plan = PLAN_ALIAS.get(plan or "", plan or "")
+    if plan not in _PLANS:
+        await m.answer(
+            "Оплата прошла, но не удалось определить план. Напиши, пожалуйста, в поддержку.",
+            reply_markup=kb_main_menu(),
+        )
+        return
+
+    raw_event = {}
+    try:
+        if hasattr(sp, "model_dump"):
+            raw_event = sp.model_dump()
+        elif hasattr(sp, "to_python"):
+            raw_event = sp.to_python()
+        else:
+            raw_event = sp.__dict__
+    except Exception:
+        raw_event = {}
+
+    async for session in get_session():
+        from app.db.models import User
+
+        u = (
+            await session.execute(
+                select(User).where(User.tg_id == m.from_user.id)
+            )
+        ).scalar_one_or_none()
+        if not u:
+            await m.answer(
+                "Оплата звёздами прошла, но не удалось найти пользователя. Напиши в поддержку.",
+                reply_markup=kb_main_menu(),
+            )
+            return
+        try:
+            await apply_success_payment(
+                user_id=int(u.id),
+                plan=plan,  # type: ignore[arg-type]
+                provider_payment_id=sp.telegram_payment_charge_id,
+                payment_method_id=None,
+                customer_id=None,
+                session=session,
+                raw_event=raw_event,
+                provider="tg_stars",
+                currency=sp.currency or "XTR",
+                is_recurring=False,
+                amount_override=int(sp.total_amount),
+            )
+        except Exception as e:
+            print("[stars] apply_success_payment error:", e)
+            await m.answer(
+                "Оплата звёздами прошла, но не получилось обновить подписку. Напиши, пожалуйста, в поддержку.",
+                reply_markup=kb_main_menu(),
+            )
+            return
+
+    await m.answer(
+        "Спасибо! Оплата через Telegram Stars прошла ✅\nДоступ к «Помни» открыт. Можно продолжать.",
+        reply_markup=kb_main_menu(),
+    )
 
 # ===== Gate middleware =====
 AllowedEvent = Union[Message, CallbackQuery]
@@ -1358,6 +1894,10 @@ class GateMiddleware(BaseMiddleware):
             tg_id = getattr(getattr(event, "from_user", None), "id", None)
             if not tg_id:
                 return await handler(event, data)
+            
+            # успешные платежи не блокируем, даём им пройти к хендлеру
+            if isinstance(event, Message) and getattr(event, "successful_payment", None):
+                return await handler(event, data)
 
             policy_ok, access_ok = await _gate_user_flags(int(tg_id))
 
@@ -1428,11 +1968,11 @@ async def cmd_about(m: Message):
         "Бережная и безоценочная поддержка, опираясь на современный научный подход.\n\n"
         "Что внутри:\n"
         "• «Поговорить» — бот эмоциональной поддержки с функцией дневника: разложить ситуацию, найти опору, наметить 1 маленький шаг.\n"
-        "• Остальные разделы доступны в мини-приложении Telegram Mini App.\n\n"
+        "• Остальные разделы доступны в мини-приложении.\n\n"
         "Наши внутренние правила:\n"
         "— мягкое и дружеское общение, без лекций — сам решай как и о чём говорить;\n"
         "— бережные рамки КПТ/АКТ/гештальта; нормализация и маленькие поведенческие шаги;\n"
-        "— приватность по умолчанию: можно отключить хранение истории в /privacy (тогда мы не запоминаем разговоры).\n\n"
+        "— приватность по умолчанию: можно отключить хранение истории в /privacy (не запоминаются разговоры и не работает память).\n\n"
         f"Если есть идеи или обратная связь — напиши: {email}"
     )
     await m.answer(txt)
