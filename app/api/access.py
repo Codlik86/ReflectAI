@@ -32,9 +32,15 @@ class AccessCheckIn(BaseModel):
 class AccessStatusOut(BaseModel):
     has_access: bool
     status: str  # "active" | "trial" | "none"
-    until: datetime | None = None
-    plan: str | None = None  # "week" | "month" | "quarter" | "year" | None
+    until: datetime | None = None             # последний дедлайн (даже если уже прошёл)
+    plan: str | None = None                   # "week" | "month" | "quarter" | "year" | None
     is_auto_renew: bool | None = None
+
+    # НОВОЕ: история для корректного различения pre-trial vs expired
+    trial_started_at: datetime | None = None
+    trial_expires_at: datetime | None = None
+    subscription_until: datetime | None = None
+    trial_ever: bool = False                  # был ли когда-либо триал или подписка
 
 
 class AccessCheckOut(AccessStatusOut):
@@ -53,42 +59,59 @@ async def _compose_status(
     user: User | None,
 ) -> AccessStatusOut:
     now = datetime.now(timezone.utc)
+
     plan: str | None = None
     is_auto_renew: bool | None = None
-    until: datetime | None = None
-    status = "none"
-    has_access = False
+
+    sub_until: datetime | None = None
+    t_started: datetime | None = None
+    t_until: datetime | None = None
+    trial_ever = False
 
     if user:
-        # Подписка
+        # Подписка (берём последнюю запись — активную или уже истёкшую)
         sub = (
-            await session.execute(
-                select(Subscription).where(Subscription.user_id == user.id)
-            )
+            await session.execute(select(Subscription).where(Subscription.user_id == user.id))
         ).scalar_one_or_none()
-
-        if sub and sub.subscription_until:
+        if sub:
             plan = sub.plan
             is_auto_renew = sub.is_auto_renew
-            if sub.subscription_until > now:
-                until = sub.subscription_until
-                status = "active"
-                has_access = True
+            sub_until = sub.subscription_until
+            if sub_until:
+                trial_ever = True  # была подписка/платёж когда-либо
 
-        # Если подписка не активна — пытаемся дать доступ по триалу
-        if not has_access:
-            t_until = _trial_until(user)
-            if t_until and t_until > now:
-                until = t_until
-                status = "trial"
-                has_access = True
+        # Триал
+        t_started = getattr(user, "trial_started_at", None)
+        if t_started:
+            t_until = t_started + timedelta(days=TRIAL_DAYS)
+            trial_ever = True
+
+    # «Последний известный дедлайн» — даже если уже прошёл
+    last_deadline = None
+    for d in (sub_until, t_until):
+        if d and (last_deadline is None or d > last_deadline):
+            last_deadline = d
+
+    # Текущее состояние доступа
+    has_access = False
+    status = "none"
+    if sub_until and sub_until > now:
+        has_access = True
+        status = "active"
+    elif t_until and t_until > now:
+        has_access = True
+        status = "trial"
 
     return AccessStatusOut(
         has_access=has_access,
         status=status,
-        until=until,
+        until=last_deadline,             # отдаём дедлайн всегда (для фронта)
         plan=plan,
         is_auto_renew=is_auto_renew,
+        trial_started_at=t_started,
+        trial_expires_at=t_until,
+        subscription_until=sub_until,
+        trial_ever=trial_ever,
     )
 
 
@@ -137,6 +160,10 @@ async def check_access(
             until=None,
             plan=None,
             is_auto_renew=None,
+            trial_started_at=None,
+            trial_expires_at=None,
+            subscription_until=None,
+            trial_ever=False,
         )
 
     # Опционально: авто-старт триала (delayed trial) по запросу клиента
@@ -144,7 +171,7 @@ async def check_access(
         await session.execute(
             text("UPDATE users SET trial_started_at = CURRENT_TIMESTAMP WHERE id = :uid"),
             {"uid": int(user.id)},
-        );
+        )
         await session.commit()
 
     status_out = await _compose_status(session, user)

@@ -1,3 +1,4 @@
+// src/lib/guard.ts
 import { getTelegramUserId } from "./telegram";
 
 type StatusDTO = {

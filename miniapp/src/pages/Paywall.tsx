@@ -37,7 +37,13 @@ type StatusDTO = {
   until?: string | null;
   plan?: "week" | "month" | "quarter" | "year" | null;
   is_auto_renew?: boolean | null;
-  needs_policy?: boolean | null; // НОВОЕ
+  needs_policy?: boolean | null;           // может прийти с payments/status (если добавлено)
+
+  // Для корректного различения pre-trial vs expired (канон из /api/access/status)
+  trial_ever?: boolean;                    // был ли когда-либо триал или подписка
+  trial_started_at?: string | null;
+  trial_expires_at?: string | null;
+  subscription_until?: string | null;
 };
 
 const nowMs = () => Date.now();
@@ -84,11 +90,40 @@ export default function Paywall() {
         setLoading(true);
         setErr(null);
         const tg = getTelegramUserId();
-        const u = new URL(apiUrl("/api/payments/status"), window.location.origin);
-        if (tg) u.searchParams.set("tg_user_id", String(tg));
-        const res = await fetch(u.toString(), { credentials: "omit" });
-        if (!res.ok) throw new Error(String(res.status));
-        const dto = (await res.json()) as StatusDTO;
+
+        // 1) основной статус из /api/payments/status
+        const u1 = new URL(apiUrl("/api/payments/status"), window.location.origin);
+        if (tg) u1.searchParams.set("tg_user_id", String(tg));
+        const r1 = await fetch(u1.toString(), { credentials: "omit" });
+        if (!r1.ok) throw new Error(String(r1.status));
+        const dto1 = (await r1.json()) as StatusDTO;
+
+        // 2) доп. поля из /api/access/status (trial_ever, trial_* , subscription_until)
+        let dto: StatusDTO = dto1;
+        try {
+          const u2 = new URL(apiUrl("/api/access/status"), window.location.origin);
+          if (tg) u2.searchParams.set("tg_user_id", String(tg));
+          const r2 = await fetch(u2.toString(), { credentials: "omit" });
+          if (r2.ok) {
+            const dto2 = (await r2.json()) as StatusDTO;
+            // Мерджим, не затирая уже известные значения
+            dto = {
+              ...dto2,
+              ...dto1,
+              // приоритет until из payments (если есть), иначе из access
+              until: dto1.until ?? dto2.until ?? null,
+              // пробрасываем history-флаги
+              trial_ever: dto2.trial_ever ?? dto1.trial_ever,
+              trial_started_at: dto2.trial_started_at ?? dto1.trial_started_at ?? null,
+              trial_expires_at: dto2.trial_expires_at ?? dto1.trial_expires_at ?? null,
+              subscription_until: dto2.subscription_until ?? dto1.subscription_until ?? null,
+            };
+          }
+        } catch {
+          // если access/status недоступен — используем только payments/status
+          dto = dto1;
+        }
+
         if (!cancelled) setStatus(dto);
       } catch (e: any) {
         if (!cancelled) setErr(e?.message || "Не удалось получить статус. Обнови страницу.");
@@ -102,17 +137,28 @@ export default function Paywall() {
   const view: View = useMemo(() => {
     if (loading) return "loading";
     const s = status || {};
+
     if (s.needs_policy) return "needs-policy";
 
     const untilMs = s.until ? new Date(s.until).getTime() : 0;
-    const hasByFlag = !!s.has_access;
     const active = s.status === "active" && untilMs > nowMs();
     const trial  = s.status === "trial"  && untilMs > nowMs();
-    const expired = Boolean(untilMs && untilMs <= nowMs()); // <-- считаем истёкшим по факту дедлайна
+    const has    = Boolean(s.has_access) || active || trial;
 
-    if (hasByFlag || active || trial) return "has-access";
-    if (expired) return "expired";                             // <-- не зависим от status !== "none"
-    if (s.status === "none") return "pre-trial";
+    // Был ли когда-то триал/подписка:
+    const hadHistory =
+      Boolean(s.trial_ever) ||
+      Boolean(s.trial_started_at) ||
+      Boolean(s.subscription_until);
+
+    // «Истёк» — если когда-то был доступ (триал/подписка), но сейчас его нет.
+    // Если есть дедлайн — считаем истечение по нему; если дедлайна нет, но была история — тоже expired.
+    const expiredByDeadline = Boolean(untilMs && untilMs <= nowMs());
+    const expired = hadHistory && !has && (expiredByDeadline || !s.until);
+
+    if (has) return "has-access";
+    if (expired) return "expired";
+    // иначе это «чистый» пользователь после политики: ещё не запускал триал
     return "pre-trial";
   }, [status, loading]);
 

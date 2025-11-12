@@ -1,3 +1,4 @@
+// src/lib/access.ts
 // Единая «точка правды» для мини-аппа: статус доступа и утилиты.
 import { getTelegramUserId } from "./telegram";
 
@@ -10,8 +11,9 @@ export type AccessSnapshot = {
   plan?: "week" | "month" | "quarter" | "year" | null;
   is_auto_renew?: boolean | null;
   needs_policy?: boolean | null;         // НОВОЕ
+  trial_ever?: boolean | null;           // НОВОЕ: был ли когда-либо триал/подписка
 
-  // возможные поля для обратной совместимости
+  // возможные поля для обратной совместимости/обогащения
   trial_started_at?: string | null;
   trial_expires_at?: string | null;
   subscription_until?: string | null;
@@ -50,35 +52,120 @@ const isFuture = (iso?: string | null) => {
   return Number.isFinite(t) && t > nowMs();
 };
 
+function mergeSnapshots(base: AccessSnapshot, extra?: any): AccessSnapshot {
+  if (!extra) return base;
+
+  // Берём «исторические» поля и мягко дополняем базу
+  const trial_started_at = base.trial_started_at ?? extra.trial_started_at ?? null;
+  const trial_expires_at = base.trial_expires_at ?? extra.trial_expires_at ?? null;
+  const subscription_until = base.subscription_until ?? extra.subscription_until ?? null;
+
+  // trial_ever — если пришёл с бэка, иначе вычисляем по наличию следов
+  const computedTrialEver =
+    typeof extra.trial_ever === "boolean"
+      ? extra.trial_ever
+      : Boolean(trial_started_at || trial_expires_at || subscription_until);
+
+  return {
+    ...base,
+    trial_started_at,
+    trial_expires_at,
+    subscription_until,
+    trial_ever: base.trial_ever ?? (computedTrialEver ? true : null),
+    // если какие-то основные поля отсутствуют в base — аккуратно дополним
+    status: base.status ?? (extra.status ?? null),
+    until: base.until ?? (extra.until ?? null),
+    plan: base.plan ?? (extra.plan ?? null),
+    is_auto_renew:
+      typeof base.is_auto_renew === "boolean"
+        ? base.is_auto_renew
+        : typeof extra.is_auto_renew === "boolean"
+        ? extra.is_auto_renew
+        : null,
+    needs_policy:
+      typeof base.needs_policy === "boolean"
+        ? base.needs_policy
+        : typeof extra.needs_policy === "boolean"
+        ? extra.needs_policy
+        : null,
+    has_access:
+      typeof base.has_access === "boolean"
+        ? base.has_access
+        : Boolean(extra.has_access),
+  };
+}
+
 // ===== Основной снимок статуса с бэка ======================================
 export async function getAccessStatus(): Promise<AccessSnapshot> {
   const tg = getTelegramUserId();
   if (!tg) return { ok: false, has_access: false };
 
-  // 1) payments/status
+  // Попытка 1: /api/payments/status (канон для доступа)
   try {
     const u = new URL(apiUrl("/api/payments/status"), window.location.origin);
     u.searchParams.set("tg_user_id", String(tg));
     const r = await fetch(u.toString(), { credentials: "omit" });
+
     if (r.ok) {
       const raw = (await r.json()) as any;
-      const snap: AccessSnapshot = {
+
+      // Базовый слепок из payments/status
+      let snap: AccessSnapshot = {
         ok: true,
-        has_access: Boolean(raw?.has_access),
+        has_access:
+          typeof raw?.has_access === "boolean"
+            ? Boolean(raw.has_access)
+            : false,
         status: (raw?.status ?? null) as any,
         until: raw?.until ?? null,
         plan: (raw?.plan ?? null) as any,
-        is_auto_renew: typeof raw?.is_auto_renew === "boolean" ? raw.is_auto_renew : null,
-        needs_policy: typeof raw?.needs_policy === "boolean" ? raw.needs_policy : null,
+        is_auto_renew:
+          typeof raw?.is_auto_renew === "boolean" ? raw.is_auto_renew : null,
+        needs_policy:
+          typeof raw?.needs_policy === "boolean" ? raw.needs_policy : null,
+        trial_ever:
+          typeof raw?.trial_ever === "boolean" ? raw.trial_ever : null,
       };
+
+      // Если payments/status уже дал «историю» — положим
       if (raw?.trial_started_at) snap.trial_started_at = raw.trial_started_at;
       if (raw?.trial_expires_at) snap.trial_expires_at = raw.trial_expires_at;
       if (raw?.subscription_until) snap.subscription_until = raw.subscription_until;
+
+      // ДОП. ШАГ: обогатим историями через /api/access/status
+      try {
+        const u2 = new URL(apiUrl("/api/access/status"), window.location.origin);
+        u2.searchParams.set("tg_user_id", String(tg));
+        const r2 = await fetch(u2.toString(), { credentials: "omit" });
+        if (r2.ok) {
+          const raw2 = await r2.json();
+          snap = mergeSnapshots(snap, raw2);
+        }
+      } catch {
+        // молчим, базовый snap уже есть
+      }
+
+      // Если has_access явно не пришёл, посчитаем по status+until
+      if (typeof snap.has_access !== "boolean") {
+        const active = snap.status === "active" && isFuture(snap.until ?? null);
+        const trial = snap.status === "trial" && isFuture(snap.until ?? null);
+        snap.has_access = active || trial;
+      }
+
+      // Если until отсутствует, но есть явные until по полям — добьём
+      if (!snap.until) {
+        if (isFuture(snap.subscription_until ?? null)) snap.until = snap.subscription_until!;
+        else if (isFuture(snap.trial_expires_at ?? null)) snap.until = snap.trial_expires_at!;
+        else if (snap.trial_started_at) snap.until = addDaysISO(snap.trial_started_at, 5);
+      }
+
       return snap;
     }
-  } catch {}
+  } catch {
+    // пойдём на fallback
+  }
 
-  // 2) access/status (fallback/совм.)
+  // Попытка 2 (fallback/совместимость): /api/access/status
   try {
     const u = new URL(apiUrl("/api/access/status"), window.location.origin);
     u.searchParams.set("tg_user_id", String(tg));
@@ -86,19 +173,30 @@ export async function getAccessStatus(): Promise<AccessSnapshot> {
     if (r.ok) {
       const raw = (await r.json()) as any;
 
-      if ("has_access" in raw || "status" in raw || "until" in raw || "plan" in raw || "is_auto_renew" in raw || "needs_policy" in raw) {
+      if (
+        "has_access" in raw ||
+        "status" in raw ||
+        "until" in raw ||
+        "plan" in raw ||
+        "is_auto_renew" in raw ||
+        "needs_policy" in raw
+      ) {
         const snap: AccessSnapshot = {
           ok: true,
           has_access: Boolean(raw?.has_access),
           status: (raw?.status ?? null) as any,
           until: raw?.until ?? null,
           plan: (raw?.plan ?? null) as any,
-          is_auto_renew: typeof raw?.is_auto_renew === "boolean" ? raw.is_auto_renew : null,
-          needs_policy: typeof raw?.needs_policy === "boolean" ? raw.needs_policy : null,
+          is_auto_renew:
+            typeof raw?.is_auto_renew === "boolean" ? raw.is_auto_renew : null,
+          needs_policy:
+            typeof raw?.needs_policy === "boolean" ? raw.needs_policy : null,
+          trial_ever:
+            typeof raw?.trial_ever === "boolean" ? raw.trial_ever : null,
+          trial_started_at: raw?.trial_started_at ?? null,
+          trial_expires_at: raw?.trial_expires_at ?? null,
+          subscription_until: raw?.subscription_until ?? null,
         };
-        if (raw?.trial_started_at) snap.trial_started_at = raw.trial_started_at;
-        if (raw?.trial_expires_at) snap.trial_expires_at = raw.trial_expires_at;
-        if (raw?.subscription_until) snap.subscription_until = raw.subscription_until;
         return snap;
       }
 
@@ -112,8 +210,10 @@ export async function getAccessStatus(): Promise<AccessSnapshot> {
         status: null,
         until: null,
         plan: (raw?.plan ?? null) as any,
-        is_auto_renew: typeof raw?.is_auto_renew === "boolean" ? raw.is_auto_renew : null,
+        is_auto_renew:
+          typeof raw?.is_auto_renew === "boolean" ? raw.is_auto_renew : null,
         needs_policy: null,
+        trial_ever: null,
       };
 
       const subUntil = snap.subscription_until;
@@ -135,6 +235,11 @@ export async function getAccessStatus(): Promise<AccessSnapshot> {
       if (!("has_access" in raw)) {
         snap.has_access = snap.status === "active" || snap.status === "trial";
       }
+
+      // вычислим trial_ever для совсем старого ответа
+      snap.trial_ever = Boolean(
+        snap.trial_started_at || snap.trial_expires_at || snap.subscription_until
+      );
 
       return snap;
     }
