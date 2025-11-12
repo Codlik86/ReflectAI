@@ -15,11 +15,11 @@ export default function Settings() {
               <div>
                 <div className="font-medium">Приватность</div>
                 <div className="text-sm text-black/60">
-                  Очистка истории и режим без сохранения (скоро).
+                  Очистка истории (скоро, сейчас в боте /settings).
                 </div>
               </div>
               <button className="px-3 py-1.5 rounded-xl bg-black/5 text-sm">
-                Открыть
+                Скоро
               </button>
             </div>
 
@@ -31,7 +31,7 @@ export default function Settings() {
                 </div>
               </div>
               <button className="px-3 py-1.5 rounded-xl bg-black/5 text-sm">
-                Открыть
+                Скоро
               </button>
             </div>
 
@@ -43,13 +43,13 @@ export default function Settings() {
                 </div>
               </div>
               <button className="px-3 py-1.5 rounded-xl bg-black/5 text-sm">
-                Открыть
+                Скоро
               </button>
             </div>
           </div>
 
           <div className="mt-6 border-t pt-4 text-sm text-black/60">
-            Версия мини-приложения · UI предварительный.
+            Версия мини-приложения
           </div>
         </div>
       </div>
