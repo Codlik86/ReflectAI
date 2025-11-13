@@ -15,7 +15,7 @@ export default function Settings() {
               <div>
                 <div className="font-medium">Приватность</div>
                 <div className="text-sm text-black/60">
-                  Очистка истории (скоро, сейчас в боте /settings).
+                  Очистка истории (сейчас в боте /settings).
                 </div>
               </div>
               <button className="px-3 py-1.5 rounded-xl bg-black/5 text-sm">
@@ -27,7 +27,7 @@ export default function Settings() {
               <div>
                 <div className="font-medium">Звуки/вибро</div>
                 <div className="text-sm text-black/60">
-                  Сигналы для дыхательных практик (скоро).
+                  Аудио для упражнений.
                 </div>
               </div>
               <button className="px-3 py-1.5 rounded-xl bg-black/5 text-sm">
