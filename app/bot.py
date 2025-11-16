@@ -239,7 +239,7 @@ async def on_start_with_payload(m: Message):
 
     CHAT_MODE[m.chat.id] = "talk"
     img = get_onb_image("cover")
-    prefix = "Спасибо, что заглянул(а) из рекламы 💛\n\n" if saved else ""
+    prefix = "Welcome!💛\n\n" if saved else ""
     if img:
         try:
             await m.answer_photo(img, caption=prefix + ONB_1_TEXT, reply_markup=kb_onb_step1())
