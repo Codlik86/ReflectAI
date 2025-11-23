@@ -1,5 +1,5 @@
 // src/pages/ThoughtLabeling.tsx
-import { useRef, useState } from "react";
+import { useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 
@@ -55,6 +55,22 @@ type Phase = "intro" | "idle" | "running" | "done";
 export default function ThoughtLabeling() {
   const TOTAL = STEPS.length;
   const navigate = useNavigate();
+
+  const touchBtnStyle: CSSProperties = {
+    WebkitTapHighlightColor: "transparent",
+    touchAction: "manipulation",
+  };
+  const onPress =
+    (fn: () => void) =>
+    (e: React.PointerEvent | React.MouseEvent) => {
+      if ("pointerType" in e && (e as React.PointerEvent).pointerType === "touch") {
+        e.preventDefault();
+        e.stopPropagation();
+        fn();
+        return;
+      }
+      if (!(e as any).pointerType) fn();
+    };
 
   // экран/фаза
   const [phase, setPhase] = useState<Phase>("intro");
@@ -179,11 +195,6 @@ export default function ThoughtLabeling() {
 
   const current = STEPS[stepIdx - 1];
 
-  // helper для тач-фикса
-  const onPD = (e: React.PointerEvent) => {
-    if ((e as any).pointerType === "touch") e.preventDefault();
-  };
-
   return (
     <div className="min-h-dvh flex flex-col">
       <BackBar title="Маркировка мыслей" to="/exercises" />
@@ -205,10 +216,11 @@ export default function ThoughtLabeling() {
             </div>
             <div className="flex items-center justify-center">
               <button
-                onPointerDown={onPD}
-                style={{ touchAction: "manipulation" }}
+                type="button"
                 onClick={begin}
+                onPointerDown={onPress(begin)}
                 className="btn btn-primary"
+                style={touchBtnStyle}
               >
                 Начать
               </button>
@@ -243,28 +255,31 @@ export default function ThoughtLabeling() {
             <div className="mt-5 flex items-center justify-center gap-3">
               {phase === "idle" ? (
                 <button
-                  onPointerDown={onPD}
-                  style={{ touchAction: "manipulation" }}
+                  type="button"
                   onClick={() => startStep(stepIdx)}
+                  onPointerDown={onPress(() => startStep(stepIdx))}
                   className="btn btn-primary"
+                  style={touchBtnStyle}
                 >
                   Старт
                 </button>
               ) : (
                 <button
-                  onPointerDown={onPD}
-                  style={{ touchAction: "manipulation" }}
+                  type="button"
                   onClick={onPauseResume}
+                  onPointerDown={onPress(onPauseResume)}
                   className="btn btn-primary"
+                  style={touchBtnStyle}
                 >
                   {paused ? "Продолжить" : "Пауза"}
                 </button>
               )}
               <button
-                onPointerDown={onPD}
-                style={{ touchAction: "manipulation" }}
+                type="button"
                 onClick={onStop}
+                onPointerDown={onPress(onStop)}
                 className="btn btn-stop"
+                style={touchBtnStyle}
               >
                 Остановить
               </button>
@@ -273,28 +288,31 @@ export default function ThoughtLabeling() {
             <div className="mt-5 pt-4 border-t border-black/5">
               <div className="flex items-center justify-center gap-2">
                 <button
-                  onPointerDown={onPD}
-                  style={{ touchAction: "manipulation" }}
+                  type="button"
                   onClick={goStart}
+                  onPointerDown={onPress(goStart)}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80"
+                  style={touchBtnStyle}
                 >
                   Сначала
                 </button>
                 <button
-                  onPointerDown={onPD}
-                  style={{ touchAction: "manipulation" }}
+                  type="button"
                   onClick={goPrev}
+                  onPointerDown={onPress(goPrev)}
                   disabled={stepIdx === 1}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
+                  style={touchBtnStyle}
                 >
                   Назад
                 </button>
                 <button
-                  onPointerDown={onPD}
-                  style={{ touchAction: "manipulation" }}
+                  type="button"
                   onClick={goNext}
+                  onPointerDown={onPress(goNext)}
                   disabled={stepIdx === TOTAL}
                   className="px-2 py-1 text-[15px] text-ink-900 underline decoration-black/30 hover:opacity-80 disabled:opacity-30"
+                  style={touchBtnStyle}
                 >
                   Вперёд
                 </button>
@@ -312,19 +330,20 @@ export default function ThoughtLabeling() {
             </div>
             <div className="mt-4 flex items-center justify-center gap-3">
               <button
-                onPointerDown={onPD}
-                style={{ touchAction: "manipulation" }}
+                type="button"
                 onClick={() => setIdleStep(1)}
+                onPointerDown={onPress(() => setIdleStep(1))}
                 className="h-10 px-4 rounded-xl bg-[#FFA66B] text-white font-medium"
+                style={touchBtnStyle}
               >
                 Ещё раз
               </button>
               <button
                 type="button"
-                onPointerDown={(e) => { if ((e as any).pointerType === "touch") e.preventDefault(); }}
                 onClick={() => navigate("/exercises")}
                 className="h-10 px-4 rounded-xl bg-white text-ink-900 flex items-center"
-                style={{ touchAction: "manipulation" }}
+                onPointerDown={onPress(() => navigate("/exercises"))}
+                style={touchBtnStyle}
               >
                 К упражнениям
               </button>
