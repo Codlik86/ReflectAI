@@ -63,6 +63,7 @@ from app.billing.service import (
     get_active_subscription_row,
     apply_success_payment,
 )
+from app.billing.prices import plan_price_int, PLAN_PRICES_INT
 
 from zoneinfo import ZoneInfo
 from collections import deque
@@ -1470,31 +1471,37 @@ async def on_text(m: Message):
 # === /pay — планы =========================================
 from aiogram.filters import Command as _CmdPay
 
+_PLAN_LABELS = {
+    "week": "Подписка на 1 неделю",
+    "month": "Подписка на 1 месяц",
+    "quarter": "Подписка на 3 месяца",
+    "year": "Подписка на 1 год",
+}
+
 _PLANS = {
-    "week": (499, "Подписка на 1 неделю"),
-    "month": (1190, "Подписка на 1 месяц"),
-    "quarter": (2990, "Подписка на 3 месяца"),
-    "q3": (2990, "Подписка на 3 месяца"),
-    "year": (7990, "Подписка на 1 год"),
+    "week": (plan_price_int("week"), _PLAN_LABELS["week"]),
+    "month": (plan_price_int("month"), _PLAN_LABELS["month"]),
+    "quarter": (plan_price_int("quarter"), _PLAN_LABELS["quarter"]),
+    "year": (plan_price_int("year"), _PLAN_LABELS["year"]),
 }
 
 # Цены в Telegram Stars (XTR), 1 единица = 1 звезда.
 # Можно при желании потом поменять.
 _STARS_PRICES = {
-    "week": 499,
-    "month": 1190,
-    "quarter": 2990,
-    "year": 7990,
+    "week": plan_price_int("week"),
+    "month": plan_price_int("month"),
+    "quarter": plan_price_int("quarter"),
+    "year": plan_price_int("year"),
 }
 
 
 def _kb_pay_plans() -> _IKM:
     return _IKM(
         inline_keyboard=[
-            [_IKB(text="Неделя — 499 ₽", callback_data="pay:plan:week")],
-            [_IKB(text="Месяц — 1190 ₽", callback_data="pay:plan:month")],
-            [_IKB(text="3 месяца — 2990 ₽", callback_data="pay:plan:quarter")],
-            [_IKB(text="Год — 7990 ₽", callback_data="pay:plan:year")],
+            [_IKB(text=f"Неделя — {plan_price_int('week')} ₽", callback_data="pay:plan:week")],
+            [_IKB(text=f"Месяц — {plan_price_int('month')} ₽", callback_data="pay:plan:month")],
+            [_IKB(text=f"3 месяца — {plan_price_int('quarter')} ₽", callback_data="pay:plan:quarter")],
+            [_IKB(text=f"Год — {plan_price_int('year')} ₽", callback_data="pay:plan:year")],
         ]
     )
 
@@ -1562,7 +1569,6 @@ async def on_pick_plan(cb: CallbackQuery):
         return
 
     PLAN_ALIAS = {
-        "q3": "quarter",
         "3m": "quarter",
         "quarter": "quarter",
         "week": "week",
@@ -1612,7 +1618,6 @@ async def on_pick_plan_yk(cb: CallbackQuery):
         return
 
     PLAN_ALIAS = {
-        "q3": "quarter",
         "3m": "quarter",
         "quarter": "quarter",
         "week": "week",
@@ -1675,7 +1680,6 @@ async def on_pick_plan_stars(cb: CallbackQuery):
         return
 
     PLAN_ALIAS = {
-        "q3": "quarter",
         "3m": "quarter",
         "quarter": "quarter",
         "week": "week",
@@ -1732,7 +1736,6 @@ async def on_successful_payment(m: Message):
         plan = payload.split(":", 1)[1].strip().lower()
 
     PLAN_ALIAS = {
-        "q3": "quarter",
         "3m": "quarter",
         "quarter": "quarter",
         "week": "week",

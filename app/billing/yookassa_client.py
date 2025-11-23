@@ -42,7 +42,7 @@ def _auth_aio() -> aiohttp.BasicAuth:
     return aiohttp.BasicAuth(login=YK_SHOP_ID, password=YK_SECRET_KEY)
 
 def _amount_str(rub: int) -> str:
-    # 1190 -> "1190.00"
+    # 599 -> "599.00"
     return f"{decimal.Decimal(rub):.2f}"
 
 def _build_receipt(*, amount_rub: int, metadata: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:

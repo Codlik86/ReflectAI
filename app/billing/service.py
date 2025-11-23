@@ -7,19 +7,13 @@ from typing import Literal, Optional, List, Dict, Any, Tuple
 
 from sqlalchemy import text, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.billing.prices import PLAN_PRICES_INT
 
 # -------------------------------
 # Планы и цены — держим в одном месте
 # -------------------------------
 
 Plan = Literal["week", "month", "quarter", "year"]
-
-PRICES_RUB: dict[Plan, int] = {
-    "week": 499,
-    "month": 1190,
-    "quarter": 2990,
-    "year": 7990,
-}
 
 # На сколько продлеваем подписку
 PLAN_TO_DELTA: dict[Plan, timedelta] = {
@@ -36,9 +30,9 @@ def utcnow() -> datetime:
 
 def plan_price_rub(plan: str | None) -> int:
     p = (plan or "month").lower()
-    if p in PRICES_RUB:
-        return PRICES_RUB[p]  # type: ignore[index]
-    return PRICES_RUB["month"]
+    if p in PLAN_PRICES_INT:
+        return PLAN_PRICES_INT[p]  # type: ignore[index]
+    return PLAN_PRICES_INT["month"]
 
 
 # -------------------------------
@@ -66,11 +60,11 @@ async def apply_success_payment(
     provider/currency/is_recurring/amount_override позволяют переиспользовать
     функцию для разных провайдеров (YooKassa, Telegram Stars и т.п.).
     """
-    if plan not in PRICES_RUB:
+    if plan not in PLAN_PRICES_INT:
         raise ValueError(f"Unknown plan: {plan}")
 
     now = datetime.now(timezone.utc)
-    amount = amount_override if amount_override is not None else PRICES_RUB[plan]
+    amount = amount_override if amount_override is not None else PLAN_PRICES_INT[plan]
     delta = PLAN_TO_DELTA[plan]
 
     # 1) Записываем платёж
@@ -237,7 +231,7 @@ async def handle_yookassa_webhook(session: AsyncSession, event: dict):
       "object": {
         "id": "<yk_payment_id>",
         "status": "succeeded" | "canceled" | ...,
-        "amount": {"value": "1190.00", "currency": "RUB"},
+        "amount": {"value": "599.00", "currency": "RUB"},
         "metadata": {"user_id": <int>, "plan": "month" }
       }
     }

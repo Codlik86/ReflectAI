@@ -738,12 +738,12 @@ async def maintenance_charge_due(
 
     # Импорты «по месту», чтобы не падать, если модуль ещё не завезли
     try:
-        from app.billing.service import apply_success_payment, PRICES_RUB
+        from app.billing.service import apply_success_payment, plan_price_rub
         from app.billing.yookassa_client import charge_saved_method
     except Exception:
         apply_success_payment = None           # type: ignore
         charge_saved_method = None             # type: ignore
-        PRICES_RUB = {}                        # type: ignore
+        plan_price_rub = None                  # type: ignore
 
     for s in subs:
         uid = int(getattr(s, "user_id"))
@@ -770,7 +770,7 @@ async def maintenance_charge_due(
             continue
 
         # сумма в рублях по плану (если плана нет в прайсе — пропускаем)
-        amount = PRICES_RUB.get(plan)
+        amount = plan_price_rub(plan) if plan_price_rub else None
         if not amount:
             failed += 1
             details.append({**item, "action": "skip_unknown_plan"})

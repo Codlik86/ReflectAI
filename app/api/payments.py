@@ -15,6 +15,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.core import async_session
+from app.billing.prices import PLAN_PRICES_STR, plan_price_str
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
@@ -23,12 +24,7 @@ YK_SHOP_ID = (os.getenv("YK_SHOP_ID") or "").strip()
 YK_SECRET_KEY = (os.getenv("YK_SECRET_KEY") or "").strip()
 MINIAPP_BASE = (os.getenv("MINIAPP_BASE") or "").rstrip("/")
 
-PRICES_RUB: Dict[str, str] = {
-    "week": "499.00",
-    "month": "1190.00",
-    "quarter": "2990.00",
-    "year": "7990.00",
-}
+PRICES_RUB: Dict[str, str] = PLAN_PRICES_STR
 
 def _get(obj: Any, *path: str, default: Any = None) -> Any:
     cur = obj
@@ -249,7 +245,7 @@ class CreatePaymentResp(BaseModel):
     confirmation_url: str
 
 def _amount_for_plan(plan: str) -> str:
-    return PRICES_RUB.get(plan, PRICES_RUB["month"])
+    return plan_price_str(plan)
 
 @router.post("/yookassa/create", response_model=CreatePaymentResp)
 async def create_yookassa_payment(req: CreatePaymentReq, request: Request):
