@@ -1,5 +1,6 @@
 // src/pages/ThoughtLabeling.tsx
 import { useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 
 /** Шаги практики: заголовок, подсказка и длительность (сек) */
@@ -53,6 +54,7 @@ type Phase = "intro" | "idle" | "running" | "done";
 
 export default function ThoughtLabeling() {
   const TOTAL = STEPS.length;
+  const navigate = useNavigate();
 
   // экран/фаза
   const [phase, setPhase] = useState<Phase>("intro");
@@ -70,16 +72,17 @@ export default function ThoughtLabeling() {
   const endAt = useRef(0);
   const pausedRef = useRef(false);
   const runningRef = useRef(false);
-  const totalMsRef = useRef(0);
 
   const stopRaf = () => {
     if (raf.current) cancelAnimationFrame(raf.current);
     raf.current = null;
   };
 
-  const resetAll = () => {
+  const setIdleStep = (idx: number) => {
+    const nextIdx = Math.min(Math.max(idx, 1), TOTAL);
     stopRaf();
     setPhase("idle");
+    setStepIdx(nextIdx);
     setMsLeft(0);
     setProgress(0);
     setPaused(false);
@@ -89,27 +92,31 @@ export default function ThoughtLabeling() {
 
   const begin = () => {
     // со вступительного экрана переходим в «idle» на первом шаге
-    setStepIdx(1);
-    resetAll();
+    setIdleStep(1);
   };
 
-  const startCurrentStep = () => {
-    const sec = STEPS[stepIdx - 1].seconds;
+  const startStep = (idx: number) => {
+    if (runningRef.current) return;
+    const targetIdx = Math.min(Math.max(idx, 1), TOTAL);
+    stopRaf();
+    const sec = STEPS[targetIdx - 1].seconds;
     const durMs = sec * 1000;
+    setStepIdx(targetIdx);
     setPhase("running");
+    setMsLeft(durMs);
+    setProgress(0);
+    setPaused(false);
+    pausedRef.current = false;
     runningRef.current = true;
-    totalMsRef.current = durMs;
     endAt.current = performance.now() + durMs;
     tick(durMs, () => {
-      // шаг завершён → следующий или финиш
-      if (stepIdx < TOTAL) {
-        setStepIdx((i) => i + 1);
-        setPhase("idle");
+      runningRef.current = false;
+      if (targetIdx < TOTAL) {
+        setIdleStep(targetIdx + 1);
+      } else {
+        setPhase("done");
         setMsLeft(0);
         setProgress(0);
-      } else {
-        runningRef.current = false;
-        setPhase("done");
       }
     });
   };
@@ -137,7 +144,7 @@ export default function ThoughtLabeling() {
   };
 
   const onPauseResume = () => {
-    if (phase !== "running") return;
+    if (phase !== "running" || !runningRef.current) return;
     pausedRef.current = !pausedRef.current;
     setPaused(pausedRef.current);
     if (!pausedRef.current) {
@@ -146,23 +153,21 @@ export default function ThoughtLabeling() {
   };
 
   const onStop = () => {
-    resetAll();
+    runningRef.current = false;
+    setIdleStep(stepIdx);
   };
 
   // навигация снизу
   const goStart = () => {
-    setStepIdx(1);
-    resetAll();
+    setIdleStep(1);
   };
   const goPrev = () => {
     if (stepIdx === 1) return;
-    setStepIdx((i) => i - 1);
-    resetAll();
+    setIdleStep(stepIdx - 1);
   };
   const goNext = () => {
     if (stepIdx === TOTAL) return;
-    setStepIdx((i) => i + 1);
-    resetAll();
+    setIdleStep(stepIdx + 1);
   };
 
   const mm = Math.floor(msLeft / 1000 / 60)
@@ -240,7 +245,7 @@ export default function ThoughtLabeling() {
                 <button
                   onPointerDown={onPD}
                   style={{ touchAction: "manipulation" }}
-                  onClick={startCurrentStep}
+                  onClick={() => startStep(stepIdx)}
                   className="btn btn-primary"
                 >
                   Старт
@@ -309,24 +314,20 @@ export default function ThoughtLabeling() {
               <button
                 onPointerDown={onPD}
                 style={{ touchAction: "manipulation" }}
-                onClick={() => {
-                  setStepIdx(1);
-                  setPhase("idle");
-                  setMsLeft(0);
-                  setProgress(0);
-                }}
+                onClick={() => setIdleStep(1)}
                 className="h-10 px-4 rounded-xl bg-[#FFA66B] text-white font-medium"
               >
                 Ещё раз
               </button>
-              <a
-                href="/exercises"
+              <button
+                type="button"
+                onPointerDown={(e) => { if ((e as any).pointerType === "touch") e.preventDefault(); }}
+                onClick={() => navigate("/exercises")}
                 className="h-10 px-4 rounded-xl bg-white text-ink-900 flex items-center"
                 style={{ touchAction: "manipulation" }}
-                onPointerDown={(e) => { if ((e as any).pointerType === "touch") e.preventDefault(); }}
               >
                 К упражнениям
-              </a>
+              </button>
             </div>
           </div>
         )}

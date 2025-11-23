@@ -1,4 +1,5 @@
 import { useRef, useState, type CSSProperties } from "react";
+import { useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 
 type Phase = "intro" | "idle" | "inhale" | "exhale" | "done";
@@ -28,6 +29,7 @@ const onPress =
   };
 
 export default function Breath46() {
+  const navigate = useNavigate();
   const [phase, setPhase] = useState<Phase>("intro");
   const [cycle, setCycle] = useState(1);
   const [msLeft, setMsLeft] = useState(0);
@@ -134,6 +136,7 @@ export default function Breath46() {
     resetAll();
     setCycle(next);
   };
+  const goExercises = () => navigate("/exercises");
 
   const mm = Math.floor(msLeft / 1000 / 60)
     .toString()
@@ -302,9 +305,15 @@ export default function Breath46() {
               >
                 Ещё раз
               </button>
-              <a href="/exercises" className="h-10 px-4 rounded-xl bg-white text-ink-900 flex items-center">
+              <button
+                type="button"
+                onClick={goExercises}
+                onPointerDown={onPress(goExercises)}
+                className="h-10 px-4 rounded-xl bg-white text-ink-900 flex items-center"
+                style={touchBtnStyle}
+              >
                 К упражнениям
-              </a>
+              </button>
             </div>
           </div>
         )}

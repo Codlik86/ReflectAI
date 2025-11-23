@@ -1,5 +1,6 @@
 // src/pages/Breath4444.tsx
 import { useRef, useState, type CSSProperties } from "react";
+import { useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 
 type Phase = "intro" | "idle" | "inhale" | "hold" | "exhale" | "hold2" | "done";
@@ -28,6 +29,7 @@ const onPress =
   };
 
 export default function Breath4444() {
+  const navigate = useNavigate();
   const [phase, setPhase] = useState<Phase>("intro");
   const [cycle, setCycle] = useState(1);
   const [msLeft, setMsLeft] = useState(0);
@@ -118,6 +120,7 @@ export default function Breath4444() {
   const goStart = () => resetAll();
   const goPrev = () => { const prev = Math.max(1, cycle - 1); resetAll(); setCycle(prev); };
   const goNext = () => { const next = Math.min(TOTAL_CYCLES, cycle + 1); resetAll(); setCycle(next); };
+  const goExercises = () => navigate("/exercises");
 
   const mm = Math.floor(msLeft / 1000 / 60).toString().padStart(2, "0");
   const ss = Math.floor((msLeft / 1000) % 60).toString().padStart(2, "0");
@@ -268,7 +271,15 @@ export default function Breath4444() {
               >
                 Ещё раз
               </button>
-              <a href="/exercises" className="h-10 px-4 rounded-xl bg-white text-ink-900 flex items-center">К упражнениям</a>
+              <button
+                type="button"
+                onClick={goExercises}
+                onPointerDown={onPress(goExercises)}
+                className="h-10 px-4 rounded-xl bg-white text-ink-900 flex items-center"
+                style={touchBtnStyle}
+              >
+                К упражнениям
+              </button>
             </div>
           </div>
         )}
