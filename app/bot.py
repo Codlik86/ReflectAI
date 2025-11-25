@@ -63,7 +63,7 @@ from app.billing.service import (
     get_active_subscription_row,
     apply_success_payment,
 )
-from app.billing.prices import plan_price_int, PLAN_PRICES_INT
+from app.billing.prices import plan_price_int, plan_price_stars, PLAN_PRICES_INT
 
 from zoneinfo import ZoneInfo
 from collections import deque
@@ -1486,12 +1486,11 @@ _PLANS = {
 }
 
 # Цены в Telegram Stars (XTR), 1 единица = 1 звезда.
-# Можно при желании потом поменять.
 _STARS_PRICES = {
-    "week": plan_price_int("week"),
-    "month": plan_price_int("month"),
-    "quarter": plan_price_int("quarter"),
-    "year": plan_price_int("year"),
+    "week": plan_price_stars("week"),
+    "month": plan_price_stars("month"),
+    "quarter": plan_price_stars("quarter"),
+    "year": plan_price_stars("year"),
 }
 
 

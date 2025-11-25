@@ -35,3 +35,15 @@ def plan_price_str(plan: str | None) -> str:
 
 PLAN_PRICES_STR: dict[str, str] = {k: plan_price_str(k) for k in PLAN_PRICES_RUB}
 PLAN_PRICES_INT: dict[str, int] = {k: plan_price_int(k) for k in PLAN_PRICES_RUB}
+
+# Количество звёзд для подписок (с учётом комиссии, см. комментарий в промпте)
+PLAN_PRICES_STARS: dict[str, int] = {
+    "week": 153,
+    "month": 460,
+    "quarter": 766,
+    "year": 2299,
+}
+
+
+def plan_price_stars(plan: str) -> int:
+    return PLAN_PRICES_STARS[plan]
