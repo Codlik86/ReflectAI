@@ -71,6 +71,31 @@ import re
 
 router = Router()
 
+# ===== Админы =====
+def _parse_admin_ids(raw: str) -> set[int]:
+    ids: set[int] = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.add(int(part))
+        except ValueError:
+            continue
+    return ids
+
+
+_ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip() or "53652078"
+ADMIN_IDS_SET: set[int] = _parse_admin_ids(_ADMIN_IDS_RAW)
+
+
+def is_admin(user_id: int) -> bool:
+    try:
+        return int(user_id) in ADMIN_IDS_SET
+    except Exception:
+        return False
+
+
 # ========== AUTO-LOGGING В БД (bot_messages) ==========
 class LogIncomingMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -659,6 +684,210 @@ def _fmt_dt(dt) -> str:
         return dt.astimezone(_TZ).strftime("%d.%m.%Y %H:%M")
     except Exception:
         return str(dt)
+
+
+# ===== Админ-статистика =====
+ADMIN_DENY_TEXT = "Команда доступна только админу"
+_STATS_LIMIT = 200
+
+
+async def _ensure_admin_command(m: Message) -> bool:
+    if is_admin(int(getattr(m.from_user, "id", 0) or 0)):
+        return True
+    try:
+        await m.answer(ADMIN_DENY_TEXT)
+    except Exception:
+        pass
+    return False
+
+
+def _fmt_dt_safe(dt) -> str:
+    return _fmt_dt(dt) if dt else "—"
+
+
+async def _fetch_count(session, sql: str) -> int:
+    res = await session.execute(text(sql))
+    try:
+        return int(res.scalar() or 0)
+    except Exception:
+        return 0
+
+
+def _truncate_for_tg(text_: str, limit: int = 3800) -> str:
+    if len(text_) <= limit:
+        return text_
+    return text_[: limit - 1] + "…"
+
+
+_STATS_COUNT_QUERIES = {
+    "all": "SELECT COUNT(*) FROM users",
+    "with_tg": "SELECT COUNT(*) FROM users WHERE tg_id IS NOT NULL",
+    "with_access_now": """
+        SELECT COUNT(*)
+        FROM users
+        WHERE tg_id IS NOT NULL
+          AND (
+            subscription_status = 'active'
+            OR trial_expires_at > NOW()
+          )
+    """,
+    "paywall_after_trial": """
+        SELECT COUNT(*)
+        FROM users
+        WHERE tg_id IS NOT NULL
+          AND (
+            subscription_status IS NULL
+            OR subscription_status <> 'active'
+          )
+          AND (
+            trial_expires_at IS NULL
+            OR trial_expires_at <= NOW()
+          )
+          AND trial_started_at IS NOT NULL
+    """,
+    "never_started_trial": """
+        SELECT COUNT(*)
+        FROM users
+        WHERE tg_id IS NOT NULL
+          AND trial_started_at IS NULL
+    """,
+}
+
+
+_STATS_PAYWALL_SQL = """
+    SELECT id, tg_id, trial_started_at, trial_expires_at, subscription_status
+    FROM users
+    WHERE tg_id IS NOT NULL
+      AND (
+        subscription_status IS NULL
+        OR subscription_status <> 'active'
+      )
+      AND (
+        trial_expires_at IS NULL
+        OR trial_expires_at <= NOW()
+      )
+      AND trial_started_at IS NOT NULL
+    ORDER BY trial_expires_at DESC NULLS LAST
+    LIMIT :limit
+"""
+
+
+_STATS_ACCESS_SQL = """
+    SELECT id, tg_id, subscription_status, trial_expires_at
+    FROM users
+    WHERE tg_id IS NOT NULL
+      AND (
+        subscription_status = 'active'
+        OR trial_expires_at > NOW()
+      )
+    ORDER BY subscription_status DESC, trial_expires_at DESC
+    LIMIT :limit
+"""
+
+
+_STATS_NEW_SQL = """
+    SELECT id, tg_id, created_at
+    FROM users
+    WHERE tg_id IS NOT NULL
+      AND trial_started_at IS NULL
+    ORDER BY created_at DESC
+    LIMIT :limit
+"""
+
+
+@router.message(Command("stats"))
+async def cmd_stats(m: Message):
+    if not await _ensure_admin_command(m):
+        return
+
+    async with async_session() as session:
+        counts = {}
+        for key, sql in _STATS_COUNT_QUERIES.items():
+            counts[key] = await _fetch_count(session, sql)
+
+    text_ = (
+        "Статистика «Помни» за сейчас:\n\n"
+        f"👥 Всего пользователей: {counts.get('all', 0)}\n"
+        f"👤 С tg_id (живые): {counts.get('with_tg', 0)}\n\n"
+        f"✅ Сейчас с доступом: {counts.get('with_access_now', 0)}\n"
+        f"🚧 На пейволе после триала: {counts.get('paywall_after_trial', 0)}\n"
+        f"🆕 Ещё не запускали триал: {counts.get('never_started_trial', 0)}"
+    )
+    await m.answer(_truncate_for_tg(text_))
+
+
+@router.message(Command("stats_paywall"))
+async def cmd_stats_paywall(m: Message):
+    if not await _ensure_admin_command(m):
+        return
+
+    async with async_session() as session:
+        res = await session.execute(text(_STATS_PAYWALL_SQL), {"limit": _STATS_LIMIT})
+        rows = res.mappings().all()
+        total = await _fetch_count(session, _STATS_COUNT_QUERIES["paywall_after_trial"])
+
+    lines = ["🚧 Пользователи на пейволе после триала (первые 200):", ""]
+    for row in rows:
+        lines.append(
+            "id={id} (tg_id={tg_id}), trial_started: {ts}, trial_expires: {te}, status={status}".format(
+                id=row.get("id"),
+                tg_id=row.get("tg_id"),
+                ts=_fmt_dt_safe(row.get("trial_started_at")),
+                te=_fmt_dt_safe(row.get("trial_expires_at")),
+                status=row.get("subscription_status") or "—",
+            )
+        )
+    extra = max(total - len(rows), 0)
+    if extra > 0:
+        lines.append(f"… и ещё {extra}, смотри в БД / сделаем CSV позже.")
+    await m.answer(_truncate_for_tg("\n".join(lines)))
+
+
+@router.message(Command("stats_access"))
+async def cmd_stats_access(m: Message):
+    if not await _ensure_admin_command(m):
+        return
+
+    async with async_session() as session:
+        res = await session.execute(text(_STATS_ACCESS_SQL), {"limit": _STATS_LIMIT})
+        rows = res.mappings().all()
+        total = await _fetch_count(session, _STATS_COUNT_QUERIES["with_access_now"])
+
+    lines = ["✅ Пользователи с доступом (первые 200):", ""]
+    for row in rows:
+        status_raw = (row.get("subscription_status") or "").lower()
+        if status_raw == "active":
+            mark = "status=active"
+            if row.get("trial_expires_at"):
+                mark += f", trial_expires: {_fmt_dt_safe(row.get('trial_expires_at'))}"
+        else:
+            mark = f"trial_until: {_fmt_dt_safe(row.get('trial_expires_at'))}"
+        lines.append(f"id={row.get('id')} (tg_id={row.get('tg_id')}), {mark}")
+    extra = max(total - len(rows), 0)
+    if extra > 0:
+        lines.append(f"… и ещё {extra}, смотри в БД / сделаем CSV позже.")
+    await m.answer(_truncate_for_tg("\n".join(lines)))
+
+
+@router.message(Command("stats_new"))
+async def cmd_stats_new(m: Message):
+    if not await _ensure_admin_command(m):
+        return
+
+    async with async_session() as session:
+        res = await session.execute(text(_STATS_NEW_SQL), {"limit": _STATS_LIMIT})
+        rows = res.mappings().all()
+        total = await _fetch_count(session, _STATS_COUNT_QUERIES["never_started_trial"])
+
+    lines = ["🆕 Пользователи, кто не запускал триал (первые 200):", ""]
+    for row in rows:
+        lines.append(
+            f"id={row.get('id')} (tg_id={row.get('tg_id')}), created: {_fmt_dt_safe(row.get('created_at'))}"
+        )
+    extra = max(total - len(rows), 0)
+    if extra > 0:
+        lines.append(f"… и ещё {extra}, смотри в БД / сделаем CSV позже.")
+    await m.answer(_truncate_for_tg("\n".join(lines)))
 
 
 # === Length hint picker + «один вопрос» ===
