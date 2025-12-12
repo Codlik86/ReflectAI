@@ -104,6 +104,13 @@ app.include_router(payments_router)                     # /api/payments/*   (sta
 app.include_router(tg_router,           prefix="/api/tg")
 app.include_router(summaries_router,    prefix="/api")  # /api/summaries/*
 
+# Логируем возможности Qdrant-клиента на старте
+try:
+    from app.qdrant_client import get_client as _get_qdrant_client
+    _get_qdrant_client()
+except Exception as e:
+    print("[qdrant] init error:", repr(e))
+
 # ==== Мини-лендинг для модерации YooKassa ====
 PROJECT_NAME = os.getenv("PROJECT_NAME", "Помни")
 PUBLIC_BOT_URL = os.getenv("PUBLIC_BOT_URL", "https://t.me/reflectttaibot")

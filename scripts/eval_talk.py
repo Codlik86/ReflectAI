@@ -4,7 +4,7 @@
 — Вызывает app.llm_adapter.chat_with_style с SYSTEM_PROMPT (+ тоновый суффикс)
 — Сохраняет Markdown, JSON и простой отчёт-валидацию.
 Запуск: python -m scripts.eval_talk
-Опции:  --style default|friend|therapist|18plus  --temp 0.82  --max_tokens 480
+Опции:  --style default|friend|therapist|18plus  --temp 0.82  --max_completion_tokens 480
 """
 
 import os
@@ -210,7 +210,7 @@ async def run_scenario(
     system_prompt: str,
     style_suffix: str,
     temperature: float,
-    max_tokens: int,
+    max_completion_tokens: int,
 ) -> Dict[str, Any]:
     """Ведём диалог по заданным turns, аккумулируем history."""
     history: List[Dict[str, str]] = [{"role": "system", "content": system_prompt + (("\n\n" + style_suffix) if style_suffix else "")}]
@@ -224,7 +224,7 @@ async def run_scenario(
         reply = await chat_with_style(
             messages=history,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
         )
         reply = (reply or "").strip()
         history.append({"role": "assistant", "content": reply})
@@ -287,7 +287,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--style", default="default", choices=["default", "friend", "therapist", "18plus"])
     parser.add_argument("--temp", type=float, default=0.82)
-    parser.add_argument("--max_tokens", type=int, default=480)
+    parser.add_argument("--max_completion_tokens", type=int, default=480)
     args = parser.parse_args()
 
     # системный промпт + суффикс
@@ -305,7 +305,7 @@ async def main():
             system_prompt=system_prompt,
             style_suffix=style_suffix,
             temperature=args.temp,
-            max_tokens=args.max_tokens,
+            max_completion_tokens=args.max_completion_tokens,
         )
         dialogs.append(d)
 

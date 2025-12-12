@@ -98,10 +98,10 @@ async def _llm_summarize(messages: List[Dict]) -> Optional[str]:
     ]
 
     try:
-        out = await complete_chat(messages=msgs, temperature=0.2, max_tokens=700)
+        out = await complete_chat(messages=msgs, temperature=0.2, max_completion_tokens=700)
     except TypeError:
         # На случай старой сигнатуры complete_chat
-        out = await complete_chat(msgs, temperature=0.2, max_tokens=700)
+        out = await complete_chat(msgs, temperature=0.2, max_completion_tokens=700)
     except Exception as e:
         _safe_print(f"[summarizer] LLM error: {e!r}")
         return None
@@ -200,9 +200,9 @@ async def rollup_weekly(user_id: int, week_start_utc: datetime) -> None:
         {"role": "user", "content": f"Сжать недельную сводку (7 дней) из дневных саммарей:\n{joined}"},
     ]
     try:
-        out = await complete_chat(messages=msgs, temperature=0.2, max_tokens=800)
+        out = await complete_chat(messages=msgs, temperature=0.2, max_completion_tokens=800)
     except TypeError:
-        out = await complete_chat(msgs, temperature=0.2, max_tokens=800)
+        out = await complete_chat(msgs, temperature=0.2, max_completion_tokens=800)
     except Exception as e:
         _safe_print(f"[summarizer] LLM error weekly: {e!r}")
         return
@@ -298,9 +298,9 @@ async def rollup_monthly(user_id: int, month_start_utc: datetime) -> None:
         {"role": "user", "content": "Сделай месячную выжимку: ключевые темы, сдвиги, договорённости, риски.\n" + joined},
     ]
     try:
-        out = await complete_chat(messages=msgs, temperature=0.2, max_tokens=900)
+        out = await complete_chat(messages=msgs, temperature=0.2, max_completion_tokens=900)
     except TypeError:
-        out = await complete_chat(msgs, temperature=0.2, max_tokens=900)
+        out = await complete_chat(msgs, temperature=0.2, max_completion_tokens=900)
     except Exception as e:
         _safe_print(f"[summarizer] LLM error monthly: {e!r}")
         return

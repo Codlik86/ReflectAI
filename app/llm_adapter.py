@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 import httpx
+import logging
 
 """
 llm_adapter.py
@@ -94,7 +95,7 @@ class LLMAdapter:
         user: Optional[str] = None,
         temperature: float = 0.6,
         top_p: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        max_completion_tokens: Optional[int] = None,
         model: Optional[str] = None,
         trace: Optional[Dict[str, Any]] = None,
         **kwargs: Any
@@ -126,8 +127,8 @@ class LLMAdapter:
         }
         if top_p is not None:
             payload["top_p"] = top_p
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
+        if max_completion_tokens is not None:
+            payload["max_completion_tokens"] = max_completion_tokens
 
         # Pass-through (stop, n, penalties и т.п.)
         for k, v in kwargs.items():
@@ -159,6 +160,20 @@ class LLMAdapter:
 
         # Устойчивые ретраи для 429/5xx + лёгкий бэкофф; при неудаче — опциональный фолбэк на DEFAULT_MODEL
         last_err: Optional[Exception] = None
+        try:
+            logging.info(
+                "[llm] model=%s params=%s",
+                resolved_model,
+                {
+                    "messages_len": len(msg_list),
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "max_completion_tokens": max_completion_tokens,
+                    "extra_keys": [k for k in kwargs.keys()],
+                },
+            )
+        except Exception:
+            pass
         for attempt in range(3):
             try:
                 r = await client.post(url, json=payload)
@@ -169,15 +184,22 @@ class LLMAdapter:
                 return data["choices"][0]["message"]["content"].strip()
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
+                try:
+                    logging.warning("[llm] http_error status=%s body=%s", status, e.response.text[:500])
+                except Exception:
+                    pass
                 # Попытки и бэкофф
                 if status in (429, 500, 502, 503, 504) and attempt < 2:
                     import asyncio, random
                     await asyncio.sleep(0.6 * (attempt + 1) + random.random() * 0.3)
                     last_err = e
                     continue
-                # Мягкий фолбэк на DEFAULT_MODEL (если сейчас не она)
+                if status == 400:
+                    _emit_trace("error", err=f"HTTP {status}")
+                    raise RuntimeError(f"LLM HTTP error {status}: {e.response.text}") from e
+                # Мягкий фолбэк на DEFAULT_MODEL (если сейчас не она) — только для 429/5xx
                 try_model = payload.get("model")
-                if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
+                if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL) and status in (429, 500, 502, 503, 504):
                     try:
                         fallback_used = True
                         payload["model"] = _resolve_model(DEFAULT_MODEL)
@@ -192,14 +214,19 @@ class LLMAdapter:
                 _emit_trace("error", err=f"HTTP {status}")
                 raise RuntimeError(f"LLM HTTP error {status}: {e.response.text}") from e
             except Exception as e:
-                if attempt < 2:
+                try:
+                    logging.warning("[llm] request_error attempt=%s err=%r", attempt, e)
+                except Exception:
+                    pass
+                # Фолбэк допускаем только для сетевых/таймаутов
+                is_network = isinstance(e, httpx.RequestError)
+                if attempt < 2 and is_network:
                     import asyncio, random
                     await asyncio.sleep(0.5 * (attempt + 1) + random.random() * 0.2)
                     last_err = e
                     continue
-                # Фолбэк на DEFAULT_MODEL при сетевых/прочих сбоях
                 try_model = payload.get("model")
-                if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
+                if is_network and FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
                     try:
                         fallback_used = True
                         payload["model"] = _resolve_model(DEFAULT_MODEL)
@@ -296,6 +323,7 @@ async def chat_with_style(
     needs_long_context: bool = False,
     model_override: Optional[str] = None,       # жёсткое переопределение модели
     trace: Optional[Dict[str, Any]] = None,     # для диагностики (пополняется внутри)
+    max_completion_tokens: Optional[int] = None,
     **kwargs: Any
 ) -> str:
     """
@@ -338,14 +366,28 @@ async def chat_with_style(
 
         # Подмешиваем RAG-контекст отдельным system-сообщением в хвост
         msgs = _append_rag_context(msgs, rag_ctx)
-        return await chat(messages=msgs, temperature=temperature, model=chosen_model, trace=trace, **kwargs)
+        return await chat(
+            messages=msgs,
+            temperature=temperature,
+            model=chosen_model,
+            trace=trace,
+            max_completion_tokens=max_completion_tokens,
+            **kwargs,
+        )
 
     # 4) Если messages не задан — путь system+user
     msgs = [{"role": "system", "content": sys}]
     msgs = _append_rag_context(msgs, rag_ctx)
     if user:
         msgs.append({"role": "user", "content": user})
-    return await chat(messages=msgs, temperature=temperature, model=chosen_model, trace=trace, **kwargs)
+    return await chat(
+        messages=msgs,
+        temperature=temperature,
+        model=chosen_model,
+        trace=trace,
+        max_completion_tokens=max_completion_tokens,
+        **kwargs,
+    )
 
 
 # --- Embeddings via OpenAI ---

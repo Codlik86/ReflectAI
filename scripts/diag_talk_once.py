@@ -23,7 +23,7 @@ async def run_once():
 
     for u in user_msgs:
         msgs.append({"role": "user", "content": u})
-        reply = await chat_with_style(messages=msgs, temperature=0.66, max_tokens=240, mode="talk")
+        reply = await chat_with_style(messages=msgs, temperature=0.66, max_completion_tokens=240, mode="talk")
         replies.append(reply.strip() if reply else "")
         msgs.append({"role": "assistant", "content": reply})
         print(f"user: {u}\nassistant: {reply}\n---")
@@ -46,7 +46,7 @@ async def run_once():
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": "Усталость, нет сил, проверь fail-open."},
         ]
-        reply_broken = await chat_with_style(messages=msgs_broken, temperature=0.6, max_tokens=200, mode="talk")
+        reply_broken = await chat_with_style(messages=msgs_broken, temperature=0.6, max_completion_tokens=200, mode="talk")
         print("LLM reply with broken Qdrant:", reply_broken)
 
 

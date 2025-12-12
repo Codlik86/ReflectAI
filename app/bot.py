@@ -1705,16 +1705,21 @@ async def _answer_with_llm(m: Message, user_text: str):
         reply = await chat_with_style(
             messages=messages,
             temperature=temp,
-            max_tokens=LLM_MAX_TOKENS,
+            max_completion_tokens=LLM_MAX_TOKENS,
             mode="talk",
             trace=trace_info,
         )
     except TypeError:
-        reply = await chat_with_style(messages, temperature=temp, max_tokens=LLM_MAX_TOKENS, mode="talk", trace=trace_info)
+        reply = await chat_with_style(messages, temperature=temp, max_completion_tokens=LLM_MAX_TOKENS, mode="talk", trace=trace_info)
     except Exception as e:
+        err_txt = str(e)
         print(f"[llm] talk error: {e!r}")
         _record_llm_status(error=str(e), meta=trace_info)
-        reply = ""
+        # Для HTTP 400 — не маскируем под обычный ответ
+        if "HTTP 400" in err_txt:
+            reply = "Не удалось обработать запрос (LLM 400). Попробуй переформулировать или убери лишние требования."
+        else:
+            reply = ""
 
     # если за вызов trace не заполнился (например, исключение до adapter), обновим сами
     if trace_info and not trace_info.get("status"):
@@ -1754,9 +1759,9 @@ async def _answer_with_llm(m: Message, user_text: str):
             messages_r += history_msgs
             messages_r.append({"role": "user", "content": user_text})
             try:
-                reply_r = await chat_with_style(messages=messages_r, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+                reply_r = await chat_with_style(messages=messages_r, temperature=temp, max_completion_tokens=LLM_MAX_TOKENS)
             except TypeError:
-                reply_r = await chat_with_style(messages_r, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+                reply_r = await chat_with_style(messages_r, temperature=temp, max_completion_tokens=LLM_MAX_TOKENS)
             except Exception:
                 reply_r = ""
             if reply_r and reply_r.strip():

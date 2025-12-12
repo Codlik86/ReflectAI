@@ -160,7 +160,7 @@ def sanitize(s: str) -> str:
 
 
 # ---------- Runner ----------
-async def run_dialog(topic: Dict[str, Any], temperature: float, max_tokens: int) -> Dict[str, Any]:
+async def run_dialog(topic: Dict[str, Any], temperature: float, max_completion_tokens: int) -> Dict[str, Any]:
     sys_prompt = SYSTEM_PROMPT
     tone = STYLE_SUFFIXES.get(topic["tone"], "")
     if tone:
@@ -186,10 +186,10 @@ async def run_dialog(topic: Dict[str, Any], temperature: float, max_tokens: int)
             reply = await chat_with_style(
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
             )
         except TypeError:
-            reply = await chat_with_style(messages, temperature=temperature, max_tokens=max_tokens)
+            reply = await chat_with_style(messages, temperature=temperature, max_completion_tokens=max_completion_tokens)
 
         reply = sanitize(reply)
         transcript.append({"role": "assistant", "content": reply})
@@ -226,7 +226,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=str, default=f"out/stress_{now_slug()}")
     parser.add_argument("--temp", type=float, default=0.66)
-    parser.add_argument("--max_tokens", type=int, default=520)
+    parser.add_argument("--max_completion_tokens", type=int, default=520)
     parser.add_argument("--delay", type=float, default=0.0, help="sleep seconds between turns")
     args = parser.parse_args()
 
@@ -240,7 +240,7 @@ async def main():
     print(f"[stress] running {len(scenarios())} long dialogs → {out_dir}")
 
     for sc in scenarios():
-        item = await run_dialog(sc, temperature=args.temp, max_tokens=args.max_tokens)
+        item = await run_dialog(sc, temperature=args.temp, max_completion_tokens=args.max_completion_tokens)
         data.append(item)
 
         # MD

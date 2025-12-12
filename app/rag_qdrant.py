@@ -110,20 +110,20 @@ def _search_sync(client, *, vector, limit, flt=None, with_payload=True, vector_n
     """
     Унифицированный вызов поиска: поддерживаем старый client.search и новый client.search_points.
     """
-    if hasattr(client, "search"):
-        return client.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=(vector_name, vector) if vector_name else vector,
-            query_filter=flt,
-            limit=limit,
-            with_payload=with_payload,
-        )
     if hasattr(client, "search_points"):
         return client.search_points(
             collection_name=QDRANT_COLLECTION,
             vector=vector,
             vector_name=vector_name,
             filter=flt,
+            limit=limit,
+            with_payload=with_payload,
+        )
+    if hasattr(client, "search"):
+        return client.search(
+            collection_name=QDRANT_COLLECTION,
+            query_vector=(vector_name, vector) if vector_name else vector,
+            query_filter=flt,
             limit=limit,
             with_payload=with_payload,
         )

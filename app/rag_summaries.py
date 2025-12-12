@@ -88,15 +88,6 @@ def _call_search(
     - search (старое API, query_vector/query_filter)
     - search_points (новое API, vector/filter + vector_name)
     """
-    if hasattr(client, "search"):
-        return client.search(
-            collection_name=SUMMARIES_COLLECTION,
-            query_vector=((vector_name or "default"), vector) if use_named else vector,
-            query_filter=flt,
-            limit=int(limit),
-            with_payload=True,
-            with_vectors=False,
-        )
     if hasattr(client, "search_points"):
         kwargs = {
             "collection_name": SUMMARIES_COLLECTION,
@@ -109,6 +100,15 @@ def _call_search(
         if use_named:
             kwargs["vector_name"] = vector_name or "default"
         return client.search_points(**kwargs)
+    if hasattr(client, "search"):
+        return client.search(
+            collection_name=SUMMARIES_COLLECTION,
+            query_vector=((vector_name or "default"), vector) if use_named else vector,
+            query_filter=flt,
+            limit=int(limit),
+            with_payload=True,
+            with_vectors=False,
+        )
     raise AttributeError("Qdrant client has no search/search_points")
 
 

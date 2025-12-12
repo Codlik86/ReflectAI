@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import logging
 from urllib.parse import urlparse
 from typing import Dict, Optional
+import importlib.metadata as md
 
 # В локалке читаем .env (на Render переменные уже в окружении)
 try:
@@ -37,6 +39,24 @@ PREFER_GRPC = os.getenv("QDRANT_PREFER_GRPC", "1").strip() not in {"0", "false",
 QDRANT_GRPC_PORT = int(os.getenv("QDRANT_GRPC_PORT", "6334") or "6334")
 
 _client: QdrantClient | None = None
+_capabilities_logged = False
+
+
+def _log_capabilities(client: QdrantClient) -> None:
+    global _capabilities_logged
+    if _capabilities_logged:
+        return
+    _capabilities_logged = True
+    try:
+        version = md.version("qdrant-client")
+    except Exception:
+        version = "unknown"
+    has_search = hasattr(client, "search")
+    has_search_points = hasattr(client, "search_points")
+    logging.info("[qdrant] client_version=%s has_search=%s has_search_points=%s", version, has_search, has_search_points)
+    if not (has_search or has_search_points):
+        logging.error("[qdrant] FATAL: client has neither search nor search_points; version=%s", version)
+        raise RuntimeError("Qdrant client missing search/search_points")
 
 
 def _build_client() -> QdrantClient:
@@ -78,6 +98,10 @@ def get_client() -> QdrantClient:
     global _client
     if _client is None:
         _client = _build_client()
+        if not isinstance(_client, QdrantClient):
+            logging.error("[qdrant] FATAL: get_client returned unexpected type=%s", type(_client))
+            raise RuntimeError("Qdrant client is not qdrant_client.QdrantClient")
+        _log_capabilities(_client)
     return _client
 
 

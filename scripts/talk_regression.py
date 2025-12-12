@@ -139,10 +139,10 @@ async def run_one(scn: Dict[str, Any]) -> Dict[str, Any]:
             reply = await chat_with_style(
                 messages=messages,
                 temperature=temp_for(user_uttr),
-                max_tokens=420,
+                max_completion_tokens=420,
             )
         except TypeError:
-            reply = await chat_with_style(messages, temperature=temp_for(user_uttr), max_tokens=420)
+            reply = await chat_with_style(messages, temperature=temp_for(user_uttr), max_completion_tokens=420)
         except Exception as e:
             reply = f"[ERROR] {e}"
 
