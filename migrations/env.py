@@ -16,7 +16,12 @@ if config.config_file_name:
 target_metadata = Base.metadata
 
 def run_migrations_offline():
-    url = os.environ["DATABASE_URL"]
+def _clean_env(name: str, default: str = "") -> str:
+    v = os.getenv(name, default)
+    return v.strip().strip('"').strip("'") if isinstance(v, str) else default
+
+
+url = _clean_env("DATABASE_URL")
     context.configure(url=url, target_metadata=target_metadata, literal_binds=True,
                       dialect_opts={"paramstyle": "named"})
     with context.begin_transaction():

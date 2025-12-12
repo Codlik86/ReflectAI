@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Union
 
 from aiogram import Router, F, BaseMiddleware
@@ -95,6 +96,39 @@ def is_admin(user_id: int) -> bool:
     except Exception:
         return False
 
+# === Диагностика (последние ошибки LLM и memory) ===
+LAST_LLM_STATUS: dict = {"ts": None, "error": None, "meta": None}
+LAST_MEMORY_STATUS: dict = {"ts": None, "error": None, "source": None, "summaries_count": 0, "qdrant_error": None}
+
+def _ts_now() -> str:
+    try:
+        return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    except Exception:
+        return ""
+
+def _record_llm_status(error: Optional[str], meta: Optional[dict]) -> None:
+    LAST_LLM_STATUS["ts"] = _ts_now()
+    LAST_LLM_STATUS["error"] = error
+    LAST_LLM_STATUS["meta"] = meta or {}
+
+def _record_memory_status(*, error: Optional[str], source: Optional[str], summaries_count: int = 0, qdrant_error: Optional[str] = None) -> None:
+    LAST_MEMORY_STATUS["ts"] = _ts_now()
+    LAST_MEMORY_STATUS["error"] = error
+    LAST_MEMORY_STATUS["source"] = source
+    LAST_MEMORY_STATUS["summaries_count"] = int(summaries_count or 0)
+    LAST_MEMORY_STATUS["qdrant_error"] = qdrant_error
+
+
+def _safe_excerpt(text: str, n: int = 120) -> str:
+    t = (text or "").strip().replace("\n", " ")
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def _fallback_reply(user_text: str) -> str:
+    core = _safe_excerpt(user_text, 140)
+    if core:
+        return f"Слышу тебя: «{core}». Давай разберёмся, что самое важное сейчас? Расскажи в одном-двух предложениях."
+    return "Слышу тебя. Подскажи, что сейчас волнует больше всего — в одном-двух предложениях, чтобы я мог помочь точнее."
 
 # ========== AUTO-LOGGING В БД (bot_messages) ==========
 class LogIncomingMiddleware(BaseMiddleware):
@@ -1487,6 +1521,40 @@ async def on_help(m: Message):
     )
 
 
+@router.message(Command("diag_llm"))
+@router.message(Command("diag"))
+async def on_diag_llm(m: Message):
+    if not is_admin(m.from_user.id):
+        return
+    try:
+        import importlib.metadata as md
+        qdrant_ver = md.version("qdrant-client")
+    except Exception:
+        qdrant_ver = "n/a"
+    try:
+        from app.qdrant_client import get_client
+        cli = get_client()
+        qdrant_method = "search_points" if hasattr(cli, "search_points") else "search" if hasattr(cli, "search") else "unknown"
+    except Exception as e:
+        qdrant_method = f"error: {e}"
+    env_state = {
+        "CHAT_MODEL": os.getenv("CHAT_MODEL"),
+        "CHAT_MODEL_TALK": os.getenv("CHAT_MODEL_TALK"),
+        "CHAT_MODEL_STRONG": os.getenv("CHAT_MODEL_STRONG"),
+        "LLM_FALLBACK_TO_DEFAULT": os.getenv("LLM_FALLBACK_TO_DEFAULT"),
+    }
+    lm = LAST_MEMORY_STATUS.copy()
+    llm = LAST_LLM_STATUS.copy()
+    msg = (
+        "<b>/diag_llm</b>\n"
+        f"qdrant-client: {qdrant_ver} (method: {qdrant_method})\n"
+        f"env: {env_state}\n"
+        f"last memory: ts={lm.get('ts')} src={lm.get('source')} err={lm.get('error')} summaries={lm.get('summaries_count')} qdrant_err={lm.get('qdrant_error')}\n"
+        f"last llm: ts={llm.get('ts')} model={llm.get('meta', {}).get('model')} fallback={llm.get('meta', {}).get('fallback_used')} status={llm.get('meta', {}).get('status')} err={llm.get('error') or llm.get('meta', {}).get('error')}"
+    )
+    await m.answer(msg)
+
+
 @router.message(Command("menu"))
 async def on_menu(m: Message):
     msg = await m.answer("Меню", reply_markup=kb_main_menu())
@@ -1589,7 +1657,10 @@ async def _answer_with_llm(m: Message, user_text: str):
             k = 3 if qlen < 8 else 6 if qlen < 20 else 8
             max_chars = 600 if qlen < 8 else 1000 if qlen < 30 else 1400
             rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ру")
-        except Exception:
+            _record_memory_status(error=None, source="rag_qdrant", summaries_count=0, qdrant_error=None)
+        except Exception as e:
+            print(f"[memory] rag_qdrant error: {e!r}")
+            _record_memory_status(error=str(e), source="rag_qdrant", summaries_count=0, qdrant_error=str(e))
             rag_ctx = ""
 
     sum_block = ""
@@ -1608,7 +1679,10 @@ async def _answer_with_llm(m: Message, user_text: str):
             if len(sum_text) > MAX_SUMMARY_BLOCK:
                 sum_text = sum_text[: MAX_SUMMARY_BLOCK - 1] + "…"
             sum_block = "Заметки из прошлых разговоров (учитывай по мере уместности):\n" + sum_text
-    except Exception:
+        _record_memory_status(error=None, source="summaries", summaries_count=len(items), qdrant_error=None)
+    except Exception as e:
+        print(f"[memory] summaries error: {e!r}")
+        _record_memory_status(error=str(e), source="summaries", summaries_count=0, qdrant_error=str(e))
         sum_block = ""
 
     messages: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt}]
@@ -1626,15 +1700,34 @@ async def _answer_with_llm(m: Message, user_text: str):
     seed = f"{user_text}|{turn_idx}"
     temp = 0.66 + (abs(hash(seed)) % 17) / 100.0  # 0.66–0.82
     LLM_MAX_TOKENS = 480
+    trace_info: Dict[str, Any] = {"route": "talk", "mode": mode, "user_id": m.from_user.id}
     try:
-        reply = await chat_with_style(messages=messages, temperature=temp, max_tokens=LLM_MAX_TOKENS)
+        reply = await chat_with_style(
+            messages=messages,
+            temperature=temp,
+            max_tokens=LLM_MAX_TOKENS,
+            mode="talk",
+            trace=trace_info,
+        )
     except TypeError:
-        reply = await chat_with_style(messages, temperature=temp, max_tokens=LLM_MAX_TOKENS)
-    except Exception:
+        reply = await chat_with_style(messages, temperature=temp, max_tokens=LLM_MAX_TOKENS, mode="talk", trace=trace_info)
+    except Exception as e:
+        print(f"[llm] talk error: {e!r}")
+        _record_llm_status(error=str(e), meta=trace_info)
         reply = ""
 
+    # если за вызов trace не заполнился (например, исключение до adapter), обновим сами
+    if trace_info and not trace_info.get("status"):
+        trace_info["status"] = "error" if not reply else "ok"
+    _record_llm_status(error=None if reply else "empty", meta=trace_info)
+    try:
+        if trace_info:
+            print(f"[llm] route={trace_info.get('route')} model={trace_info.get('model')} fallback={trace_info.get('fallback_used')} status={trace_info.get('status')} latency_ms={trace_info.get('latency_ms')} err={trace_info.get('error')}")
+    except Exception:
+        pass
+
     if not reply or not reply.strip():
-        reply = "Хочу понять точнее. Что сейчас волнует больше всего — одно-два предложения?"
+        reply = _fallback_reply(user_text)
     try:
         reply = _enforce_single_question(reply)
     except Exception:

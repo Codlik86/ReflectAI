@@ -15,7 +15,16 @@ from urllib.parse import parse_qsl
 router = APIRouter(prefix="/api/telegram", tags=["telegram"])
 
 # --- конфиг (можно переопределить через ENV)
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "") or os.getenv("BOT_TOKEN", "")
+def _env_clean(*names: str, default: str = "") -> str:
+    for n in names:
+        if not n:
+            continue
+        v = os.getenv(n)
+        if v:
+            return v.strip().strip('"').strip("'")
+    return default
+
+BOT_TOKEN = _env_clean("BOT_TOKEN", "TELEGRAM_BOT_TOKEN")
 # доп. защита: сколько секунд считаем initData «свежим» (0 = не проверять)
 INITDATA_MAX_AGE = int(os.getenv("TG_INITDATA_MAX_AGE_SEC", "0"))  # напр., 86400 (1 день)
 

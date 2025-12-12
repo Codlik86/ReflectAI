@@ -29,7 +29,7 @@ RAG_TRACE = os.getenv("RAG_TRACE", "0") == "1"
 
 # --- Qdrant client (локальный грузовичок)
 try:
-    from app.qdrant_client import get_client  # type: ignore
+    from app.qdrant_client import get_client, detect_vector_config  # type: ignore
 except Exception:
     from qdrant_client import QdrantClient  # type: ignore
     def get_client() -> "QdrantClient":  # type: ignore
@@ -106,8 +106,32 @@ def _norm(a): return math.sqrt(sum(x*x for x in a)) or 1.0
 def _cos(a, b): return _dot(a,b) / (_norm(a)*_norm(b))
 
 # --- Вспомогательные обёртки над синхронным Qdrant-клиентом
-async def _qdrant_search_async(client, **kwargs):
-    return await asyncio.to_thread(client.search, **kwargs)
+def _search_sync(client, *, vector, limit, flt=None, with_payload=True, vector_name=None):
+    """
+    Унифицированный вызов поиска: поддерживаем старый client.search и новый client.search_points.
+    """
+    if hasattr(client, "search"):
+        return client.search(
+            collection_name=QDRANT_COLLECTION,
+            query_vector=(vector_name, vector) if vector_name else vector,
+            query_filter=flt,
+            limit=limit,
+            with_payload=with_payload,
+        )
+    if hasattr(client, "search_points"):
+        return client.search_points(
+            collection_name=QDRANT_COLLECTION,
+            vector=vector,
+            vector_name=vector_name,
+            filter=flt,
+            limit=limit,
+            with_payload=with_payload,
+        )
+    raise AttributeError("Qdrant client has no search/search_points")
+
+
+async def _qdrant_search_async(client, *, vector, limit, flt=None, with_payload=True, vector_name=None):
+    return await asyncio.to_thread(_search_sync, client, vector=vector, limit=limit, flt=flt, with_payload=with_payload, vector_name=vector_name)
 
 # --- MMR контекст
 async def build_context_mmr(
@@ -131,6 +155,10 @@ async def build_context_mmr(
 
     client = get_client()
     qvec = await embed(query)
+    vec_conf = detect_vector_config(QDRANT_COLLECTION)
+    vec_name = None
+    if vec_conf.get("mode") == "named":
+        vec_name = vec_conf.get("vector_name") or "default"
 
     qfilter = None
     if lang:
@@ -140,20 +168,20 @@ async def build_context_mmr(
     try:
         hits = await _qdrant_search_async(
             client,
-            collection_name=QDRANT_COLLECTION,
-            query_vector=qvec,  # type: ignore[arg-type]
+            vector=qvec,  # type: ignore[arg-type]
             limit=initial_limit,
             with_payload=True,
-            query_filter=qfilter,
+            flt=qfilter,
+            vector_name=vec_name,
         )
     except Exception:
         # если что — без фильтра (на случай отсутствия индекса по lang)
         hits = await _qdrant_search_async(
             client,
-            collection_name=QDRANT_COLLECTION,
-            query_vector=qvec,  # type: ignore[arg-type]
+            vector=qvec,  # type: ignore[arg-type]
             limit=initial_limit,
             with_payload=True,
+            vector_name=vec_name,
         )
 
     cand: List[Dict[str, Any]] = []

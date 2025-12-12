@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from urllib.parse import urlparse
+from typing import Dict, Optional
 
 # В локалке читаем .env (на Render переменные уже в окружении)
 try:
@@ -24,6 +25,9 @@ QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "reflectai_corpus_v2").strip(
 
 # Коллекция для саммарей (daily/weekly/monthly) — с именованным вектором "text"
 QDRANT_SUMMARIES_COLLECTION = os.getenv("QDRANT_SUMMARIES_COLLECTION", "dialog_summaries_v1").strip()
+
+# Имя вектора (если коллекция named). Если не задано — возьмём первое из коллекции (чаще всего "default").
+QDRANT_VECTOR_NAME = (os.getenv("QDRANT_VECTOR_NAME") or "").strip() or None
 
 # 1536 для text-embedding-3-small
 EMBED_DIM = int(os.getenv("QDRANT_EMBED_DIM", "1536"))
@@ -80,6 +84,70 @@ def get_client() -> QdrantClient:
 def close_client() -> None:
     global _client
     _client = None
+
+
+def _pick_vector_name_from_meta(info) -> Optional[str]:
+    """
+    Достаёт имя вектора из get_collection(...) для named-векторов.
+    """
+    if info is None:
+        return QDRANT_VECTOR_NAME
+    try:
+        # Новый клиент: info.config.params.vectors может быть dict
+        params = getattr(getattr(info, "config", None), "params", None)
+        vecs = getattr(params, "vectors", None)
+        if isinstance(vecs, dict) and vecs:
+            return QDRANT_VECTOR_NAME or next(iter(vecs.keys()), None)
+    except Exception:
+        pass
+    try:
+        vecs = getattr(info, "vectors", None)
+        if isinstance(vecs, dict) and vecs:
+            return QDRANT_VECTOR_NAME or next(iter(vecs.keys()), None)
+    except Exception:
+        pass
+    try:
+        vecs_cfg = getattr(info, "vectors_config", None)
+        if isinstance(vecs_cfg, dict) and vecs_cfg:
+            return QDRANT_VECTOR_NAME or next(iter(vecs_cfg.keys()), None)
+    except Exception:
+        pass
+    return QDRANT_VECTOR_NAME
+
+
+def detect_vector_config(collection: str) -> Dict[str, Optional[str]]:
+    """
+    Определяет, single или named-векторы у коллекции, и возвращает имя вектора (если named).
+    Возвращает {"mode": "single"|"named", "vector_name": str|None}
+    """
+    client = get_client()
+    try:
+        info = client.get_collection(collection)
+    except Exception:
+        return {"mode": "single", "vector_name": QDRANT_VECTOR_NAME}
+
+    # Попробуем определить по конфигу
+    try:
+        params = getattr(getattr(info, "config", None), "params", None)
+        vecs = getattr(params, "vectors", None)
+        if isinstance(vecs, dict):
+            return {"mode": "named", "vector_name": _pick_vector_name_from_meta(info)}
+    except Exception:
+        pass
+    try:
+        vecs = getattr(info, "vectors", None)
+        if isinstance(vecs, dict):
+            return {"mode": "named", "vector_name": _pick_vector_name_from_meta(info)}
+    except Exception:
+        pass
+    try:
+        vecs_cfg = getattr(info, "vectors_config", None)
+        if isinstance(vecs_cfg, dict):
+            return {"mode": "named", "vector_name": _pick_vector_name_from_meta(info)}
+    except Exception:
+        pass
+
+    return {"mode": "single", "vector_name": None}
 
 
 def _collection_exists_safe(client: QdrantClient, name: str) -> bool:
@@ -173,7 +241,8 @@ def ensure_summaries_collection() -> bool:
         created_now = False
         if not _collection_exists_safe(client, QDRANT_SUMMARIES_COLLECTION):
             # Именованный вектор: {"text": VectorParams(...)}
-            named_cfg = {"text": qm.VectorParams(size=EMBED_DIM, distance=qm.Distance.COSINE)}
+            vname = QDRANT_VECTOR_NAME or "default"
+            named_cfg = {vname: qm.VectorParams(size=EMBED_DIM, distance=qm.Distance.COSINE)}
             client.create_collection(
                 collection_name=QDRANT_SUMMARIES_COLLECTION,
                 vectors_config=named_cfg,

@@ -96,6 +96,7 @@ class LLMAdapter:
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         model: Optional[str] = None,
+        trace: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> str:
         """
@@ -136,6 +137,26 @@ class LLMAdapter:
         client = await self._get_client()
         url = "/chat/completions"  # OpenAI-compatible path
 
+        import time
+        started = time.monotonic()
+        fallback_used = False
+        resolved_model = payload.get("model")
+
+        def _emit_trace(status: str, *, err: Optional[str] = None) -> None:
+            if trace is None:
+                return
+            try:
+                latency_ms = int((time.monotonic() - started) * 1000)
+                trace.update({
+                    "status": status,
+                    "latency_ms": latency_ms,
+                    "model": resolved_model,
+                    "fallback_used": bool(fallback_used),
+                    "error": err,
+                })
+            except Exception:
+                pass
+
         # Устойчивые ретраи для 429/5xx + лёгкий бэкофф; при неудаче — опциональный фолбэк на DEFAULT_MODEL
         last_err: Optional[Exception] = None
         for attempt in range(3):
@@ -144,6 +165,7 @@ class LLMAdapter:
                 r.raise_for_status()
                 data = r.json()
                 # Expected OpenAI-like schema
+                _emit_trace("ok", err=None)
                 return data["choices"][0]["message"]["content"].strip()
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
@@ -157,13 +179,17 @@ class LLMAdapter:
                 try_model = payload.get("model")
                 if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
                     try:
+                        fallback_used = True
                         payload["model"] = _resolve_model(DEFAULT_MODEL)
+                        resolved_model = payload["model"]
                         r2 = await client.post(url, json=payload)
                         r2.raise_for_status()
                         data2 = r2.json()
+                        _emit_trace("ok", err=None)
                         return data2["choices"][0]["message"]["content"].strip()
                     except Exception:
                         pass
+                _emit_trace("error", err=f"HTTP {status}")
                 raise RuntimeError(f"LLM HTTP error {status}: {e.response.text}") from e
             except Exception as e:
                 if attempt < 2:
@@ -175,18 +201,24 @@ class LLMAdapter:
                 try_model = payload.get("model")
                 if FALLBACK_TO_DEFAULT and try_model != _resolve_model(DEFAULT_MODEL):
                     try:
+                        fallback_used = True
                         payload["model"] = _resolve_model(DEFAULT_MODEL)
+                        resolved_model = payload["model"]
                         r2 = await client.post(url, json=payload)
                         r2.raise_for_status()
                         data2 = r2.json()
+                        _emit_trace("ok", err=None)
                         return data2["choices"][0]["message"]["content"].strip()
                     except Exception:
                         pass
+                _emit_trace("error", err=str(e))
                 raise RuntimeError(f"LLM request failed: {e}") from e
 
         # На всякий случай (сюда не дойдём при raise выше)
         if last_err:
+            _emit_trace("error", err=str(last_err))
             raise RuntimeError(f"LLM request failed after retries: {last_err}")
+        _emit_trace("error", err="unknown")
         raise RuntimeError("LLM request failed for unknown reasons")
 
 
@@ -263,6 +295,7 @@ async def chat_with_style(
     is_crisis: bool = False,
     needs_long_context: bool = False,
     model_override: Optional[str] = None,       # жёсткое переопределение модели
+    trace: Optional[Dict[str, Any]] = None,     # для диагностики (пополняется внутри)
     **kwargs: Any
 ) -> str:
     """
@@ -305,14 +338,14 @@ async def chat_with_style(
 
         # Подмешиваем RAG-контекст отдельным system-сообщением в хвост
         msgs = _append_rag_context(msgs, rag_ctx)
-        return await chat(messages=msgs, temperature=temperature, model=chosen_model, **kwargs)
+        return await chat(messages=msgs, temperature=temperature, model=chosen_model, trace=trace, **kwargs)
 
     # 4) Если messages не задан — путь system+user
     msgs = [{"role": "system", "content": sys}]
     msgs = _append_rag_context(msgs, rag_ctx)
     if user:
         msgs.append({"role": "user", "content": user})
-    return await chat(messages=msgs, temperature=temperature, model=chosen_model, **kwargs)
+    return await chat(messages=msgs, temperature=temperature, model=chosen_model, trace=trace, **kwargs)
 
 
 # --- Embeddings via OpenAI ---

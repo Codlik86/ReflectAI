@@ -19,8 +19,15 @@ from sqlalchemy import text
 
 
 # --- Переменные из .env ---
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # так называется у тебя
-DATABASE_URL = os.getenv("DATABASE_URL")      # так называется у тебя
+def _env_clean(*names: str, default: str = "") -> str:
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v.strip().strip('"').strip("'")
+    return default
+
+BOT_TOKEN = _env_clean("BOT_TOKEN", "TELEGRAM_BOT_TOKEN")  # так называется у тебя
+DATABASE_URL = _env_clean("DATABASE_URL")      # так называется у тебя
 
 GIFT_DAYS = 2
 GIFT_PLAN = "gift2d"

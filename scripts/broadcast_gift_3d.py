@@ -6,8 +6,15 @@ from aiogram.client.default import DefaultBotProperties
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import text
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
+def _env_clean(*names: str, default: str = "") -> str:
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v.strip().strip('"').strip("'")
+    return default
+
+BOT_TOKEN = _env_clean("BOT_TOKEN", "TELEGRAM_BOT_TOKEN")
+DATABASE_URL = _env_clean("DATABASE_URL")
 
 MESSAGE = (
     "Привет! Несколько дней бот был недоступен. "

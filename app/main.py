@@ -43,9 +43,18 @@ from app.api.payments import router as payments_router      # /api/payments/*
 from app.site.summaries_api import router as summaries_router  # /api/summaries/*
 
 # --- ENV ---
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+def _env_value(*names: str, default: str = "") -> str:
+    for n in names:
+        if not n:
+            continue
+        v = os.getenv(n)
+        if v:
+            return v.strip().strip('"').strip("'")
+    return default
+
+BOT_TOKEN = _env_value("BOT_TOKEN", "TELEGRAM_BOT_TOKEN")
+WEBHOOK_BASE_URL = _env_value("WEBHOOK_BASE_URL").rstrip("/")
+WEBHOOK_SECRET = _env_value("WEBHOOK_SECRET")
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN не задан")

@@ -16,8 +16,17 @@ from app.billing.service import check_access
 
 router = APIRouter(prefix="/api/admin/nudges", tags=["admin-nudges"])
 
-ADMIN_API_SECRET = os.getenv("ADMIN_API_SECRET", "")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+def _env_clean(*names: str, default: str = "") -> str:
+    for n in names:
+        if not n:
+            continue
+        v = os.getenv(n)
+        if v:
+            return v.strip().strip('"').strip("'")
+    return default
+
+ADMIN_API_SECRET = _env_clean("ADMIN_API_SECRET")
+BOT_TOKEN = _env_clean("BOT_TOKEN", "TELEGRAM_BOT_TOKEN")
 
 if not BOT_TOKEN:
     # не бросаем исключение при импортe, но в рантайме проверим
@@ -208,4 +217,3 @@ async def send_one(
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
-

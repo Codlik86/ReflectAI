@@ -8,17 +8,12 @@ import inspect
 # Универсальные модели Qdrant
 from qdrant_client.http import models as qm  # type: ignore
 
-from app.qdrant_client import get_client
+from app.qdrant_client import get_client, detect_vector_config, QDRANT_VECTOR_NAME
 from app.rag_qdrant import embed  # тот же эмбеддер, что в основном RAG
 
 # === Конфиги ===
 SUMMARIES_COLLECTION = os.getenv("QDRANT_SUMMARIES_COLLECTION", "dialog_summaries_v1")
 _EMBED_DIM = int(os.getenv("QDRANT_EMBED_DIM", "1536"))
-
-# Внутренний флаг: как создана коллекция (single-vector или named "text")
-# Определим лениво при первой попытке апсерта/поиска.
-_named_mode_detected: Optional[bool] = None
-
 
 def _safe_print(*args: Any) -> None:
     try:
@@ -30,7 +25,7 @@ def _safe_print(*args: Any) -> None:
 def _ensure_collection() -> None:
     """
     Создаёт коллекцию, если её ещё нет.
-    Пытаемся сначала single-vector (VectorParams), при ошибке — named-vectors {"text": VectorParams}.
+    Пытаемся сначала single-vector (VectorParams), при ошибке — named-vectors с именем из env/дефолт.
     """
     client = get_client()
     try:
@@ -38,6 +33,8 @@ def _ensure_collection() -> None:
         return  # уже есть
     except Exception:
         pass
+
+    vec_name = QDRANT_VECTOR_NAME or "default"
 
     # Попытка single-vector
     try:
@@ -55,10 +52,10 @@ def _ensure_collection() -> None:
     try:
         client.recreate_collection(
             collection_name=SUMMARIES_COLLECTION,
-            vectors_config={"text": qm.VectorParams(size=_EMBED_DIM, distance=qm.Distance.COSINE)},  # type: ignore
+            vectors_config={vec_name: qm.VectorParams(size=_EMBED_DIM, distance=qm.Distance.COSINE)},  # type: ignore
             optimizers_config=qm.OptimizersConfigDiff(default_segment_number=2),
         )
-        _safe_print(f"[summaries] created collection '{SUMMARIES_COLLECTION}' (named-vector 'text')")
+        _safe_print(f"[summaries] created collection '{SUMMARIES_COLLECTION}' (named-vector '{vec_name}')")
     except Exception as e:
         # Пусть ошибка уйдёт наверх — так её будет видно в логе крона
         raise RuntimeError(f"Failed to create summaries collection '{SUMMARIES_COLLECTION}': {e}") from e
@@ -77,43 +74,42 @@ async def _maybe_embed(text: str) -> List[float]:
         raise RuntimeError(f"embeddings failed: {e}") from e
 
 
-def _detect_named_mode_once(client) -> bool:
+def _call_search(
+    client,
+    *,
+    vector,
+    flt,
+    limit: int,
+    use_named: bool,
+    vector_name: Optional[str],
+):
     """
-    Пробуем понять, как устроена коллекция: single-vector или named "text".
-    Сохраняем результат в модульный флаг.
+    Унифицированный вызов поиска для разных версий клиента:
+    - search (старое API, query_vector/query_filter)
+    - search_points (новое API, vector/filter + vector_name)
     """
-    global _named_mode_detected
-    if _named_mode_detected is not None:
-        return _named_mode_detected
-
-    try:
-        info = client.get_collection(SUMMARIES_COLLECTION)
-        # У разных версий клиента структура отличается; проверим оба варианта.
-        vectors_config = getattr(info, "vectors_count", None)
-        # Если есть "vectors_count" и это int, это скорее single-vector (>=1).
-        # Попробуем более надёжно глянуть на атрибуты:
-        if hasattr(info, "config") and getattr(info.config, "params", None) is not None:
-            params = info.config.params
-            if hasattr(params, "vectors") and isinstance(params.vectors, dict):
-                # named
-                _named_mode_detected = True
-                return True
-            # если не dict — скорее single
-            _named_mode_detected = False
-            return False
-
-        # Если не смогли достоверно — пробуем поискать поле "vectors" как dict
-        if hasattr(info, "vectors") and isinstance(getattr(info, "vectors"), dict):
-            _named_mode_detected = True
-            return True
-
-        _named_mode_detected = False
-        return False
-    except Exception:
-        # Если не получилось узнать — по умолчанию считаем single-vector,
-        # а при апсерте/поиске сделаем фолбэк.
-        _named_mode_detected = False
-        return False
+    if hasattr(client, "search"):
+        return client.search(
+            collection_name=SUMMARIES_COLLECTION,
+            query_vector=((vector_name or "default"), vector) if use_named else vector,
+            query_filter=flt,
+            limit=int(limit),
+            with_payload=True,
+            with_vectors=False,
+        )
+    if hasattr(client, "search_points"):
+        kwargs = {
+            "collection_name": SUMMARIES_COLLECTION,
+            "vector": vector,
+            "filter": flt,
+            "limit": int(limit),
+            "with_payload": True,
+            "with_vectors": False,
+        }
+        if use_named:
+            kwargs["vector_name"] = vector_name or "default"
+        return client.search_points(**kwargs)
+    raise AttributeError("Qdrant client has no search/search_points")
 
 
 async def upsert_summary_point(
@@ -144,12 +140,14 @@ async def upsert_summary_point(
     }
 
     client = get_client()
+    vec_conf = detect_vector_config(SUMMARIES_COLLECTION)
+    prefer_named = vec_conf.get("mode") == "named"
+    vname = vec_conf.get("vector_name") or QDRANT_VECTOR_NAME or "default"
 
     # Сначала пробуем по «детектированной» схеме
-    prefer_named = _detect_named_mode_once(client)
     try:
         if prefer_named:
-            pt = qm.PointStruct(id=int(summary_id), vector={"text": vec}, payload=payload)  # type: ignore
+            pt = qm.PointStruct(id=int(summary_id), vector={vname: vec}, payload=payload)  # type: ignore
         else:
             pt = qm.PointStruct(id=int(summary_id), vector=vec, payload=payload)
         client.upsert(collection_name=SUMMARIES_COLLECTION, points=[pt])
@@ -162,7 +160,7 @@ async def upsert_summary_point(
         if prefer_named:
             pt = qm.PointStruct(id=int(summary_id), vector=vec, payload=payload)
         else:
-            pt = qm.PointStruct(id=int(summary_id), vector={"text": vec}, payload=payload)  # type: ignore
+            pt = qm.PointStruct(id=int(summary_id), vector={vname: vec}, payload=payload)  # type: ignore
         client.upsert(collection_name=SUMMARIES_COLLECTION, points=[pt])
     except Exception as e:
         raise RuntimeError(f"Qdrant upsert failed for summary_id={summary_id}: {e}") from e
@@ -211,26 +209,16 @@ async def search_summaries(
 
     f = qm.Filter(must=must_filters)
 
-    # Сначала пробуем single-vector, затем named ("text")
+    vec_conf = detect_vector_config(SUMMARIES_COLLECTION)
+    prefer_named = vec_conf.get("mode") == "named"
+    vname = vec_conf.get("vector_name") or QDRANT_VECTOR_NAME or "default"
+
+    # Сначала пробуем primary режим, затем fallback
     try:
-        res = client.search(
-            collection_name=SUMMARIES_COLLECTION,
-            query_vector=vec,
-            query_filter=f,
-            limit=int(top_k),
-            with_payload=True,
-            with_vectors=False,
-        )
+        res = _call_search(client, vector=vec, flt=f, limit=int(top_k), use_named=prefer_named, vector_name=vname)
     except Exception as e_first:
-        _safe_print(f"[summaries] search single-vector failed, fallback to named: {e_first!r}")
-        res = client.search(
-            collection_name=SUMMARIES_COLLECTION,
-            query_vector=("text", vec),
-            query_filter=f,
-            limit=int(top_k),
-            with_payload=True,
-            with_vectors=False,
-        )
+        _safe_print(f"[summaries] search primary failed, fallback: {e_first!r}")
+        res = _call_search(client, vector=vec, flt=f, limit=int(top_k), use_named=not prefer_named, vector_name=vname)
 
     out: List[Dict[str, Any]] = []
     for r in res or []:
