@@ -2,6 +2,7 @@
 
 ## Runtime
 - Python 3.12.6 (see `runtime.txt` for Render)
+- Render must show Python 3.12.6 in logs
 
 ## Smoke checks
 - LLM/Qdrant code expects `pip install -r requirements.txt`
