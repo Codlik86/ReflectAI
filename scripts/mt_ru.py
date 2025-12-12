@@ -4,7 +4,7 @@ from openai import OpenAI
 
 BASE_URL = os.getenv("OPENAI_BASE_URL", "")
 API_KEY  = os.getenv("OPENAI_API_KEY", "")
-MODEL    = os.getenv("GPT_MODEL", "gpt-4o-mini")
+MODEL    = os.getenv("GPT_MODEL", "gpt-5.2")
 
 if not API_KEY:
     sys.exit("OPENAI_API_KEY is empty")

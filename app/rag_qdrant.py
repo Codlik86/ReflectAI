@@ -23,7 +23,7 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 SBERT_MODEL = os.getenv("SBERT_MODEL", "intfloat/multilingual-e5-small")
 
 RAG_COMPRESS = os.getenv("RAG_COMPRESS", "0") == "1"
-RAG_COMPRESS_MODEL = os.getenv("RAG_COMPRESS_MODEL", "gpt-4o-mini")
+RAG_COMPRESS_MODEL = os.getenv("RAG_COMPRESS_MODEL", "gpt-5.2")
 RAG_MAX_CHARS = int(os.getenv("RAG_MAX_CHARS", "1200"))
 RAG_TRACE = os.getenv("RAG_TRACE", "0") == "1"
 

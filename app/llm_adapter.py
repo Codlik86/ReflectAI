@@ -18,20 +18,23 @@ llm_adapter.py
 - Конфиги из ENV:
     OPENAI_API_KEY
     OPENAI_BASE_URL (например, https://api.proxyapi.ru/openai/v1)
-    CHAT_MODEL (по умолчанию gpt-4o-mini)
+    CHAT_MODEL (по умолчанию gpt-5.2)
 """
 
 # ===== Новые переменные и алиасы для гибкой маршрутизации моделей =====
-DEFAULT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-STRONG_MODEL = os.getenv("CHAT_MODEL_STRONG", "gpt-5")  # «старшая» модель для длинных/сложных ответов
+DEFAULT_MODEL = os.getenv("CHAT_MODEL", "gpt-5.2")
+STRONG_MODEL = os.getenv("CHAT_MODEL_STRONG", "gpt-5.2")  # «старшая» модель для длинных/сложных ответов
 TALK_MODEL = os.getenv("CHAT_MODEL_TALK", STRONG_MODEL)  # можно задать отдельную для talk/reflection
 FALLBACK_TO_DEFAULT = os.getenv("LLM_FALLBACK_TO_DEFAULT", "1") == "1"  # мягкий фолбэк при 5xx/429
 
 # Алиасы имён моделей на случай отличий в прокси-доке
 MODEL_ALIASES: Dict[str, str] = {
-    "chat-gpt5": "gpt-5",
-    "gpt-5-thinking": "gpt-5",
-    "gpt5": "gpt-5",
+    "chat-gpt5": "gpt-5.2",
+    "chat-gpt5.2": "gpt-5.2",
+    "gpt-5-thinking": "gpt-5.2",
+    "gpt5": "gpt-5.2",
+    "gpt5.2": "gpt-5.2",
+    "gpt-5": "gpt-5.2",
     "gpt-4o-mini": "gpt-4o-mini",
 }
 
