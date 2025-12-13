@@ -1727,7 +1727,12 @@ async def _answer_with_llm(m: Message, user_text: str):
     _record_llm_status(error=None if reply else "empty", meta=trace_info)
     try:
         if trace_info:
-            print(f"[llm] route={trace_info.get('route')} model={trace_info.get('model')} fallback={trace_info.get('fallback_used')} status={trace_info.get('status')} latency_ms={trace_info.get('latency_ms')} err={trace_info.get('error')}")
+            import logging  # Render highlights ERROR as red
+            msg = f"[llm] route={trace_info.get('route')} model={trace_info.get('model')} fallback={trace_info.get('fallback_used')} status={trace_info.get('status')} latency_ms={trace_info.get('latency_ms')} err={trace_info.get('error')}"
+            if trace_info.get("status") == "ok" and not trace_info.get("error"):
+                logging.info(msg)
+            else:
+                logging.error(msg)
     except Exception:
         pass
 
