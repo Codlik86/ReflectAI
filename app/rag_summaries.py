@@ -8,7 +8,7 @@ import inspect
 # Универсальные модели Qdrant
 from qdrant_client.http import models as qm  # type: ignore
 
-from app.qdrant_client import get_client, detect_vector_config, QDRANT_VECTOR_NAME
+from app.qdrant_client import get_client, detect_vector_config, QDRANT_VECTOR_NAME, qdrant_query
 from app.rag_qdrant import embed  # тот же эмбеддер, что в основном RAG
 
 # === Конфиги ===
@@ -84,32 +84,17 @@ def _call_search(
     vector_name: Optional[str],
 ):
     """
-    Унифицированный вызов поиска для разных версий клиента:
-    - search (старое API, query_vector/query_filter)
-    - search_points (новое API, vector/filter + vector_name)
+    Унифицированный вызов поиска через qdrant_query (query_points/search_points/search).
     """
-    if hasattr(client, "search_points"):
-        kwargs = {
-            "collection_name": SUMMARIES_COLLECTION,
-            "vector": vector,
-            "filter": flt,
-            "limit": int(limit),
-            "with_payload": True,
-            "with_vectors": False,
-        }
-        if use_named:
-            kwargs["vector_name"] = vector_name or "default"
-        return client.search_points(**kwargs)
-    if hasattr(client, "search"):
-        return client.search(
-            collection_name=SUMMARIES_COLLECTION,
-            query_vector=((vector_name or "default"), vector) if use_named else vector,
-            query_filter=flt,
-            limit=int(limit),
-            with_payload=True,
-            with_vectors=False,
-        )
-    raise AttributeError("Qdrant client has no search/search_points")
+    return qdrant_query(
+        client,
+        collection_name=SUMMARIES_COLLECTION,
+        query_vector=vector,
+        query_filter=flt,
+        limit=int(limit),
+        with_payload=True,
+        vector_name=(vector_name or "default") if use_named else vector_name,
+    )
 
 
 async def upsert_summary_point(

@@ -53,10 +53,19 @@ def _log_capabilities(client: QdrantClient) -> None:
         version = "unknown"
     has_search = hasattr(client, "search")
     has_search_points = hasattr(client, "search_points")
-    logging.info("[qdrant] client_version=%s has_search=%s has_search_points=%s", version, has_search, has_search_points)
-    if not (has_search or has_search_points):
-        logging.error("[qdrant] FATAL: client has neither search nor search_points; version=%s", version)
-        raise RuntimeError("Qdrant client missing search/search_points")
+    has_query_points = hasattr(client, "query_points")
+    logging.info(
+        "[qdrant] client_version=%s type=%s class=%s module=%s has_search=%s has_search_points=%s has_query_points=%s",
+        version,
+        type(client),
+        getattr(client, "__class__", None),
+        getattr(client, "__module__", None),
+        has_search,
+        has_search_points,
+        has_query_points,
+    )
+    if not (has_search or has_search_points or has_query_points):
+        logging.error("[qdrant] WARN: client has no search/search_points/query_points; version=%s", version)
 
 
 def _build_client() -> QdrantClient:
@@ -99,7 +108,7 @@ def get_client() -> QdrantClient:
     if _client is None:
         _client = _build_client()
         if not isinstance(_client, QdrantClient):
-            logging.error("[qdrant] FATAL: get_client returned unexpected type=%s", type(_client))
+            logging.error("[qdrant] get_client returned unexpected type=%s (expected QdrantClient)", type(_client))
             raise RuntimeError("Qdrant client is not qdrant_client.QdrantClient")
         _log_capabilities(_client)
     return _client
@@ -189,6 +198,49 @@ def _collection_exists_safe(client: QdrantClient, name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def qdrant_query(
+    client: QdrantClient,
+    *,
+    collection_name: str,
+    query_vector,
+    limit: int,
+    with_payload: bool = True,
+    query_filter=None,
+    vector_name: Optional[str] = None,
+):
+    """
+    Унифицированный вызов поиска: предпочитаем query_points, затем search_points, затем search.
+    Возвращает список points в формате клиента.
+    """
+    if hasattr(client, "query_points"):
+        return client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            query_filter=query_filter,
+            limit=limit,
+            with_payload=with_payload,
+            using=vector_name if vector_name else None,
+        )
+    if hasattr(client, "search_points"):
+        return client.search_points(
+            collection_name=collection_name,
+            vector=query_vector,
+            vector_name=vector_name,
+            filter=query_filter,
+            limit=limit,
+            with_payload=with_payload,
+        )
+    if hasattr(client, "search"):
+        return client.search(
+            collection_name=collection_name,
+            query_vector=(vector_name, query_vector) if vector_name else query_vector,
+            query_filter=query_filter,
+            limit=limit,
+            with_payload=with_payload,
+        )
+    raise AttributeError("Qdrant client has no query_points/search_points/search")
 
 
 def _ensure_user_id_index(client: QdrantClient, collection: str) -> None:

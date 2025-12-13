@@ -29,7 +29,7 @@ RAG_TRACE = os.getenv("RAG_TRACE", "0") == "1"
 
 # --- Qdrant client (локальный грузовичок)
 try:
-    from app.qdrant_client import get_client, detect_vector_config  # type: ignore
+    from app.qdrant_client import get_client, detect_vector_config, qdrant_query  # type: ignore
 except Exception:
     from qdrant_client import QdrantClient  # type: ignore
     def get_client() -> "QdrantClient":  # type: ignore
@@ -105,33 +105,17 @@ def _dot(a, b): return sum(x*y for x, y in zip(a, b))
 def _norm(a): return math.sqrt(sum(x*x for x in a)) or 1.0
 def _cos(a, b): return _dot(a,b) / (_norm(a)*_norm(b))
 
-# --- Вспомогательные обёртки над синхронным Qdrant-клиентом
-def _search_sync(client, *, vector, limit, flt=None, with_payload=True, vector_name=None):
-    """
-    Унифицированный вызов поиска: поддерживаем старый client.search и новый client.search_points.
-    """
-    if hasattr(client, "search_points"):
-        return client.search_points(
-            collection_name=QDRANT_COLLECTION,
-            vector=vector,
-            vector_name=vector_name,
-            filter=flt,
-            limit=limit,
-            with_payload=with_payload,
-        )
-    if hasattr(client, "search"):
-        return client.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=(vector_name, vector) if vector_name else vector,
-            query_filter=flt,
-            limit=limit,
-            with_payload=with_payload,
-        )
-    raise AttributeError("Qdrant client has no search/search_points")
-
-
 async def _qdrant_search_async(client, *, vector, limit, flt=None, with_payload=True, vector_name=None):
-    return await asyncio.to_thread(_search_sync, client, vector=vector, limit=limit, flt=flt, with_payload=with_payload, vector_name=vector_name)
+    return await asyncio.to_thread(
+        qdrant_query,
+        client,
+        collection_name=QDRANT_COLLECTION,
+        query_vector=vector,
+        limit=limit,
+        with_payload=with_payload,
+        query_filter=flt,
+        vector_name=vector_name,
+    )
 
 # --- MMR контекст
 async def build_context_mmr(
