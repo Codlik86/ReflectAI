@@ -9,6 +9,7 @@ from app.qdrant_client import (
     QDRANT_COLLECTION,
     QDRANT_SUMMARIES_COLLECTION,
     qdrant_query,
+    detect_vector_name,
 )
 from app.rag_qdrant import embed
 
@@ -43,15 +44,19 @@ async def main():
 
     for col in (QDRANT_COLLECTION, QDRANT_SUMMARIES_COLLECTION):
         try:
-            branch = "query_points" if hasattr(cli, "query_points") else "search_points" if hasattr(cli, "search_points") else "search" if hasattr(cli, "search") else "none"
+            mode, vname = detect_vector_name(cli, col)
+            branch_holder: list[str] = []
             res = qdrant_query(
                 cli,
                 collection_name=col,
                 query_vector=vec or [0.0],
                 limit=1,
                 with_payload=True,
+                vector_name=vname,
+                branch_out=branch_holder,
             )
-            print(f"{col}: branch={branch} ok={bool(res)}")
+            branch = branch_holder[0] if branch_holder else "unknown"
+            print(f"{col}: mode={mode} vector_name={vname} branch={branch} ok={bool(res)}")
         except Exception as e:
             print(f"{col}: error {e}")
 

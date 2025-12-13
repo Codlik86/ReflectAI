@@ -29,7 +29,7 @@ RAG_TRACE = os.getenv("RAG_TRACE", "0") == "1"
 
 # --- Qdrant client (локальный грузовичок)
 try:
-    from app.qdrant_client import get_client, detect_vector_config, qdrant_query  # type: ignore
+    from app.qdrant_client import get_client, detect_vector_name, qdrant_query  # type: ignore
 except Exception:
     from qdrant_client import QdrantClient  # type: ignore
     def get_client() -> "QdrantClient":  # type: ignore
@@ -139,10 +139,7 @@ async def build_context_mmr(
 
     client = get_client()
     qvec = await embed(query)
-    vec_conf = detect_vector_config(QDRANT_COLLECTION)
-    vec_name = None
-    if vec_conf.get("mode") == "named":
-        vec_name = vec_conf.get("vector_name") or "default"
+    _, vec_name = detect_vector_name(client, QDRANT_COLLECTION)
 
     qfilter = None
     if lang:

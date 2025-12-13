@@ -8,7 +8,7 @@ import inspect
 # Универсальные модели Qdrant
 from qdrant_client.http import models as qm  # type: ignore
 
-from app.qdrant_client import get_client, detect_vector_config, QDRANT_VECTOR_NAME, qdrant_query
+from app.qdrant_client import get_client, detect_vector_name, QDRANT_VECTOR_NAME, qdrant_query
 from app.rag_qdrant import embed  # тот же эмбеддер, что в основном RAG
 
 # === Конфиги ===
@@ -125,9 +125,8 @@ async def upsert_summary_point(
     }
 
     client = get_client()
-    vec_conf = detect_vector_config(SUMMARIES_COLLECTION)
-    prefer_named = vec_conf.get("mode") == "named"
-    vname = vec_conf.get("vector_name") or QDRANT_VECTOR_NAME or "default"
+    mode, vname = detect_vector_name(client, SUMMARIES_COLLECTION)
+    prefer_named = mode == "named"
 
     # Сначала пробуем по «детектированной» схеме
     try:
@@ -194,9 +193,8 @@ async def search_summaries(
 
     f = qm.Filter(must=must_filters)
 
-    vec_conf = detect_vector_config(SUMMARIES_COLLECTION)
-    prefer_named = vec_conf.get("mode") == "named"
-    vname = vec_conf.get("vector_name") or QDRANT_VECTOR_NAME or "default"
+    mode, vname = detect_vector_name(client, SUMMARIES_COLLECTION)
+    prefer_named = mode == "named"
 
     # Сначала пробуем primary режим, затем fallback
     try:

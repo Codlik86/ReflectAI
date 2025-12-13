@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import logging
 from urllib.parse import urlparse
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple, List
 import importlib.metadata as md
 
 # В локалке читаем .env (на Render переменные уже в окружении)
@@ -148,39 +148,52 @@ def _pick_vector_name_from_meta(info) -> Optional[str]:
     return QDRANT_VECTOR_NAME
 
 
-def detect_vector_config(collection: str) -> Dict[str, Optional[str]]:
+def detect_vector_name(client: QdrantClient, collection: str) -> Tuple[str, Optional[str]]:
     """
-    Определяет, single или named-векторы у коллекции, и возвращает имя вектора (если named).
-    Возвращает {"mode": "single"|"named", "vector_name": str|None}
+    Определяет режим коллекции (single|named) и имя вектора (если named).
+    Не использует "default" как фолбэк.
     """
-    client = get_client()
+    mode = "single"
+    vector_name: Optional[str] = None
     try:
         info = client.get_collection(collection)
-    except Exception:
-        return {"mode": "single", "vector_name": QDRANT_VECTOR_NAME}
+    except Exception as e:
+        logging.info("[qdrant] detect_vector_name: get_collection failed for %s: %r", collection, e)
+        return mode, vector_name
 
-    # Попробуем определить по конфигу
-    try:
-        params = getattr(getattr(info, "config", None), "params", None)
-        vecs = getattr(params, "vectors", None)
-        if isinstance(vecs, dict):
-            return {"mode": "named", "vector_name": _pick_vector_name_from_meta(info)}
-    except Exception:
-        pass
-    try:
-        vecs = getattr(info, "vectors", None)
-        if isinstance(vecs, dict):
-            return {"mode": "named", "vector_name": _pick_vector_name_from_meta(info)}
-    except Exception:
-        pass
-    try:
-        vecs_cfg = getattr(info, "vectors_config", None)
-        if isinstance(vecs_cfg, dict):
-            return {"mode": "named", "vector_name": _pick_vector_name_from_meta(info)}
-    except Exception:
-        pass
+    def _extract_dict():
+        try:
+            params = getattr(getattr(info, "config", None), "params", None)
+            vecs = getattr(params, "vectors", None)
+            if isinstance(vecs, dict) and vecs:
+                return vecs
+        except Exception:
+            pass
+        try:
+            vecs = getattr(info, "vectors", None)
+            if isinstance(vecs, dict) and vecs:
+                return vecs
+        except Exception:
+            pass
+        try:
+            vecs_cfg = getattr(info, "vectors_config", None)
+            if isinstance(vecs_cfg, dict) and vecs_cfg:
+                return vecs_cfg
+        except Exception:
+            pass
+        return None
 
-    return {"mode": "single", "vector_name": None}
+    vecs_dict = _extract_dict()
+    if isinstance(vecs_dict, dict) and vecs_dict:
+        mode = "named"
+        keys = sorted([str(k) for k in vecs_dict.keys()])
+        env_name = (QDRANT_VECTOR_NAME or "").strip() or None
+        if env_name and env_name in keys:
+            vector_name = env_name
+        else:
+            vector_name = keys[0]
+    logging.info("[qdrant] collection=%s mode=%s vector_name=%s keys=%s", collection, mode, vector_name, list(vecs_dict.keys()) if vecs_dict else None)
+    return mode, vector_name
 
 
 def _collection_exists_safe(client: QdrantClient, name: str) -> bool:
@@ -209,38 +222,63 @@ def qdrant_query(
     with_payload: bool = True,
     query_filter=None,
     vector_name: Optional[str] = None,
+    branch_out: Optional[List[str]] = None,
 ):
     """
     Унифицированный вызов поиска: предпочитаем query_points, затем search_points, затем search.
     Возвращает список points в формате клиента.
     """
-    if hasattr(client, "query_points"):
-        return client.query_points(
-            collection_name=collection_name,
-            query=query_vector,
-            query_filter=query_filter,
-            limit=limit,
-            with_payload=with_payload,
-            using=vector_name if vector_name else None,
-        )
-    if hasattr(client, "search_points"):
-        return client.search_points(
-            collection_name=collection_name,
-            vector=query_vector,
-            vector_name=vector_name,
-            filter=query_filter,
-            limit=limit,
-            with_payload=with_payload,
-        )
-    if hasattr(client, "search"):
-        return client.search(
-            collection_name=collection_name,
-            query_vector=(vector_name, query_vector) if vector_name else query_vector,
-            query_filter=query_filter,
-            limit=limit,
-            with_payload=with_payload,
-        )
-    raise AttributeError("Qdrant client has no query_points/search_points/search")
+    def _record_branch(name: str):
+        if branch_out is not None:
+            if branch_out:
+                branch_out[0] = name
+            else:
+                branch_out.append(name)
+
+    def _do_call(use_vector: bool):
+        if hasattr(client, "query_points"):
+            _record_branch("query_points")
+            kwargs = {
+                "collection_name": collection_name,
+                "query": query_vector,
+                "query_filter": query_filter,
+                "limit": limit,
+                "with_payload": with_payload,
+            }
+            if use_vector and vector_name:
+                kwargs["using"] = vector_name
+            return client.query_points(**kwargs)
+        if hasattr(client, "search_points"):
+            _record_branch("search_points")
+            kwargs = {
+                "collection_name": collection_name,
+                "vector": query_vector,
+                "filter": query_filter,
+                "limit": limit,
+                "with_payload": with_payload,
+            }
+            if use_vector and vector_name:
+                kwargs["vector_name"] = vector_name
+            return client.search_points(**kwargs)
+        if hasattr(client, "search"):
+            _record_branch("search")
+            return client.search(
+                collection_name=collection_name,
+                query_vector=(vector_name, query_vector) if (use_vector and vector_name) else query_vector,
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=with_payload,
+            )
+        raise AttributeError("Qdrant client has no query_points/search_points/search")
+
+    try:
+        return _do_call(True)
+    except Exception as e:
+        msg = str(e).lower()
+        if vector_name and ("vector with name" in msg or "not configured" in msg):
+            logging.info("[qdrant] retry without vector_name for collection=%s error=%r", collection_name, e)
+            return _do_call(False)
+        raise
 
 
 def _ensure_user_id_index(client: QdrantClient, collection: str) -> None:
