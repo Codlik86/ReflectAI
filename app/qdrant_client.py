@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import logging
 from urllib.parse import urlparse
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Any, Iterable
 import importlib.metadata as md
 
 # В локалке читаем .env (на Render переменные уже в окружении)
@@ -196,6 +196,42 @@ def detect_vector_name(client: QdrantClient, collection: str) -> Tuple[str, Opti
     return mode, vector_name
 
 
+def normalize_points(res: Any) -> List[Any]:
+    """
+    Приводит ответ Qdrant к списку points (ScoredPoint или совместимый объект).
+    """
+    orig = res
+    try:
+        if isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], list):
+            res = res[0]
+        elif hasattr(res, "points"):
+            res = getattr(res, "points")
+        elif hasattr(res, "result"):
+            res = getattr(res, "result")
+
+        if isinstance(res, list):
+            if res and isinstance(res[0], (tuple, list)):
+                out = []
+                for x in res:
+                    if isinstance(x, (tuple, list)) and x:
+                        out.append(x[0])
+                return out
+            return res
+
+        if isinstance(res, Iterable) and not isinstance(res, (str, bytes, dict)):
+            res = list(res)
+            if res and isinstance(res[0], (tuple, list)):
+                return [x[0] for x in res if isinstance(x, (tuple, list)) and x]
+            return res
+    except Exception:
+        pass
+    try:
+        logging.warning("[qdrant] normalize_points unexpected type=%s sample=%r", type(orig), orig if orig is None else str(orig)[:200])
+    except Exception:
+        pass
+    return []
+
+
 def _collection_exists_safe(client: QdrantClient, name: str) -> bool:
     """
     Унифицированная проверка существования коллекции, совместимая с разными версиями клиента.
@@ -222,20 +258,17 @@ def qdrant_query(
     with_payload: bool = True,
     query_filter=None,
     vector_name: Optional[str] = None,
-    branch_out: Optional[List[str]] = None,
-):
+    branch_out: Optional[Dict[str, str]] = None,
+) -> List[Any]:
     """
     Унифицированный вызов поиска: предпочитаем query_points, затем search_points, затем search.
     Возвращает список points в формате клиента.
     """
     def _record_branch(name: str):
         if branch_out is not None:
-            if branch_out:
-                branch_out[0] = name
-            else:
-                branch_out.append(name)
+            branch_out["branch"] = name
 
-    def _do_call(use_vector: bool):
+    def _do_call(use_vector: bool) -> List[Any]:
         if hasattr(client, "query_points"):
             _record_branch("query_points")
             kwargs = {
@@ -247,7 +280,7 @@ def qdrant_query(
             }
             if use_vector and vector_name:
                 kwargs["using"] = vector_name
-            return client.query_points(**kwargs)
+            return normalize_points(client.query_points(**kwargs))
         if hasattr(client, "search_points"):
             _record_branch("search_points")
             kwargs = {
@@ -259,16 +292,16 @@ def qdrant_query(
             }
             if use_vector and vector_name:
                 kwargs["vector_name"] = vector_name
-            return client.search_points(**kwargs)
+            return normalize_points(client.search_points(**kwargs))
         if hasattr(client, "search"):
             _record_branch("search")
-            return client.search(
+            return normalize_points(client.search(
                 collection_name=collection_name,
                 query_vector=(vector_name, query_vector) if (use_vector and vector_name) else query_vector,
                 query_filter=query_filter,
                 limit=limit,
                 with_payload=with_payload,
-            )
+            ))
         raise AttributeError("Qdrant client has no query_points/search_points/search")
 
     try:

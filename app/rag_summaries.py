@@ -8,7 +8,7 @@ import inspect
 # Универсальные модели Qdrant
 from qdrant_client.http import models as qm  # type: ignore
 
-from app.qdrant_client import get_client, detect_vector_name, QDRANT_VECTOR_NAME, qdrant_query
+from app.qdrant_client import get_client, detect_vector_name, QDRANT_VECTOR_NAME, qdrant_query, normalize_points
 from app.rag_qdrant import embed  # тот же эмбеддер, что в основном RAG
 
 # === Конфиги ===
@@ -59,6 +59,9 @@ def _ensure_collection() -> None:
     except Exception as e:
         # Пусть ошибка уйдёт наверх — так её будет видно в логе крона
         raise RuntimeError(f"Failed to create summaries collection '{SUMMARIES_COLLECTION}': {e}") from e
+
+
+_LOGGED_SUMMARY_ONCE = False
 
 
 async def _maybe_embed(text: str) -> List[float]:
@@ -202,6 +205,18 @@ async def search_summaries(
     except Exception as e_first:
         _safe_print(f"[summaries] search primary failed, fallback: {e_first!r}")
         res = _call_search(client, vector=vec, flt=f, limit=int(top_k), use_named=not prefer_named, vector_name=vname)
+
+    raw_type = type(res)
+    res = normalize_points(res)
+    global _LOGGED_SUMMARY_ONCE
+    if not _LOGGED_SUMMARY_ONCE:
+        try:
+            import importlib.metadata as md
+            ver = md.version("qdrant-client")
+        except Exception:
+            ver = "unknown"
+        _safe_print(f"[summaries] qdrant-client={ver} raw_type={raw_type} norm_type={type(res)} len={len(res) if isinstance(res, list) else 'na'}")
+        _LOGGED_SUMMARY_ONCE = True
 
     out: List[Dict[str, Any]] = []
     for r in res or []:

@@ -10,6 +10,7 @@ from app.qdrant_client import (
     QDRANT_SUMMARIES_COLLECTION,
     qdrant_query,
     detect_vector_name,
+    normalize_points,
 )
 from app.rag_qdrant import embed
 
@@ -45,7 +46,7 @@ async def main():
     for col in (QDRANT_COLLECTION, QDRANT_SUMMARIES_COLLECTION):
         try:
             mode, vname = detect_vector_name(cli, col)
-            branch_holder: list[str] = []
+            branch_holder: dict[str, str] = {}
             res = qdrant_query(
                 cli,
                 collection_name=col,
@@ -55,10 +56,20 @@ async def main():
                 vector_name=vname,
                 branch_out=branch_holder,
             )
-            branch = branch_holder[0] if branch_holder else "unknown"
-            print(f"{col}: mode={mode} vector_name={vname} branch={branch} ok={bool(res)}")
+            branch = branch_holder.get("branch", "unknown")
+            first_type = type(res[0]) if res else None
+            print(f"{col}: mode={mode} vector_name={vname} branch={branch} ok={bool(res)} res_type={type(res)} first={first_type}")
         except Exception as e:
             print(f"{col}: error {e}")
+
+    # scroll smoke
+    try:
+        sc = cli.scroll(collection_name=QDRANT_COLLECTION, limit=1, with_payload=True)
+        sc_norm = normalize_points(sc)
+        first = sc_norm[0] if sc_norm else None
+        print(f"scroll: raw_type={type(sc)} norm_len={len(sc_norm)} first_type={type(first)}")
+    except Exception as e:
+        print(f"scroll error: {e}")
 
 
 if __name__ == "__main__":

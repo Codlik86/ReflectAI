@@ -29,7 +29,7 @@ RAG_TRACE = os.getenv("RAG_TRACE", "0") == "1"
 
 # --- Qdrant client (локальный грузовичок)
 try:
-    from app.qdrant_client import get_client, detect_vector_name, qdrant_query  # type: ignore
+    from app.qdrant_client import get_client, detect_vector_name, qdrant_query, normalize_points  # type: ignore
 except Exception:
     from qdrant_client import QdrantClient  # type: ignore
     def get_client() -> "QdrantClient":  # type: ignore
@@ -164,6 +164,8 @@ async def build_context_mmr(
             with_payload=True,
             vector_name=vec_name,
         )
+
+    hits = normalize_points(hits)
 
     cand: List[Dict[str, Any]] = []
     texts: List[str] = []
