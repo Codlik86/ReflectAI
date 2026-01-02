@@ -131,6 +131,42 @@ def _fallback_reply(user_text: str) -> str:
         return f"Слышу тебя: «{core}». Давай разберёмся, что самое важное сейчас? Расскажи в одном-двух предложениях."
     return "Слышу тебя. Подскажи, что сейчас волнует больше всего — в одном-двух предложениях, чтобы я мог помочь точнее."
 
+
+def extract_opener(text: str) -> str:
+    """
+    Нормализует первую строку ответа, чтобы ловить повторяющиеся опенеры.
+    """
+    import re as _re
+
+    first_line = (text or "").split("\n", 1)[0].strip()
+    # убираем ведущие кавычки/пробелы/точки/тире/• и т.п.
+    first_line = _re.sub(r'^[\s"\'“”«»„‚`´’\(\)\[\]{}·•…–—\-]+', "", first_line)
+
+    def _cut_by_delims(s: str) -> str:
+        # приоритет: ":" -> "—/–" -> "."/"!"/"?" -> "," -> "…"
+        for delim in (":", "—", "–", ".", "!", "?", ",", "…"):
+            idx = s.find(delim)
+            if idx >= 3:  # не режем слишком рано
+                return s[:idx]
+        return s
+
+    opener = _cut_by_delims(first_line)
+    if not opener:
+        opener = first_line
+
+    if not opener:
+        return ""
+
+    # если нет разделителя — возьмём первые 10 слов
+    if opener == first_line:
+        words = opener.split()
+        opener = " ".join(words[:10])
+
+    opener = opener.lower()
+    opener = _re.sub(r"\s+", " ", opener).strip()
+    opener = _re.sub(r"([!?.,…])\1+", r"\1", opener)
+    return opener[:60]
+
 # ========== AUTO-LOGGING В БД (bot_messages) ==========
 class LogIncomingMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -356,7 +392,7 @@ async def _load_history_from_db(
             await s.execute(
                 _t(
                     """
-                SELECT role, text
+                SELECT id, role, text, created_at
                 FROM bot_messages
                 WHERE user_id = :uid
                   AND created_at >= NOW() - (:hours::text || ' hours')::interval
@@ -369,18 +405,33 @@ async def _load_history_from_db(
         ).mappings().all()
 
     msgs: list[dict] = []
+    seen_ids: set[int] = set()
+    seen_keys: set[tuple] = set()
     for r in rows:
+        try:
+            mid = int(r.get("id"))
+        except Exception:
+            mid = None
+        if mid is not None:
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
         role = "assistant" if (r["role"] or "").lower() == "bot" else "user"
-        msgs.append({"role": role, "content": r["text"] or ""})
+        content = r["text"] or ""
+        key = (role, content, r.get("created_at"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        msgs.append({"role": role, "content": content})
 
     try:
         tail_raw = get_recent_messages(int(tg_id), limit=10) or []
         if tail_raw:
-            seen = {(m["role"], m["content"]) for m in msgs}
+            seen = {(m["role"], m["content"], None) for m in msgs}
             for r in tail_raw:
                 role = "assistant" if (r.get("role") == "bot") else "user"
                 content = r.get("text") or ""
-                key = (role, content)
+                key = (role, content, r.get("created_at"))
                 if key not in seen:
                     msgs.append({"role": role, "content": content})
                     seen.add(key)
@@ -1629,7 +1680,8 @@ async def _answer_with_llm(m: Message, user_text: str):
         await send_and_log(m, "Я тебя слышу. Сейчас подключаюсь…", reply_markup=kb_main_menu())
         return
 
-    seed = f"{user_text}|{turn_idx}"
+    salt = getattr(m, "message_id", None) or getattr(m, "date", None) or ""
+    seed = f"{user_text}|{turn_idx}|{salt}"
     temp = 0.66 + (abs(hash(seed)) % 17) / 100.0  # 0.66–0.82
     LLM_MAX_TOKENS = 480
     trace_info: Dict[str, Any] = {"route": "talk", "mode": mode, "user_id": m.from_user.id}
@@ -1675,38 +1727,51 @@ async def _answer_with_llm(m: Message, user_text: str):
     except Exception:
         pass
 
-    # лёгкая анти-повторная перегенерация первых строк (как было)
+    # антиповтор первых строк: фиксируем опенер и при совпадении просим LLM начать иначе
     try:
         store = globals().setdefault("LAST_OPENERS", {})
         from collections import deque as _dq
         if chat_id not in store:
-            store[chat_id] = _dq(maxlen=3)
-        def _extract_opener_local(text: str) -> str:
-            line = (text or "").strip().split("\n", 1)[0]
-            return line[:60].lower()
-        opener = _extract_opener_local(reply)
+            store[chat_id] = _dq(maxlen=5)
+        opener_key = extract_opener(reply)
         seen = store.get(chat_id)
-        if opener in seen and chat_with_style is not None:
-            sys_prompt_r = sys_prompt + "\n\n(Перепиши первую строку без клише/повторов, начни с наблюдения по сути.)"
-            messages_r: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt_r}]
-            if rag_ctx:
-                messages_r.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
-            if sum_block:
-                messages_r.append({"role": "system", "content": sum_block})
-            messages_r += history_msgs
-            messages_r.append({"role": "user", "content": user_text})
-            try:
-                reply_r = await chat_with_style(messages=messages_r, temperature=temp, max_completion_tokens=LLM_MAX_TOKENS)
-            except TypeError:
-                reply_r = await chat_with_style(messages_r, temperature=temp, max_completion_tokens=LLM_MAX_TOKENS)
-            except Exception:
-                reply_r = ""
-            if reply_r and reply_r.strip():
+        if opener_key in seen and chat_with_style is not None:
+            banned_list = list(dict.fromkeys(list(seen)))
+            banned_text = "; ".join(banned_list)
+            for attempt in range(2):
+                if opener_key not in seen:
+                    break
+                sys_prompt_r = sys_prompt + "\n\n" + (
+                    "Не начинай ответ с этих стартов: " + banned_text + ". "
+                    "Запрещены междометия в начале: «Ох», «Понимаю», «Мне жаль», «Слышу тебя». "
+                    "Начни иначе: (a) с короткого факта без междометий, (b) с уточнения, (c) с микро-резюме смысла пользователя."
+                )
+                messages_r: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt_r}]
+                if rag_ctx:
+                    messages_r.append({"role": "system", "content": f"Материалы из базы знаний по теме:\n{rag_ctx}"})
+                if sum_block:
+                    messages_r.append({"role": "system", "content": sum_block})
+                messages_r += history_msgs
+                messages_r.append({"role": "user", "content": user_text})
                 try:
-                    reply = _enforce_single_question(reply_r)
+                    reply_r = await chat_with_style(messages=messages_r, temperature=temp, max_completion_tokens=LLM_MAX_TOKENS)
+                except TypeError:
+                    reply_r = await chat_with_style(messages_r, temperature=temp, max_completion_tokens=LLM_MAX_TOKENS)
                 except Exception:
-                    reply = reply_r
-        seen.append(_extract_opener_local(reply))
+                    reply_r = ""
+                opener_after = extract_opener(reply_r)
+                try:
+                    print(f"[llm] opener-regen attempt={attempt+1} before={opener_key!r} after={opener_after!r}")
+                except Exception:
+                    pass
+                if reply_r and reply_r.strip() and opener_after and opener_after not in seen:
+                    try:
+                        reply = _enforce_single_question(reply_r)
+                    except Exception:
+                        reply = reply_r
+                    opener_key = opener_after
+                    break
+        seen.append(opener_key)
     except Exception:
         pass
 
