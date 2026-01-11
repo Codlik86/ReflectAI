@@ -8,6 +8,8 @@ from typing import Literal, Optional, List, Dict, Any, Tuple
 from sqlalchemy import text, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.billing.prices import PLAN_PRICES_INT
+from app.services.access_state import TRIAL_DAYS, get_access_state
+from app.services.access_state import get_access_state
 
 # -------------------------------
 # Планы и цены — держим в одном месте
@@ -171,8 +173,6 @@ async def apply_success_payment(
 # Trial helpers (CTA "Начать пробный период")
 # -------------------------------
 
-TRIAL_DAYS = 5  # длина пробного периода в днях
-
 async def _get_user_by_id(session: AsyncSession, user_id: int):
     from app.db.models import User
     q = await session.execute(select(User).where(User.id == user_id))
@@ -184,13 +184,11 @@ async def _get_user_by_tg(session: AsyncSession, tg_id: int):
     return q.scalar_one_or_none()
 
 async def is_trial_active(session: AsyncSession, user_id: int) -> bool:
-    """Есть ли у пользователя ещё активный триал (по дате истечения)."""
-    u = await _get_user_by_id(session, user_id)
-    if not u or not getattr(u, "trial_expires_at", None):
-        return False
-    return u.trial_expires_at > utcnow()
+    """Есть ли у пользователя ещё активный триал (через get_access_state)."""
+    state = await get_access_state(session, user_id)
+    return bool(state.get("reason") == "trial")
 
-async def start_trial_for_user(session: AsyncSession, user_id: int, days: int = 5):
+async def start_trial_for_user(session: AsyncSession, user_id: int, days: int = TRIAL_DAYS):
     """Ставит даты триала через ORM-назначения, без bulk UPDATE."""
     from app.db.models import User  # локальный импорт, чтобы избежать циклов
     started = utcnow()
@@ -206,85 +204,10 @@ async def start_trial_for_user(session: AsyncSession, user_id: int, days: int = 
     await session.flush()
     return started, expires
 
-async def has_active_subscription(session: AsyncSession, user_id: int) -> bool:
-    """
-    Минимальная проверка подписки: users.subscription_status == 'active'.
-    (Позже можно заменить на полноценную таблицу subscriptions.)
-    """
-    u = await _get_user_by_id(session, user_id)
-    return bool(u and getattr(u, "subscription_status", None) == "active")
-
 async def check_access(session: AsyncSession, user_id: int) -> bool:
     """Доступ к функциям: есть активная подписка ИЛИ активный триал."""
-    return (await has_active_subscription(session, user_id)) or (await is_trial_active(session, user_id))
-
-
-# -------------------------------
-# YooKassa webhook helper: обновление users.subscription_status
-# -------------------------------
-
-async def handle_yookassa_webhook(session: AsyncSession, event: dict):
-    """
-    Ожидаем тело вида:
-    {
-      "event": "payment.succeeded" | "payment.canceled" | ...,
-      "object": {
-        "id": "<yk_payment_id>",
-        "status": "succeeded" | "canceled" | ...,
-        "amount": {"value": "599.00", "currency": "RUB"},
-        "metadata": {"user_id": <int>, "plan": "month" }
-      }
-    }
-    """
-    obj = event.get("object") or {}
-    event_name = (event.get("event") or "").strip()
-    status = (obj.get("status") or "").strip()
-    metadata = obj.get("metadata") or {}
-    user_id = metadata.get("user_id")
-
-    # --- необязательный учёт платежей (если есть модель Payment) ---
-    try:
-        from app.db.models import Payment  # если модели нет — блок тихо пропустится
-        yk_payment_id = obj.get("id")
-        if yk_payment_id:
-            q = await session.execute(select(Payment).where(Payment.yk_payment_id == yk_payment_id))
-            p = q.scalar_one_or_none()
-            if p:
-                p.status = status or p.status
-            else:
-                amount_val = (obj.get("amount") or {}).get("value")
-                try:
-                    amount_rub = int(float(amount_val)) if amount_val else 0
-                except Exception:
-                    amount_rub = 0
-                session.add(Payment(
-                    user_id=int(user_id) if user_id is not None else 0,
-                    yk_payment_id=yk_payment_id,
-                    status=status or "unknown",
-                    plan=str(metadata.get("plan") or ""),
-                    amount_rub=amount_rub,
-                ))
-    except Exception:
-        # учёт платежей — best-effort, не ломаем основной поток
-        pass
-
-    # --- успешная оплата → активируем подписку пользователю ---
-    if event_name == "payment.succeeded" or status == "succeeded":
-        if not user_id:
-            # без user_id активировать некого
-            return
-        from app.db.models import User
-        await session.execute(
-            update(User)
-            .where(User.id == int(user_id))
-            .values(subscription_status="active")
-        )
-        return
-
-    # --- отмена/неуспех → просто логируем/фиксируем статус платежа ---
-    if event_name == "payment.canceled" or status == "canceled":
-        # здесь ничего активировать не нужно
-        return
+    state = await get_access_state(session, user_id)
+    return bool(state.get("has_access"))
 
 
 # -------------------------------

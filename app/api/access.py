@@ -1,7 +1,7 @@
 # app/api/access.py
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends
@@ -10,12 +10,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.core import async_session
-from app.db.models import User, Subscription
+from app.db.models import User
+from app.services.access_state import get_access_status as get_access_status_svc
 
 router = APIRouter(prefix="/api/access", tags=["access"])
-
-TRIAL_DAYS = 5  # канонично: 5-дневный отложенный триал
-
 
 # ---- DB dependency ----------------------------------------------------------
 async def get_db() -> AsyncIterator[AsyncSession]:
@@ -35,6 +33,7 @@ class AccessStatusOut(BaseModel):
     until: datetime | None = None             # последний дедлайн (даже если уже прошёл)
     plan: str | None = None                   # "week" | "month" | "quarter" | "year" | None
     is_auto_renew: bool | None = None
+    needs_policy: bool | None = None
 
     # НОВОЕ: история для корректного различения pre-trial vs expired
     trial_started_at: datetime | None = None
@@ -48,76 +47,41 @@ class AccessCheckOut(AccessStatusOut):
 
 
 # ---- Вспомогательная бизнес-логика -----------------------------------------
-def _trial_until(user: User | None) -> datetime | None:
-    if not user or not getattr(user, "trial_started_at", None):
-        return None
-    return user.trial_started_at + timedelta(days=TRIAL_DAYS)
-
-
 async def _compose_status(
     session: AsyncSession,
     user: User | None,
 ) -> AccessStatusOut:
-    now = datetime.now(timezone.utc)
-
-    plan: str | None = None
-    is_auto_renew: bool | None = None
-
-    sub_until: datetime | None = None
-    t_started: datetime | None = None
-    t_until: datetime | None = None
-    trial_ever = False
-
-    if user:
-        # Подписка (берём последнюю запись — активную или уже истёкшую)
-        sub = (
-            await session.execute(select(Subscription).where(Subscription.user_id == user.id))
-        ).scalar_one_or_none()
-        if sub:
-            plan = sub.plan
-            is_auto_renew = sub.is_auto_renew
-            sub_until = sub.subscription_until
-            if sub_until:
-                trial_ever = True  # была подписка/платёж когда-либо
-
-        # Триал
-        t_started = getattr(user, "trial_started_at", None)
-        if t_started:
-            t_until = t_started + timedelta(days=TRIAL_DAYS)
-            trial_ever = True
-
-    # «Последний известный дедлайн» — даже если уже прошёл
-    last_deadline = None
-    for d in (sub_until, t_until):
-        if d and (last_deadline is None or d > last_deadline):
-            last_deadline = d
-
-    # Текущее состояние доступа
-    has_access = False
-    status = "none"
-    if sub_until and sub_until > now:
-        has_access = True
-        status = "active"
-    elif t_until and t_until > now:
-        has_access = True
-        status = "trial"
-
+    if not user:
+        return AccessStatusOut(
+            has_access=False,
+            status="none",
+            until=None,
+            plan=None,
+            is_auto_renew=None,
+            needs_policy=None,
+            trial_started_at=None,
+            trial_expires_at=None,
+            subscription_until=None,
+            trial_ever=False,
+        )
+    data = await get_access_status_svc(session, user)
     return AccessStatusOut(
-        has_access=has_access,
-        status=status,
-        until=last_deadline,             # отдаём дедлайн всегда (для фронта)
-        plan=plan,
-        is_auto_renew=is_auto_renew,
-        trial_started_at=t_started,
-        trial_expires_at=t_until,
-        subscription_until=sub_until,
-        trial_ever=trial_ever,
+        has_access=bool(data.get("has_access")),
+        status=str(data.get("status") or "none"),
+        until=data.get("until"),
+        plan=data.get("plan"),
+        is_auto_renew=data.get("is_auto_renew"),
+        needs_policy=data.get("needs_policy"),
+        trial_started_at=data.get("trial_started_at"),
+        trial_expires_at=data.get("trial_expires_at"),
+        subscription_until=data.get("subscription_until"),
+        trial_ever=bool(data.get("trial_ever")),
     )
 
 
 # ---- GET /api/access/status -------------------------------------------------
 @router.get("/status", response_model=AccessStatusOut)
-async def get_access_status(
+async def get_access_status_endpoint(
     user_id: int | None = None,        # users.id (для тестов/админок)
     tg_user_id: int | None = None,     # Telegram id (основной путь)
     tg_id: int | None = None,          # b/c совместимость (если на фронте оставался tg_id)
@@ -166,15 +130,20 @@ async def check_access(
             trial_ever=False,
         )
 
+    status_out = await _compose_status(session, user)
+    trial_ever = bool(status_out.trial_ever)
+    policy_accepted = bool(getattr(user, "policy_accepted_at", None))
+
     # Опционально: авто-старт триала (delayed trial) по запросу клиента
-    if payload.start_trial and not getattr(user, "trial_started_at", None):
+    if payload.start_trial and policy_accepted and not trial_ever:
         await session.execute(
             text("UPDATE users SET trial_started_at = CURRENT_TIMESTAMP WHERE id = :uid"),
             {"uid": int(user.id)},
         )
         await session.commit()
+        await session.refresh(user)
+        status_out = await _compose_status(session, user)
 
-    status_out = await _compose_status(session, user)
     return AccessCheckOut(ok=True, **status_out.dict())
 
 

@@ -11,11 +11,12 @@ from typing import Any, Optional, Literal, Dict, cast
 import httpx
 from fastapi import APIRouter, Request, HTTPException, Header, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.core import async_session
 from app.billing.prices import PLAN_PRICES_STR, plan_price_str
+from app.services.access_state import get_access_status
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
 
@@ -216,10 +217,6 @@ async def yookassa_webhook(
                     pass
                 session.add(sub)
 
-            await session.execute(
-                update(User).where(User.id == u.id).values(subscription_status="active")
-            )
-
         elif status in ("canceled", "cancellation_pending"):
             sub = (await session.execute(
                 select(Subscription).where(Subscription.user_id == u.id)
@@ -307,16 +304,6 @@ def _iso(dtobj) -> Optional[str]:
     except Exception:
         return None
 
-def _trial_window(started, *, days: int = 5):
-    import datetime as dt
-    if not started:
-        return False, None
-    try:
-        expires = started + dt.timedelta(days=days)
-        return (expires > _utcnow()), expires
-    except Exception:
-        return False, None
-
 async def _load_user(session: AsyncSession, *, user_id: Optional[int], tg_user_id: Optional[int]):
     from app.db.models import User  # type: ignore
     u = None
@@ -347,63 +334,36 @@ async def payments_status(
     if user_id is None and tg_user_id is None:
         raise HTTPException(status_code=400, detail="provide user_id or tg_user_id")
 
-    now = _utcnow()
     async with async_session() as _s:
         session = cast(AsyncSession, _s)
-        from app.db.models import User, Subscription  # type: ignore
+        from app.db.models import User  # type: ignore
 
         u = await _load_user(session, user_id=user_id, tg_user_id=tg_user_id)
         if not u:
             raise HTTPException(status_code=404, detail="user not found")
 
         policy_accepted = bool(getattr(u, "policy_accepted_at", None))
-        needs_policy = not policy_accepted
-
-        sub = (await session.execute(
-            select(Subscription).where(Subscription.user_id == u.id)
-        )).scalar_one_or_none()
-
-        plan = getattr(sub, "plan", None)
-        sub_status = getattr(sub, "status", None)
-        until = getattr(sub, "subscription_until", None)
-        is_auto = getattr(sub, "is_auto_renew", None)
-        has_sub_access = bool(until and sub_status == "active" and until > now)
-
-        started = getattr(u, "trial_started_at", None)
-        trial_active, trial_expires_at = _trial_window(started)
+        status = await get_access_status(session, u, policy_accepted=policy_accepted)
 
         # delayed trial: НЕ стартуем до принятия политики
-        if start_trial and (not has_sub_access) and (not trial_active) and policy_accepted:
+        if start_trial and policy_accepted and (not status.get("trial_ever")) and (not status.get("has_access")):
             from sqlalchemy import update as sa_update
             await session.execute(
-                sa_update(User).where(User.id == u.id).values(trial_started_at=now)
+                sa_update(User).where(User.id == u.id).values(trial_started_at=func.now())
             )
             await session.commit()
-            started = now
-            trial_active, trial_expires_at = _trial_window(started)
-
-        has_access = bool(has_sub_access or trial_active)
-
-        # нормализованный статус
-        if has_sub_access:
-            norm_status = "active"
-            unified_until = until
-        elif trial_active:
-            norm_status = "trial"
-            unified_until = trial_expires_at
-        else:
-            norm_status = "none"
-            unified_until = None
+            await session.refresh(u)
+            status = await get_access_status(session, u, policy_accepted=policy_accepted)
 
         return {
-            "has_access": has_access,
-            "plan": plan,
-            "status": norm_status,
-            "until": _iso(unified_until) if unified_until else None,
-            "is_auto_renew": bool(is_auto) if is_auto is not None else None,
-            "trial_started_at": _iso(started) if started else None,
-            "trial_expires_at": _iso(trial_expires_at) if trial_expires_at else None,
-            "needs_policy": needs_policy,
+            "has_access": bool(status.get("has_access")),
+            "plan": status.get("plan"),
+            "status": status.get("status"),
+            "until": _iso(status.get("until")) if status.get("until") else None,
+            "is_auto_renew": bool(status.get("is_auto_renew")) if status.get("is_auto_renew") is not None else None,
+            "trial_started_at": _iso(status.get("trial_started_at")) if status.get("trial_started_at") else None,
+            "trial_expires_at": _iso(status.get("trial_expires_at")) if status.get("trial_expires_at") else None,
+            "needs_policy": bool(status.get("needs_policy")),
         }
 
 @router.get("/alias/access-status")

@@ -36,6 +36,16 @@ def _env_float(val: str, default: float) -> float:
     except Exception:
         return float(default)
 
+SEEN_PENALTY_UNSUPPORTED_MODELS: set[str] = set()
+
+def _supports_penalties(model: str) -> bool:
+    if not model:
+        return True
+    m = model.lower()
+    if "gpt-5" in m:
+        return False
+    return True
+
 # Алиасы имён моделей на случай отличий в прокси-доке
 MODEL_ALIASES: Dict[str, str] = {
     "chat-gpt5": "gpt-5.2",
@@ -150,6 +160,7 @@ class LLMAdapter:
         started = time.monotonic()
         fallback_used = False
         resolved_model = payload.get("model")
+        retry_without_penalties_used = False
 
         def _emit_trace(status: str, *, err: Optional[str] = None) -> None:
             if trace is None:
@@ -196,6 +207,25 @@ class LLMAdapter:
                     logging.warning("[llm] http_error status=%s body=%s", status, e.response.text[:500])
                 except Exception:
                     pass
+                if status == 400 and not retry_without_penalties_used:
+                    body = (e.response.text or "")
+                    low = body.lower()
+                    if "unsupported parameter" in low and ("presence_penalty" in low or "frequency_penalty" in low):
+                        payload.pop("presence_penalty", None)
+                        payload.pop("frequency_penalty", None)
+                        retry_without_penalties_used = True
+                        try:
+                            logging.warning("[llm] retry_without_penalties model=%s", resolved_model)
+                        except Exception:
+                            pass
+                        try:
+                            r2 = await client.post(url, json=payload)
+                            r2.raise_for_status()
+                            data2 = r2.json()
+                            _emit_trace("ok", err=None)
+                            return data2["choices"][0]["message"]["content"].strip()
+                        except Exception:
+                            pass
                 # Попытки и бэкофф
                 if status in (429, 500, 502, 503, 504) and attempt < 2:
                     import asyncio, random
@@ -354,10 +384,18 @@ async def chat_with_style(
         })
 
     if mode == "talk":
-        if "presence_penalty" not in kwargs:
-            kwargs["presence_penalty"] = _env_float(TALK_PRESENCE_PENALTY, 0.15)
-        if "frequency_penalty" not in kwargs:
-            kwargs["frequency_penalty"] = _env_float(TALK_FREQUENCY_PENALTY, 0.25)
+        if _supports_penalties(chosen_model):
+            if "presence_penalty" not in kwargs:
+                kwargs["presence_penalty"] = _env_float(TALK_PRESENCE_PENALTY, 0.15)
+            if "frequency_penalty" not in kwargs:
+                kwargs["frequency_penalty"] = _env_float(TALK_FREQUENCY_PENALTY, 0.25)
+        else:
+            if (TALK_PRESENCE_PENALTY or TALK_FREQUENCY_PENALTY) and chosen_model not in SEEN_PENALTY_UNSUPPORTED_MODELS:
+                SEEN_PENALTY_UNSUPPORTED_MODELS.add(chosen_model)
+                try:
+                    print(f"[llm] penalties_skipped model={chosen_model} reason=unsupported")
+                except Exception:
+                    pass
 
     # 3) Если нам передали messages, аккуратно добавим/заменим system
     if messages is not None:

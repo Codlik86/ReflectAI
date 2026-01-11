@@ -31,7 +31,7 @@ except Exception:
     from aiogram.types.web_app_info import WebAppInfo  # на случай другой версии aiogram
 
 # ===== Модули продукта (оставляем только нужное) =====
-from app.memory import save_user_message, save_bot_message, get_recent_messages
+from app.memory import get_recent_messages
 from app.prompts import SYSTEM_PROMPT, STYLE_SUFFIXES, LENGTH_HINTS
 try:
     from app.prompts import REFLECTIVE_SUFFIX
@@ -65,8 +65,9 @@ from app.billing.service import (
     cancel_subscription_now,
     get_active_subscription_row,
     apply_success_payment,
-    TRIAL_DAYS,
 )
+from app.services.access_state import TRIAL_DAYS, get_access_state
+from app.services.access_state import get_access_state
 from app.billing.prices import plan_price_int, plan_price_stars, PLAN_PRICES_INT
 
 from zoneinfo import ZoneInfo
@@ -714,6 +715,11 @@ POLICY_URL = os.getenv("POLICY_URL", "").strip()
 TERMS_URL = os.getenv("TERMS_URL", "").strip()
 MINIAPP_URL = os.getenv("MINIAPP_URL", "").strip()  # <<< ДОБАВЛЕНО
 
+def _legal_urls() -> tuple[str, str]:
+    legal_policy = (os.getenv("LEGAL_POLICY_URL", "") or "").strip() or POLICY_URL
+    legal_offer = (os.getenv("LEGAL_OFFER_URL", "") or "").strip() or TERMS_URL
+    return legal_policy, legal_offer
+
 DEFAULT_ONB_IMAGES = {
     "cover": os.getenv(
         "ONB_IMG_COVER",
@@ -929,17 +935,15 @@ async def _enforce_access_or_paywall(msg_or_call, session, user_id: int) -> bool
 # --- pay status helpers ---
 async def _access_status_text(session, user_id: int) -> str | None:
     try:
-        from app.db.models import User
-
-        u = (
-            await session.execute(select(User).where(User.id == user_id))
-        ).scalar_one_or_none()
+        state = await get_access_state(session, user_id)
     except Exception:
-        u = None
-    if u and (getattr(u, "subscription_status", None) or "") == "active":
+        state = None
+    if not state:
+        return None
+    if state.get("reason") == "subscription":
         return "Подписка активна ✅\nДоступ ко всем функциям открыт."
-    if await is_trial_active(session, user_id):
-        until = getattr(u, "trial_expires_at", None)
+    if state.get("reason") == "trial":
+        until = state.get("trial_until")
         tail = f" до {_fmt_dt(until)}" if until else ""
         return f"Пробный период активен{tail} ✅\nДоступ ко всем функциям открыт."
     return None
@@ -1313,41 +1317,6 @@ async def kb_privacy_for(chat_id: int) -> InlineKeyboardMarkup:
     )
 
 
-# ===== Триал: ручной старт (остаётся) =====
-@router.callback_query(lambda c: c.data == "trial:start")
-async def cb_trial_start(call: CallbackQuery):
-    tg_id = call.from_user.id
-    async for session in get_session():
-        from app.db.models import User
-
-        q = await session.execute(select(User).where(User.tg_id == tg_id))
-        u = q.scalar_one_or_none()
-        if not u:
-            await call.answer("Нажми /start, чтобы завершить онбординг.", show_alert=True)
-            return
-        if await is_trial_active(session, u.id):
-            await call.answer("Триал уже активен ✅", show_alert=True)
-            return
-        started, expires = await start_trial_for_user(session, u.id)
-        await session.commit()
-
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-
-    text = (
-        f"Пробный период активирован ✅\n"
-        f"Доступ открыт до {_fmt_dt(expires)}\n\n"
-        f"Готов продолжать — выбери «Поговорить»."
-    )
-    try:
-        await call.message.answer(text, reply_markup=kb_main_menu())
-    except Exception:
-        await call.message.answer(text)
-    await call.answer()
-
-
 @router.callback_query(lambda c: c.data in ("pay:open", "pay:plans"))
 async def cb_pay_open_or_plans(call: CallbackQuery):
     try:
@@ -1485,11 +1454,12 @@ async def cb_sub_cancel_yes(call: CallbackQuery):
 @router.message(Command("policy"))
 async def cmd_policy(m: Message):
     parts = ["🔒 <b>Политика и правила</b>"]
-    if TERMS_URL:
-        parts.append(f"• <a href='{TERMS_URL}'>Правила сервиса</a>")
-    if POLICY_URL:
-        parts.append(f"• <a href='{POLICY_URL}'>Политика конфиденциальности</a>")
-    if not TERMS_URL and not POLICY_URL:
+    policy_url, offer_url = _legal_urls()
+    if offer_url:
+        parts.append(f"• <a href='{offer_url}'>Правила сервиса</a>")
+    if policy_url:
+        parts.append(f"• <a href='{policy_url}'>Политика конфиденциальности</a>")
+    if not offer_url and not policy_url:
         parts.append(
             "Ссылки не настроены. Добавь переменные окружения POLICY_URL и TERMS_URL."
         )
@@ -1518,10 +1488,11 @@ ONB_2_TEXT = (
 def kb_onb_step2() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     link_row: list[InlineKeyboardButton] = []
-    if TERMS_URL:
-        link_row.append(InlineKeyboardButton(text="📄 Правила", url=TERMS_URL))
-    if POLICY_URL:
-        link_row.append(InlineKeyboardButton(text="🔐 Политика", url=POLICY_URL))
+    policy_url, offer_url = _legal_urls()
+    if offer_url:
+        link_row.append(InlineKeyboardButton(text="📄 Правила", url=offer_url))
+    if policy_url:
+        link_row.append(InlineKeyboardButton(text="🔐 Политика", url=policy_url))
     if link_row:
         rows.append(link_row)
     rows.append([InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")])
@@ -1569,7 +1540,7 @@ async def on_onb_step2(cb: CallbackQuery):
     except Exception:
         pass
     try:
-        policy_ok, _ = await _gate_user_flags(int(cb.from_user.id))
+        policy_ok, _, _ = await _gate_user_flags(int(cb.from_user.id))
     except Exception:
         policy_ok = False
     if not policy_ok:
@@ -2384,26 +2355,42 @@ async def _gate_send_paywall(event: AllowedEvent) -> None:
     target = event.message if isinstance(event, CallbackQuery) else event
     await target.answer(text_, reply_markup=kb)
 
-async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool]:
-    from app.billing.service import check_access
+async def _gate_user_flags(tg_id: int) -> Tuple[bool, bool, bool]:
     async with async_session() as s:
-        r = await s.execute(text("SELECT id, policy_accepted_at FROM users WHERE tg_id = :tg"), {"tg": int(tg_id)})
+        r = await s.execute(
+            text("SELECT id, policy_accepted_at, trial_started_at, trial_expires_at FROM users WHERE tg_id = :tg"),
+            {"tg": int(tg_id)},
+        )
         row = r.first()
         if not row:
-            return False, False
-        uid = int(row[0]); policy_ok = bool(row[1])
-    async with async_session() as s2:
+            return False, False, False
+        uid = int(row[0])
+        policy_ok = bool(row[1])
+        trial_ever = bool(row[2] or row[3])
+
         try:
-            access_ok = await check_access(s2, uid)
+            access_ok = bool((await get_access_state(s, uid)).get("has_access"))
         except Exception:
             access_ok = False
-    return policy_ok, access_ok
+
+        if not trial_ever:
+            try:
+                r2 = await s.execute(
+                    text("SELECT 1 FROM subscriptions WHERE user_id = :uid LIMIT 1"),
+                    {"uid": int(uid)},
+                )
+                trial_ever = r2.first() is not None
+            except Exception:
+                trial_ever = False
+
+    return policy_ok, access_ok, trial_ever
 
 async def _gate_send_policy(event: AllowedEvent) -> None:
+    policy_url, offer_url = _legal_urls()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="📄 Правила", url=os.getenv("LEGAL_POLICY_URL") or "https://example.com/policy"),
-            InlineKeyboardButton(text="🔐 Политика", url=os.getenv("LEGAL_OFFER_URL")  or "https://example.com/offer"),
+            InlineKeyboardButton(text="📄 Правила", url=offer_url or "https://s.craft.me/APV7T8gRf3w2Ay"),
+            InlineKeyboardButton(text="🔐 Политика", url=policy_url or "https://s.craft.me/APV7T8gRf3w2Ay"),
         ],
         [InlineKeyboardButton(text="Принимаю ✅", callback_data="onb:agree")],
     ])
@@ -2418,26 +2405,26 @@ async def _maybe_start_trial_on_first_action(event: AllowedEvent) -> None:
         tg_id = getattr(getattr(event, "from_user", None), "id", None)
         if not tg_id:
             return
-        async for session in get_session():
+        async with async_session() as session:
             from app.db.models import User
             u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
             if not u:
                 return
             # 0) есть доступ — выходим
-            if await check_access(session, u.id):
+            if (await get_access_state(session, u.id)).get("has_access"):
                 return
             # 1) если триал когда-либо запускался ИЛИ есть зафиксированный его конец — не новый
-            if getattr(u, "trial_started_at", None) is not None or getattr(u, "trial_expires_at", None) is not None:
-                return
-            # 2) если есть ЛЮБАЯ запись в subscriptions — не новый
-            row = await session.execute(
-                text("SELECT 1 FROM subscriptions WHERE user_id = :uid LIMIT 1"),
-                {"uid": int(u.id)},
-            )
-            if row.first() is not None:
+            trial_ever = bool(getattr(u, "trial_started_at", None) or getattr(u, "trial_expires_at", None))
+            if not trial_ever:
+                row = await session.execute(
+                    text("SELECT 1 FROM subscriptions WHERE user_id = :uid LIMIT 1"),
+                    {"uid": int(u.id)},
+                )
+                trial_ever = row.first() is not None
+            if trial_ever:
                 return
 
-            # 3) только теперь можно автозапускать триал
+            # 2) только теперь можно автозапускать триал
             started, expires = await start_trial_for_user(session, u.id)
             await session.commit()
             if not started:
@@ -2465,7 +2452,7 @@ class GateMiddleware(BaseMiddleware):
             if isinstance(event, Message) and getattr(event, "successful_payment", None):
                 return await handler(event, data)
 
-            policy_ok, access_ok = await _gate_user_flags(int(tg_id))
+            policy_ok, access_ok, trial_ever = await _gate_user_flags(int(tg_id))
 
             if not policy_ok:
                 if isinstance(event, Message) and (event.text or "").startswith("/start"):
@@ -2475,25 +2462,6 @@ class GateMiddleware(BaseMiddleware):
                 await _gate_send_policy(event); return
 
             if not access_ok:
-                # ---------- ПРАВКА №1: корректно определяем trial_ever ----------
-                trial_ever = False
-                try:
-                    async for session in get_session():
-                        from app.db.models import User
-                        u = (await session.execute(select(User).where(User.tg_id == int(tg_id)))).scalar_one_or_none()
-                        if u:
-                            if getattr(u, "trial_started_at", None) is not None or getattr(u, "trial_expires_at", None) is not None:
-                                trial_ever = True
-                            else:
-                                r = await session.execute(
-                                    text("SELECT 1 FROM subscriptions WHERE user_id = :uid LIMIT 1"),
-                                    {"uid": int(u.id)},
-                                )
-                                trial_ever = r.first() is not None
-                except Exception:
-                    trial_ever = False
-                # ---------------------------------------------------------------
-
                 if isinstance(event, Message):
                     t = (event.text or "")
                     if t.startswith("/pay"):
