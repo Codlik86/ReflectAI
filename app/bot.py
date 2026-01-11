@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import hashlib
+import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from aiogram import Router, F, BaseMiddleware
 from aiogram.filters import Command, CommandStart
@@ -680,6 +682,138 @@ def get_onb_image(key: str) -> str:
 CHAT_MODE: Dict[int, str] = {}  # "talk" | "reflection"
 USER_TONE: Dict[int, str] = {}  # "default" | "friend" | "therapist" | "18plus"
 
+# ===== Talk debounce buffer =====
+def _env_float(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name, "")
+        return float(raw) if raw else float(default)
+    except Exception:
+        return float(default)
+
+TALK_DEBOUNCE_SEC = _env_float("TALK_DEBOUNCE_SEC", 2.5)
+TALK_DEBOUNCE_MAX_WAIT_SEC = _env_float("TALK_DEBOUNCE_MAX_WAIT_SEC", 12.0)
+TALK_TYPING_INTERVAL_SEC = 2.0
+SOFT_QUESTIONS_IN_TALK = os.getenv("SOFT_QUESTIONS_IN_TALK", "1") == "1"
+TALK_MAX_QUESTIONS = int(os.getenv("TALK_MAX_QUESTIONS", "2") or "2")
+
+TALK_DEBOUNCE_BUFFER: Dict[int, Dict[str, Any]] = {}
+
+def _debounce_stats(texts: List[str]) -> tuple[int, int]:
+    parts = len(texts)
+    chars = sum(len(t or "") for t in texts)
+    return parts, chars
+
+async def _typing_loop(bot, chat_id: int) -> None:
+    try:
+        while True:
+            try:
+                await bot.send_chat_action(chat_id, "typing")
+            except Exception:
+                pass
+            await asyncio.sleep(TALK_TYPING_INTERVAL_SEC)
+    except asyncio.CancelledError:
+        return
+
+async def _debounce_wait_and_flush(key: int, delay: float) -> None:
+    try:
+        await asyncio.sleep(max(0.0, float(delay)))
+        await _flush_talk_buffer(key, reason="debounce")
+    except asyncio.CancelledError:
+        return
+
+async def _enqueue_talk_message(m: Message, text: str, *, handler=None) -> None:
+    if not text:
+        return
+    tg_id = int(getattr(getattr(m, "from_user", None), "id", 0) or 0)
+    chat_id = int(getattr(getattr(m, "chat", None), "id", 0) or 0)
+    if not tg_id or not chat_id:
+        return
+
+    now = time.monotonic()
+    buf = TALK_DEBOUNCE_BUFFER.get(tg_id)
+    if not buf:
+        buf = {
+            "texts": [],
+            "timer_task": None,
+            "typing_task": None,
+            "last_msg_id": None,
+            "chat_id": chat_id,
+            "started_at": now,
+            "message": m,
+            "flush_handler": handler,
+        }
+        TALK_DEBOUNCE_BUFFER[tg_id] = buf
+
+        bot = getattr(m, "bot", None)
+        if bot is not None:
+            buf["typing_task"] = asyncio.create_task(_typing_loop(bot, chat_id))
+
+    buf["texts"].append(text)
+    buf["last_msg_id"] = getattr(m, "message_id", None)
+    buf["message"] = m
+    if handler is not None:
+        buf["flush_handler"] = handler
+
+    parts, chars = _debounce_stats(buf["texts"])
+    try:
+        print(f"[debounce] enqueue parts={parts} chars={chars}")
+    except Exception:
+        pass
+
+    elapsed = now - float(buf.get("started_at") or now)
+    if elapsed >= TALK_DEBOUNCE_MAX_WAIT_SEC:
+        try:
+            print(f"[debounce] max_wait reached parts={parts} chars={chars}")
+        except Exception:
+            pass
+        task = buf.get("timer_task")
+        if task and not task.done():
+            task.cancel()
+        await _flush_talk_buffer(tg_id, reason="max_wait")
+        return
+
+    task = buf.get("timer_task")
+    if task and not task.done():
+        task.cancel()
+    buf["timer_task"] = asyncio.create_task(_debounce_wait_and_flush(tg_id, TALK_DEBOUNCE_SEC))
+
+async def _flush_talk_buffer(key: int, *, reason: str = "manual", handler=None) -> None:
+    buf = TALK_DEBOUNCE_BUFFER.get(key)
+    if not buf:
+        return
+
+    timer_task = buf.get("timer_task")
+    if timer_task and timer_task is not asyncio.current_task() and not timer_task.done():
+        timer_task.cancel()
+    typing_task = buf.get("typing_task")
+    if typing_task and not typing_task.done():
+        typing_task.cancel()
+
+    texts = list(buf.get("texts") or [])
+    message = buf.get("message")
+    buffer_handler = handler or buf.get("flush_handler")
+    TALK_DEBOUNCE_BUFFER.pop(key, None)
+
+    if not texts or message is None:
+        return
+
+    parts, chars = _debounce_stats(texts)
+    try:
+        print(f"[debounce] flush reason={reason} parts={parts} chars={chars}")
+    except Exception:
+        pass
+
+    combined = "\n".join(texts)
+    try:
+        if buffer_handler is not None:
+            await buffer_handler(message, combined)
+        else:
+            await _answer_with_llm(message, combined)
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+
 # ===== Эфемерный буфер (priv=none) =====
 RECENT_BUFFER: Dict[int, deque] = {}
 BUFFER_MAX = 120
@@ -931,20 +1065,48 @@ def _pick_len_hint(user_text: str, mode: str) -> str:
     return "medium"
 
 
-def _enforce_single_question(text: str) -> str:
+def _count_questions(text: str) -> int:
+    return (text or "").count("?")
+
+
+def _limit_questions(text: str, max_questions: int) -> str:
     if not text:
         return text
     while "??" in text:
         text = text.replace("??", "?")
-    last_q = text.rfind("?")
-    if last_q == -1:
+    if max_questions <= 0:
+        return text.replace("?", ".").replace(" .", ".").replace(" ,", ",")
+    q_positions = [i for i, ch in enumerate(text) if ch == "?"]
+    if len(q_positions) <= max_questions:
         return text
+    keep = set(q_positions[-max_questions:])
     chars = list(text)
-    for i, ch in enumerate(chars):
-        if ch == "?" and i != last_q:
+    for i in q_positions:
+        if i not in keep:
             chars[i] = "."
     out = "".join(chars)
     return out.replace(" .", ".").replace(" ,", ",")
+
+
+def _postprocess_questions(text: str, mode: str) -> str:
+    if mode == "talk" and SOFT_QUESTIONS_IN_TALK:
+        before = _count_questions(text)
+        max_q = max(0, int(TALK_MAX_QUESTIONS))
+        out = _limit_questions(text, max_q)
+        after = _count_questions(out)
+        try:
+            print(f"[post] questions_mode=talk_soft max={max_q} applied={before}->{after}")
+        except Exception:
+            pass
+        return out
+    before = _count_questions(text)
+    out = _limit_questions(text, 1)
+    after = _count_questions(out)
+    try:
+        print(f"[post] questions_mode=strict max=1 applied={before}->{after}")
+    except Exception:
+        pass
+    return out
 
 
 async def _get_active_subscription(session, user_id: int):
@@ -1723,7 +1885,7 @@ async def _answer_with_llm(m: Message, user_text: str):
     if not reply or not reply.strip():
         reply = _fallback_reply(user_text)
     try:
-        reply = _enforce_single_question(reply)
+        reply = _postprocess_questions(reply, mode=mode)
     except Exception:
         pass
 
@@ -1766,7 +1928,7 @@ async def _answer_with_llm(m: Message, user_text: str):
                     pass
                 if reply_r and reply_r.strip() and opener_after and opener_after not in seen:
                     try:
-                        reply = _enforce_single_question(reply_r)
+                        reply = _postprocess_questions(reply_r, mode=mode)
                     except Exception:
                         reply = reply_r
                     opener_key = opener_after
@@ -1792,7 +1954,7 @@ async def on_about_btn(m: Message):
 async def on_text(m: Message):
     chat_id = m.chat.id
     if CHAT_MODE.get(chat_id, "talk") in ("talk", "reflection"):
-        await _answer_with_llm(m, m.text or "")
+        await _enqueue_talk_message(m, m.text or "")
         return
     await m.answer("Я рядом и на связи. Нажми «Поговорить».", reply_markup=kb_main_menu())
 
