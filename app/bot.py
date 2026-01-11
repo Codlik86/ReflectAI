@@ -196,7 +196,10 @@ def normalize_opener_prefix(text: str) -> str:
 def _is_banned_opener_prefix(prefix: str) -> bool:
     if not prefix:
         return False
-    return prefix in BANNED_OPENERS_PREFIXES
+    for banned in BANNED_OPENERS_PREFIXES:
+        if prefix == banned or prefix.startswith(banned + " "):
+            return True
+    return False
 
 
 def _is_repeat_opener_prefix(prefix: str, seen_prefixes: deque) -> bool:
