@@ -27,6 +27,14 @@ DEFAULT_MODEL = os.getenv("CHAT_MODEL", "gpt-5.2")
 STRONG_MODEL = os.getenv("CHAT_MODEL_STRONG", "gpt-5.2")  # «старшая» модель для длинных/сложных ответов
 TALK_MODEL = os.getenv("CHAT_MODEL_TALK", STRONG_MODEL)  # можно задать отдельную для talk/reflection
 FALLBACK_TO_DEFAULT = os.getenv("LLM_FALLBACK_TO_DEFAULT", "1") == "1"  # мягкий фолбэк при 5xx/429
+TALK_PRESENCE_PENALTY = os.getenv("TALK_PRESENCE_PENALTY", "0.15")
+TALK_FREQUENCY_PENALTY = os.getenv("TALK_FREQUENCY_PENALTY", "0.25")
+
+def _env_float(val: str, default: float) -> float:
+    try:
+        return float(val)
+    except Exception:
+        return float(default)
 
 # Алиасы имён моделей на случай отличий в прокси-доке
 MODEL_ALIASES: Dict[str, str] = {
@@ -344,6 +352,12 @@ async def chat_with_style(
             "is_crisis": is_crisis,
             "needs_long_context": needs_long_context,
         })
+
+    if mode == "talk":
+        if "presence_penalty" not in kwargs:
+            kwargs["presence_penalty"] = _env_float(TALK_PRESENCE_PENALTY, 0.15)
+        if "frequency_penalty" not in kwargs:
+            kwargs["frequency_penalty"] = _env_float(TALK_FREQUENCY_PENALTY, 0.25)
 
     # 3) Если нам передали messages, аккуратно добавим/заменим system
     if messages is not None:

@@ -169,6 +169,55 @@ def extract_opener(text: str) -> str:
     opener = _re.sub(r"([!?.,…])\1+", r"\1", opener)
     return opener[:60]
 
+
+BANNED_OPENERS_PREFIXES = ["похоже", "понимаю", "слышу", "кажется", "звучит"]
+_OPENER_PREFIX_MAX_WORDS = 2
+_OPENER_PREFIX_HISTORY = 6
+_OPENER_PREFIX_REPEAT_WINDOW = 2
+
+
+def normalize_opener_prefix(text: str) -> str:
+    line = (text or "").strip().split("\n", 1)[0]
+    line = re.sub(r'^[\s"\'“”«»„‚`´’\(\)\[\]{}·•…–—\-]+', "", line)
+    for delim in (",", "—", "–", ":", ".", "!", "?", ";"):
+        idx = line.find(delim)
+        if idx >= 2:
+            line = line[:idx]
+            break
+    line = line.strip().lower()
+    line = re.sub(r"[^\wа-яё]+", " ", line, flags=re.UNICODE)
+    line = re.sub(r"\s+", " ", line).strip()
+    if not line:
+        return ""
+    words = line.split()
+    return " ".join(words[:_OPENER_PREFIX_MAX_WORDS])
+
+
+def _is_banned_opener_prefix(prefix: str) -> bool:
+    if not prefix:
+        return False
+    return prefix in BANNED_OPENERS_PREFIXES
+
+
+def _is_repeat_opener_prefix(prefix: str, seen_prefixes: deque) -> bool:
+    if not prefix or not seen_prefixes:
+        return False
+    tail = list(seen_prefixes)[-_OPENER_PREFIX_REPEAT_WINDOW :]
+    return prefix in tail
+
+
+def _strip_banned_prefix(text: str) -> str:
+    if not text:
+        return text
+    prefix = normalize_opener_prefix(text)
+    if not _is_banned_opener_prefix(prefix):
+        return text
+    for delim in (",", "—", "–", ":", ".", "!", "?", "\n", ";"):
+        idx = text.find(delim)
+        if idx >= 0:
+            return text[idx + 1 :].lstrip()
+    return text
+
 # ========== AUTO-LOGGING В БД (bot_messages) ==========
 class LogIncomingMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -1892,19 +1941,31 @@ async def _answer_with_llm(m: Message, user_text: str):
     # антиповтор первых строк: фиксируем опенер и при совпадении просим LLM начать иначе
     try:
         store = globals().setdefault("LAST_OPENERS", {})
+        prefix_store = globals().setdefault("LAST_OPENER_PREFIXES", {})
         from collections import deque as _dq
         if chat_id not in store:
             store[chat_id] = _dq(maxlen=5)
+        if chat_id not in prefix_store:
+            prefix_store[chat_id] = _dq(maxlen=_OPENER_PREFIX_HISTORY)
         opener_key = extract_opener(reply)
+        opener_prefix = normalize_opener_prefix(reply)
         seen = store.get(chat_id)
-        if opener_key in seen and chat_with_style is not None:
+        seen_prefixes = prefix_store.get(chat_id)
+        prefix_repeat = _is_repeat_opener_prefix(opener_prefix, seen_prefixes)
+        prefix_banned = _is_banned_opener_prefix(opener_prefix)
+        should_regen = (opener_key in seen) or prefix_repeat or prefix_banned
+        if should_regen and chat_with_style is not None:
+            try:
+                print(f"[opener] guard hit prefix={opener_prefix!r} repeat={prefix_repeat} banned={prefix_banned}")
+            except Exception:
+                pass
             banned_list = list(dict.fromkeys(list(seen)))
             banned_text = "; ".join(banned_list)
             for attempt in range(2):
-                if opener_key not in seen:
-                    break
                 sys_prompt_r = sys_prompt + "\n\n" + (
                     "Не начинай ответ с этих стартов: " + banned_text + ". "
+                    "Не начинай с префикса: " + (opener_prefix or "<пусто>") + ". "
+                    "Сделай другой старт и другой ритм, чем в прошлом ответе. "
                     "Запрещены междометия в начале: «Ох», «Понимаю», «Мне жаль», «Слышу тебя». "
                     "Начни иначе: (a) с короткого факта без междометий, (b) с уточнения, (c) с микро-резюме смысла пользователя."
                 )
@@ -1922,18 +1983,27 @@ async def _answer_with_llm(m: Message, user_text: str):
                 except Exception:
                     reply_r = ""
                 opener_after = extract_opener(reply_r)
+                prefix_after = normalize_opener_prefix(reply_r)
+                prefix_repeat_after = _is_repeat_opener_prefix(prefix_after, seen_prefixes)
+                prefix_banned_after = _is_banned_opener_prefix(prefix_after)
                 try:
                     print(f"[llm] opener-regen attempt={attempt+1} before={opener_key!r} after={opener_after!r}")
                 except Exception:
                     pass
-                if reply_r and reply_r.strip() and opener_after and opener_after not in seen:
+                if reply_r and reply_r.strip() and opener_after and opener_after not in seen and not prefix_repeat_after and not prefix_banned_after:
                     try:
                         reply = _postprocess_questions(reply_r, mode=mode)
                     except Exception:
                         reply = reply_r
                     opener_key = opener_after
+                    opener_prefix = prefix_after
                     break
+            if _is_banned_opener_prefix(opener_prefix):
+                reply = _strip_banned_prefix(reply)
+                opener_key = extract_opener(reply)
+                opener_prefix = normalize_opener_prefix(reply)
         seen.append(opener_key)
+        seen_prefixes.append(opener_prefix)
     except Exception:
         pass
 
