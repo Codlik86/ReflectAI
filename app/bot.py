@@ -68,6 +68,8 @@ from app.billing.service import (
     apply_success_payment,
 )
 from app.services.access_state import TRIAL_DAYS, get_access_state
+from app.intents import is_subscription_intent
+from app.texts_pay import get_pay_help_text
 from app.services.access_state import get_access_state
 from app.billing.prices import plan_price_int, plan_price_stars, PLAN_PRICES_INT
 
@@ -1866,6 +1868,9 @@ async def on_about_btn(m: Message):
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
     chat_id = m.chat.id
+    if m.text and is_subscription_intent(m.text):
+        await m.answer(get_pay_help_text(), reply_markup=kb_main_menu())
+        return
     if CHAT_MODE.get(chat_id, "talk") in ("talk", "reflection"):
         await _enqueue_talk_message(m, m.text or "")
         return
@@ -2320,6 +2325,13 @@ class GateMiddleware(BaseMiddleware):
             # успешные платежи не блокируем, даём им пройти к хендлеру
             if isinstance(event, Message) and getattr(event, "successful_payment", None):
                 return await handler(event, data)
+            # pay intent: ответить подсказкой и не блокировать policy
+            if isinstance(event, Message) and event.text and is_subscription_intent(event.text):
+                try:
+                    await event.answer(get_pay_help_text(), reply_markup=kb_main_menu())
+                except Exception:
+                    pass
+                return
 
             policy_ok, access_ok, trial_ever = await _gate_user_flags(int(tg_id))
 
