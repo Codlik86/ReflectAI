@@ -2,6 +2,7 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import { ensureAccess } from "../lib/guard";
+import { trackEvent } from "../lib/events";
 
 export default function Home() {
   const navigate = useNavigate();
@@ -31,6 +32,10 @@ export default function Home() {
     } catch {}
   }, []);
 
+  React.useEffect(() => {
+    trackEvent("miniapp_opened");
+  }, []);
+
   // Унифицированный хелпер: решает, куда вести — к контенту, на paywall по policy, либо на paywall по оплате
   const guardTo = React.useCallback(
     async (path: string) => {
@@ -56,8 +61,14 @@ export default function Home() {
     [safeNavigate, clearAccessCache]
   );
 
-  const onExercises = () => guardTo("/exercises");
-  const onMeditations = () => guardTo("/meditations");
+  const onExercises = () => {
+    trackEvent("miniapp_action", "exercise_opened");
+    guardTo("/exercises");
+  };
+  const onMeditations = () => {
+    trackEvent("miniapp_action", "meditation_opened");
+    guardTo("/meditations");
+  };
 
   // ===== helper открытия бота и мягкого закрытия WebView =====
   const openBotWithStart = (startPayload: string) => {
@@ -92,6 +103,7 @@ export default function Home() {
     try {
       const snap = await ensureAccess({ startTrial: false }); // <— ключевое изменение
       if (snap.has_access) {
+        trackEvent("miniapp_action", "talk_opened");
         openBotWithStart("talk");
         return;
       }

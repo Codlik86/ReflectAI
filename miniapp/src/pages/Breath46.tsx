@@ -1,5 +1,6 @@
 import { useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
+import { trackEvent } from "../lib/events";
 import BackBar from "../components/BackBar";
 
 type Phase = "intro" | "idle" | "inhale" | "exhale" | "done";
@@ -107,7 +108,10 @@ export default function Breath46() {
   };
 
   const start = () => {
-    if (phase === "idle") startPhase("inhale");
+    if (phase === "idle") {
+      trackEvent("miniapp_action", "exercise_started", { exercise_id: "breath-46" });
+      startPhase("inhale");
+    }
   };
 
   const pauseToggle = () => {

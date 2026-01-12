@@ -1,6 +1,7 @@
 // src/pages/Breath333.tsx
 import { useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
+import { trackEvent } from "../lib/events";
 import BackBar from "../components/BackBar";
 
 type Phase = "intro" | "idle" | "inhale" | "hold" | "exhale" | "done";
@@ -123,7 +124,10 @@ export default function Breath333() {
   const stop = () => resetAll();
 
   // Навигация по циклам
-  const goStart = () => resetAll();
+  const goStart = () => {
+    trackEvent("miniapp_action", "exercise_started", { exercise_id: "breath-333" });
+    resetAll();
+  };
   const goPrev  = () => { const prev = Math.max(1, cycle - 1); resetAll(); setCycle(prev); };
   const goNext  = () => { const next = Math.min(TOTAL_CYCLES, cycle + 1); resetAll(); setCycle(next); };
   const goExercises = () => navigate("/exercises");

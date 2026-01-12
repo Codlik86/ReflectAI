@@ -40,6 +40,7 @@ from app.api.telegram_webapp import router as tg_router
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.access import router as access_router          # /api/access/*
 from app.api.payments import router as payments_router      # /api/payments/*
+from app.api.events import router as events_router          # /api/events/*
 from app.site.summaries_api import router as summaries_router  # /api/summaries/*
 
 # --- ENV ---
@@ -101,6 +102,7 @@ app.include_router(admin_api.router,    prefix="")      # /api/admin/*
 app.include_router(nudges_api.router,   prefix="")      # /api/admin/nudges/*
 app.include_router(access_router)                       # /api/access/*
 app.include_router(payments_router)                     # /api/payments/*   (status/create/webhook)
+app.include_router(events_router)                       # /api/events/*
 app.include_router(tg_router,           prefix="/api/tg")
 app.include_router(summaries_router,    prefix="/api")  # /api/summaries/*
 

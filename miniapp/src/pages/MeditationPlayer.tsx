@@ -4,6 +4,7 @@ import { Link, useParams, useLocation, useNavigate } from "react-router-dom";
 import BackBar from "../components/BackBar";
 import { MEDITATIONS_LIB } from "./Meditations";
 import { ensureAccess } from "../lib/guard";
+import { trackEvent } from "../lib/events";
 
 type NavState = { title?: string; subtitle?: string; src?: string } | undefined;
 
@@ -76,6 +77,7 @@ export default function MeditationPlayer() {
   const dragging = React.useRef(false);
 
   const [playing, setPlaying] = React.useState(false);
+  const trackedPlayRef = React.useRef(false);
   const [duration, setDuration] = React.useState(0);
   const [current, setCurrent] = React.useState(0);
   const [volume, setVolume] = React.useState(0.9);
@@ -155,7 +157,14 @@ export default function MeditationPlayer() {
 
     const onLoaded = () => setDuration(Number.isFinite(a.duration) ? a.duration : 0);
     const onTime = () => { if (!dragging.current) setCurrent(a.currentTime || 0); };
-    const onPlay = () => { setPlaying(true); startTicker(); };
+    const onPlay = () => {
+      setPlaying(true);
+      startTicker();
+      if (!trackedPlayRef.current) {
+        trackedPlayRef.current = true;
+        trackEvent("miniapp_action", "meditation_started", { meditation_id: id || title });
+      }
+    };
     const onPause = () => { setPlaying(false); stopTicker(); };
     const onEnded = () => { setPlaying(false); stopTicker(); setCurrent(a.duration || 0); };
     const onError = () => { setPlaying(false); stopTicker(); };

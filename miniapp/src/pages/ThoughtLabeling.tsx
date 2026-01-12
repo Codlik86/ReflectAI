@@ -1,6 +1,7 @@
 // src/pages/ThoughtLabeling.tsx
 import { useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
+import { trackEvent } from "../lib/events";
 import BackBar from "../components/BackBar";
 
 /** Шаги практики: заголовок, подсказка и длительность (сек) */
@@ -175,6 +176,7 @@ export default function ThoughtLabeling() {
 
   // навигация снизу
   const goStart = () => {
+    trackEvent("miniapp_action", "exercise_started", { exercise_id: "thought-labeling" });
     setIdleStep(1);
   };
   const goPrev = () => {

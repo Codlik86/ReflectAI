@@ -6,6 +6,7 @@ import BackBar from "../components/BackBar";
 import data from "../data/exercises.ru";
 import type { AAPayload, AAExercise, AAStep } from "../lib/aa.types";
 import { ensureAccess } from "../lib/guard";
+import { trackEvent } from "../lib/events";
 
 export default function Exercises() {
   const navigate = useNavigate();
@@ -231,6 +232,7 @@ function Timer({ seconds, label }: { seconds: number; label?: string }) {
   };
 
   const start = () => {
+    trackEvent("miniapp_action", "exercise_started", { label: label ?? "timer" });
     reset();
     setRunning(true);
     runningRef.current = true;
@@ -361,6 +363,7 @@ function BreathWidget({
   }
 
   const start = () => {
+    trackEvent("miniapp_action", "exercise_started", { label: label ?? "breath" });
     reset();
     setRunning(true);
     runningRef.current = true;

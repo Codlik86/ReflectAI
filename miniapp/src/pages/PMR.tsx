@@ -1,6 +1,7 @@
 // src/pages/PMR.tsx
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
+import { trackEvent } from "../lib/events";
 import BackBar from "../components/BackBar";
 import pmr from "../data/pmr.ru";
 
@@ -156,6 +157,7 @@ export default function PMR() {
 
   // нижняя навигация
   const goStart = () => {
+    trackEvent("miniapp_action", "exercise_started", { exercise_id: "pmr" });
     stopRaf();
     idxRef.current = 0;
     setIdx(0);

@@ -1,6 +1,7 @@
 // src/pages/BodyScan.tsx
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
+import { trackEvent } from "../lib/events";
 import BackBar from "../components/BackBar";
 import body from "../data/bodyscan.ru";
 
@@ -136,6 +137,7 @@ export default function BodyScan() {
 
   // Навигация по группам
   const goStart = () => {
+    trackEvent("miniapp_action", "exercise_started", { exercise_id: "body-scan" });
     stopRaf();
     idxRef.current = 0;
     setIdx(0);
