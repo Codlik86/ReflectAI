@@ -55,7 +55,7 @@ async def track_event(payload: TrackEventIn):
             text(
                 """
                 INSERT INTO bot_events (user_id, event_type, payload, created_at)
-                VALUES (:uid, :etype, :payload::jsonb, CURRENT_TIMESTAMP)
+                VALUES (:uid, :etype, :payload, CURRENT_TIMESTAMP)
                 """
             ),
             {"uid": int(uid), "etype": event_name, "payload": json.dumps(data, ensure_ascii=False)},
