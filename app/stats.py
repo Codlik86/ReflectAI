@@ -143,7 +143,7 @@ async def cmd_stats(m: Message):
             SELECT COUNT(DISTINCT user_id)
             FROM bot_events
             WHERE event_type = 'miniapp_action'
-              AND (payload->>'action') IN ('exercise_started','meditation_started','talk_opened')
+              AND ((payload::jsonb)->>'action') IN ('exercise_started','meditation_started','talk_opened')
             """,
         )
         counts["miniapp_acted_today"] = await _fetch_count(
@@ -152,7 +152,7 @@ async def cmd_stats(m: Message):
             SELECT COUNT(DISTINCT user_id)
             FROM bot_events
             WHERE event_type = 'miniapp_action'
-              AND (payload->>'action') IN ('exercise_started','meditation_started','talk_opened')
+              AND ((payload::jsonb)->>'action') IN ('exercise_started','meditation_started','talk_opened')
               AND created_at >= :start_day AND created_at < :end_day
             """,
             {"start_day": start_of_day_utc, "end_day": end_of_day_utc},
