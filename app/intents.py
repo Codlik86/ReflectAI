@@ -1,25 +1,46 @@
 from __future__ import annotations
 
 def is_subscription_intent(text: str) -> bool:
-    t = (text or "").lower().strip()
-    if not t:
+    if not text:
         return False
 
-    keywords = [
-        "подписк",
+    t = text.lower().strip()
+    if not t:
+        return False
+    if t.startswith("/"):
+        return False
+
+    t_norm = " ".join(t.split())
+    if t_norm in {"подписка", "💳 подписка"}:
+        return False
+
+    intent_keywords = [
         "оплат",
         "купить",
         "оформ",
+        "подключ",
+        "продл",
+        "отмен",
         "тариф",
         "премиум",
-        "платн",
-        "оплата",
         "цена",
         "стоим",
+        "платеж",
+        "платн",
+        "не могу",
+        "не работает",
+        "не получается",
+        "ошибк",
+        "проблем",
         "сколько стоит",
         "как оплат",
         "как купить",
         "где купить",
         "как оформить",
     ]
-    return any(k in t for k in keywords)
+    if any(k in t_norm for k in intent_keywords):
+        return True
+
+    question_words = ["как", "где", "почему", "сколько"]
+    base_terms = ["подписк", "оплат", "платеж"]
+    return any(q in t_norm for q in question_words) and any(b in t_norm for b in base_terms)
