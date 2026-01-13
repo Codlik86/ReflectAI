@@ -1327,7 +1327,7 @@ async def cmd_policy(m: Message):
     parts = ["🔒 <b>Политика и правила</b>"]
     policy_url, offer_url = _legal_urls()
     if offer_url:
-        parts.append(f"• <a href='{offer_url}'>Правила сервиса</a>")
+        parts.append(f"• <a href='{policy_url}'>Правила сервиса</a>")
     if policy_url:
         parts.append(f"• <a href='{policy_url}'>Политика конфиденциальности</a>")
     if not offer_url and not policy_url:
