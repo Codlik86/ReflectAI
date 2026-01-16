@@ -1326,7 +1326,7 @@ async def cb_sub_cancel_yes(call: CallbackQuery):
 async def cmd_policy(m: Message):
     parts = ["🔒 <b>Политика и правила</b>"]
     policy_url, offer_url = _legal_urls()
-    if offer_url:
+    if policy_url:
         parts.append(f"• <a href='{policy_url}'>Правила сервиса</a>")
     if policy_url:
         parts.append(f"• <a href='{policy_url}'>Политика конфиденциальности</a>")
