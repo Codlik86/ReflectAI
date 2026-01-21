@@ -127,7 +127,7 @@ async def _was_sent_recently(session, user_id: int, kind: str) -> bool:
     res = await session.execute(
         text("""
             SELECT 1
-            FROM nudges
+            FROM public.nudges
             WHERE user_id = :uid
               AND kind = :kind
               AND created_at >= NOW() - INTERVAL '180 days'
@@ -143,7 +143,7 @@ async def _log_nudge(user_id: int, tg_id: int, kind: str, payload: Dict[str, Any
         async with async_session() as s:
             await s.execute(
                 text("""
-                    INSERT INTO nudges (user_id, tg_id, kind, payload, created_at)
+                    INSERT INTO public.nudges (user_id, tg_id, kind, payload, created_at)
                     VALUES (:uid, :tg, :kind, :payload::jsonb, CURRENT_TIMESTAMP)
                 """),
                 {"uid": user_id, "tg": tg_id, "kind": kind, "payload": json_dumps(payload)},
@@ -186,22 +186,23 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         sql = f"""
         WITH last_msg AS (
             SELECT user_id, MAX(created_at) AS last_at
-            FROM bot_messages
+            FROM public.bot_messages
             GROUP BY user_id
         ),
         sent AS (
             SELECT DISTINCT user_id
-            FROM nudges
+            FROM public.nudges
             WHERE kind = :kind
               AND created_at >= NOW() - INTERVAL '180 days'
         )
         SELECT u.id AS user_id, u.tg_id, COALESCE(l.last_at, u.created_at) AS last_at
-        FROM users u
+        FROM public.users u
         LEFT JOIN last_msg l ON l.user_id = u.id
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE s.user_id IS NULL
           AND COALESCE(l.last_at, u.created_at) IS NOT NULL
           AND {cond}
+        ORDER BY COALESCE(l.last_at, u.created_at) DESC NULLS LAST
         LIMIT 2000
         """
         async with async_session() as s:
@@ -223,19 +224,19 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         sql = f"""
         WITH ad_start AS (
             SELECT tg_user_id, MIN(created_at) AS ad_start_at
-            FROM ad_starts
+            FROM public.ad_starts
             WHERE tg_user_id IS NOT NULL
             GROUP BY tg_user_id
         ),
         sent AS (
             SELECT DISTINCT user_id
-            FROM nudges
+            FROM public.nudges
             WHERE kind = :kind
               AND created_at >= NOW() - INTERVAL '180 days'
         ),
         base AS (
             SELECT u.id AS user_id, u.tg_id, COALESCE(a.ad_start_at, u.created_at) AS start_at
-            FROM users u
+            FROM public.users u
             LEFT JOIN ad_start a ON a.tg_user_id = u.tg_id
             LEFT JOIN sent s ON s.user_id = u.id
             WHERE u.policy_accepted_at IS NULL
@@ -266,12 +267,12 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         sql = f"""
         WITH sent AS (
             SELECT DISTINCT user_id
-            FROM nudges
+            FROM public.nudges
             WHERE kind = :kind
               AND created_at >= NOW() - INTERVAL '180 days'
         )
         SELECT u.id AS user_id, u.tg_id, u.policy_accepted_at
-        FROM users u
+        FROM public.users u
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE u.policy_accepted_at IS NOT NULL
           AND u.tg_id IS NOT NULL
@@ -279,7 +280,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
           AND {cond}
           AND NOT EXISTS (
               SELECT 1
-              FROM bot_messages bm
+              FROM public.bot_messages bm
               WHERE bm.user_id = u.id
                 AND bm.role = 'user'
                 AND bm.created_at > u.policy_accepted_at
@@ -294,12 +295,12 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         sql = """
         WITH sent AS (
             SELECT DISTINCT user_id
-            FROM nudges
+            FROM public.nudges
             WHERE kind = :kind
               AND created_at >= NOW() - INTERVAL '180 days'
         )
         SELECT u.id AS user_id, u.tg_id, u.trial_started_at, u.trial_expires_at
-        FROM users u
+        FROM public.users u
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE u.trial_started_at IS NOT NULL
           AND u.trial_expires_at IS NOT NULL
@@ -309,7 +310,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
           AND u.trial_expires_at <= NOW() + INTERVAL '3 days'
           AND NOT EXISTS (
               SELECT 1
-              FROM bot_messages bm
+              FROM public.bot_messages bm
               WHERE bm.user_id = u.id
                 AND bm.role = 'user'
                 AND bm.created_at > u.trial_started_at
@@ -324,12 +325,12 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         sql = """
         WITH sent AS (
             SELECT DISTINCT user_id
-            FROM nudges
+            FROM public.nudges
             WHERE kind = :kind
               AND created_at >= NOW() - INTERVAL '180 days'
         )
         SELECT u.id AS user_id, u.tg_id, u.trial_expires_at
-        FROM users u
+        FROM public.users u
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE u.trial_expires_at IS NOT NULL
           AND u.tg_id IS NOT NULL
@@ -346,12 +347,12 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         sql = """
         WITH sent AS (
             SELECT DISTINCT user_id
-            FROM nudges
+            FROM public.nudges
             WHERE kind = :kind
               AND created_at >= NOW() - INTERVAL '180 days'
         )
         SELECT u.id AS user_id, u.tg_id, u.trial_expires_at
-        FROM users u
+        FROM public.users u
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE u.trial_expires_at IS NOT NULL
           AND u.tg_id IS NOT NULL
