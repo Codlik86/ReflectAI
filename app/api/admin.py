@@ -1,5 +1,8 @@
 # app/api/admin.py
 import os
+import asyncio
+import uuid
+import logging
 from typing import Optional, Any
 from datetime import datetime, timedelta, timezone
 
@@ -502,6 +505,16 @@ async def user_full(
 from sqlalchemy import text as _sql
 from app.db.core import async_session as _summ_sess
 from app.memory_summarizer import make_daily, rollup_weekly, rollup_monthly
+from app.site.summaries_api import (
+    _try_advisory_lock,
+    _run_daily_job,
+    DAILY_LOCK_KEY,
+    DAILY_BATCH_SIZE,
+    DAILY_MAX_RUNTIME_SEC,
+    DAILY_JOBS,
+)
+
+logger = logging.getLogger(__name__)
 
 def _utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -513,22 +526,53 @@ async def admin_summaries_daily():
     """
     day_utc = (_utc() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     next_day = day_utc + timedelta(days=1)
+    lock_session = _summ_sess()
+    try:
+        got_lock = await _try_advisory_lock(lock_session, DAILY_LOCK_KEY)
+        if not got_lock:
+            await lock_session.close()
+            return {"status": "already_running", "day": day_utc.isoformat()}
+    except Exception:
+        await lock_session.close()
+        logger.exception("[summaries/daily] lock check failed (admin)")
+        raise HTTPException(status_code=500, detail="lock_failed")
 
-    async with _summ_sess() as s:
-        uids = (await s.execute(
-            _sql("SELECT DISTINCT user_id FROM bot_messages WHERE created_at >= :st AND created_at < :en"),
-            {"st": day_utc, "en": next_day}
-        )).scalars().all()
+    job_id = f"daily-{uuid.uuid4().hex[:12]}"
+    try:
+        async with _summ_sess() as s:
+            uids = (await s.execute(
+                _sql("SELECT DISTINCT user_id FROM bot_messages WHERE created_at >= :st AND created_at < :en"),
+                {"st": day_utc, "en": next_day}
+            )).scalars().all()
+        user_ids = [int(x) for x in uids]
+    except Exception:
+        await lock_session.close()
+        logger.exception("[summaries/daily] failed to load user_ids (admin)")
+        raise HTTPException(status_code=500, detail="uids_failed")
 
-    ok, err = 0, 0
-    for uid in uids:
-        try:
-            await make_daily(int(uid), day_utc)
-            ok += 1
-        except Exception as e:
-            print("[/api/admin/summaries/daily]", uid, "->", repr(e))
-            err += 1
-    return {"ok": True, "processed": ok, "errors": err, "day": day_utc.isoformat()}
+    DAILY_JOBS[job_id] = {
+        "status": "queued",
+        "queued_at": _utc().isoformat(),
+        "source": "admin",
+        "user_ids_count": len(user_ids),
+    }
+    asyncio.create_task(
+        _run_daily_job(
+            lock_session,
+            job_id=job_id,
+            target_day=day_utc,
+            user_id=None,
+            user_ids=user_ids,
+            batch_size=DAILY_BATCH_SIZE,
+            max_runtime_sec=DAILY_MAX_RUNTIME_SEC,
+        )
+    )
+    return {
+        "status": "queued",
+        "day": day_utc.isoformat(),
+        "job_id": job_id,
+        "users": len(user_ids),
+    }
 
 # --- WEEKLY rollup (batch) ---
 @router.post("/summaries/weekly", dependencies=[Depends(require_admin)])

@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 import os
 import inspect
+import asyncio
+import random
 
 # Универсальные модели Qdrant
 from qdrant_client.http import models as qm  # type: ignore
@@ -68,13 +70,27 @@ async def _maybe_embed(text: str) -> List[float]:
     """
     Поддержка и sync, и async embed() реализаций.
     """
-    try:
-        res = embed(text)
-        if inspect.isawaitable(res):
-            return await res  # type: ignore
-        return res  # type: ignore
-    except Exception as e:
-        raise RuntimeError(f"embeddings failed: {e}") from e
+    def _is_rate_limit_error(err: Exception) -> bool:
+        s = str(err).lower()
+        return "429" in s or "too many requests" in s or "rate limit" in s
+
+    max_retries = int(os.getenv("EMBED_RETRY_MAX", "5") or "5")
+    base = float(os.getenv("EMBED_RETRY_BASE_SEC", "1") or "1")
+    max_backoff = float(os.getenv("EMBED_RETRY_MAX_BACKOFF_SEC", "30") or "30")
+
+    for attempt in range(max_retries + 1):
+        try:
+            res = embed(text)
+            if inspect.isawaitable(res):
+                return await res  # type: ignore
+            return res  # type: ignore
+        except Exception as e:
+            if _is_rate_limit_error(e) and attempt < max_retries:
+                delay = min(max_backoff, base * (2 ** attempt)) + random.random()
+                _safe_print(f"[summaries] embed 429 retry attempt={attempt+1} delay={delay:.2f}s")
+                await asyncio.sleep(delay)
+                continue
+            raise RuntimeError(f"embeddings failed: {e}") from e
 
 
 def _call_search(
