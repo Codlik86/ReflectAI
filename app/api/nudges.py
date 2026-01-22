@@ -11,12 +11,15 @@ from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.exceptions import TelegramForbiddenError
 
+import logging
+
 from sqlalchemy import text
 from app.db.core import async_session, get_session
 from app.billing.service import check_access
 from app.services.tg_blocked import mark_user_blocked
 
 router = APIRouter(prefix="/api/admin/nudges", tags=["admin-nudges"])
+logger = logging.getLogger(__name__)
 
 def _env_clean(*names: str, default: str = "") -> str:
     for n in names:
@@ -147,7 +150,7 @@ async def _was_sent_recently(session, user_id: int, kind: str) -> bool:
     return res.scalar() is not None
 
 
-async def _log_nudge(user_id: int, tg_id: int, kind: str, payload: Dict[str, Any]) -> None:
+async def _log_nudge(user_id: int, tg_id: int, kind: str, payload: Dict[str, Any]) -> bool:
     try:
         async with async_session() as s:
             await s.execute(
@@ -158,8 +161,10 @@ async def _log_nudge(user_id: int, tg_id: int, kind: str, payload: Dict[str, Any
                 {"uid": user_id, "tg": tg_id, "kind": kind, "payload": json_dumps(payload)},
             )
             await s.commit()
+            return True
     except Exception:
-        pass
+        logger.exception("[nudges-db] insert failed kind=%s user_id=%s tg_id=%s", kind, user_id, tg_id)
+        return False
 
 
 async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | None = None) -> List[Dict[str, Any]]:
@@ -429,6 +434,9 @@ async def run_nudges(
     dry_run: int = Query(0, description="1 — только посчитать, не отправлять"),
     min_days: int | None = Query(None),
     max_days: int | None = Query(None),
+    debug: int = Query(0, description="1 — подробные логи для первых debug_limit пользователей"),
+    debug_limit: int = Query(30, description="сколько пользователей подробно логировать"),
+    max_send: int | None = Query(None, description="лимит реальных успешных отправок"),
     x_admin_secret: str = Header(default="", alias="X-Admin-Secret"),
     secret: Optional[str] = Query(default=None),
 ):
@@ -456,43 +464,164 @@ async def run_nudges(
     else:
         kinds = [run_kind]
 
+    logger.info(
+        "[nudges] start kind=%s period=%s dry_run=%s min_days=%s max_days=%s debug=%s debug_limit=%s max_send=%s",
+        kind,
+        period,
+        int(dry_run),
+        min_days,
+        max_days,
+        int(debug),
+        debug_limit,
+        max_send,
+    )
+
     # Проверим доступ и отправим
     total_sent = 0
     total_checked = 0
     results: list[dict[str, Any]] = []
+    total_counters: Dict[str, int] = {}
+    db_preflight: Dict[str, Any] = {"ok": False}
+
+    def _init_counters() -> Dict[str, int]:
+        return {
+            "targets": 0,
+            "checked": 0,
+            "skipped_already_sent": 0,
+            "skipped_blocked": 0,
+            "skipped_no_tg_id": 0,
+            "skipped_dry_run": 0,
+            "skipped_no_text": 0,
+            "skipped_max_send": 0,
+            "send_ok": 0,
+            "send_blocked": 0,
+            "send_chat_not_found": 0,
+            "send_other_error": 0,
+            "db_log_ok": 0,
+            "db_log_error": 0,
+        }
+
+    def _add_counters(dst: Dict[str, int], src: Dict[str, int]) -> None:
+        for k, v in src.items():
+            dst[k] = int(dst.get(k, 0)) + int(v)
 
     # корректно открываем и закрываем aiohttp-сессию бота
     async with Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) as bot:
         async for session in get_session():
+            try:
+                res = await session.execute(
+                    text("SELECT current_database() AS db, inet_server_addr() AS addr, now() AS now")
+                )
+                row = res.mappings().first() or {}
+                res2 = await session.execute(
+                    text("SELECT to_regclass('public.nudges') AS nudges_table")
+                )
+                row2 = res2.mappings().first() or {}
+                db_preflight = {
+                    "ok": True,
+                    "database": row.get("db"),
+                    "server_addr": row.get("addr"),
+                    "now": row.get("now"),
+                    "nudges_table": row2.get("nudges_table"),
+                }
+                logger.info(
+                    "[nudges] db_preflight ok db=%s addr=%s now=%s nudges_table=%s",
+                    db_preflight.get("database"),
+                    db_preflight.get("server_addr"),
+                    db_preflight.get("now"),
+                    db_preflight.get("nudges_table"),
+                )
+            except Exception as e:
+                db_preflight = {"ok": False, "error": repr(e)}
+                logger.exception("[nudges] db_preflight failed")
+
             for current_kind in kinds:
+                counters = _init_counters()
                 targets = await _pick_targets(current_kind, min_days=min_days, max_days=max_days)
                 sent = 0
                 checked = 0
                 nudge_kind = _normalize_kind(current_kind)
+                counters["targets"] = len(targets)
+
+                logger.info(
+                    "[nudges] kind=%s targets=%s dry_run=%s",
+                    current_kind,
+                    len(targets),
+                    int(dry_run),
+                )
+                if debug and debug_limit > 0:
+                    sample = [
+                        {"user_id": int(r.get("user_id")), "tg_id": r.get("tg_id")}
+                        for r in targets[: min(5, len(targets))]
+                    ]
+                    logger.info("[nudges] kind=%s sample_targets=%s", current_kind, sample)
 
                 for row in targets:
                     checked += 1
+                    counters["checked"] += 1
                     uid = int(row["user_id"])
-                    tg_id = int(row["tg_id"])
+                    tg_id = row.get("tg_id")
+                    if tg_id is None:
+                        counters["skipped_no_tg_id"] += 1
+                        logger.warning("[nudges] kind=%s skip no_tg_id user_id=%s", current_kind, uid)
+                        continue
+                    tg_id = int(tg_id)
+
+                    if row.get("tg_is_blocked") is True:
+                        counters["skipped_blocked"] += 1
+                        logger.info("[nudges] kind=%s skip blocked user_id=%s tg_id=%s", current_kind, uid, tg_id)
+                        continue
 
                     try:
                         if await _was_sent_recently(session, uid, nudge_kind):
+                            counters["skipped_already_sent"] += 1
+                            logger.info(
+                                "[nudges] kind=%s skip already_sent user_id=%s tg_id=%s",
+                                current_kind,
+                                uid,
+                                tg_id,
+                            )
                             continue
                     except Exception:
-                        pass
+                        logger.exception(
+                            "[nudges] kind=%s error checking sent_recently user_id=%s tg_id=%s",
+                            current_kind,
+                            uid,
+                            tg_id,
+                        )
 
                     access_ok = None
                     if current_kind in ("week", "month"):
                         try:
                             access_ok = await check_access(session, uid)
                         except Exception:
+                            logger.exception(
+                                "[nudges] kind=%s access check failed user_id=%s",
+                                current_kind,
+                                uid,
+                            )
                             access_ok = False
 
                     if dry_run:
+                        counters["skipped_dry_run"] += 1
+                        logger.info("[nudges] kind=%s skip dry_run user_id=%s tg_id=%s", current_kind, uid, tg_id)
+                        continue
+
+                    if max_send is not None and total_sent >= int(max_send):
+                        counters["skipped_max_send"] += 1
+                        logger.info(
+                            "[nudges] kind=%s skip max_send user_id=%s tg_id=%s max_send=%s",
+                            current_kind,
+                            uid,
+                            tg_id,
+                            max_send,
+                        )
                         continue
 
                     text, kb = _msg_for_kind(current_kind, has_access=access_ok)
                     if not text:
+                        counters["skipped_no_text"] += 1
+                        logger.warning("[nudges] kind=%s skip no_text user_id=%s tg_id=%s", current_kind, uid, tg_id)
                         continue
 
                     payload = {
@@ -507,28 +636,90 @@ async def run_nudges(
                         "last_at": _dt_to_iso(row.get("last_at")),
                     }
 
+                    logger.info("[nudges] kind=%s send attempt user_id=%s tg_id=%s", current_kind, uid, tg_id)
+                    if debug and debug_limit > 0 and checked <= int(debug_limit):
+                        logger.info(
+                            "[nudges] kind=%s debug payload user_id=%s tg_id=%s payload=%s",
+                            current_kind,
+                            uid,
+                            tg_id,
+                            payload,
+                        )
+
                     try:
                         if kb:
                             await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
                         else:
                             await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
                         sent += 1
-                        await _log_nudge(uid, tg_id, nudge_kind, payload)
+                        total_sent += 1
+                        counters["send_ok"] += 1
+                        logger.info("[nudges] kind=%s send ok user_id=%s tg_id=%s", current_kind, uid, tg_id)
+                        ok = await _log_nudge(uid, tg_id, nudge_kind, payload)
+                        if ok:
+                            counters["db_log_ok"] += 1
+                        else:
+                            counters["db_log_error"] += 1
                     except Exception as e:
                         if _is_bot_blocked_error(e):
-                            await mark_user_blocked(session, uid, tg_id)
-                            print(f"[tg] user blocked bot; marked blocked user_id={uid} tg_id={tg_id}")
+                            counters["send_blocked"] += 1
+                            try:
+                                await mark_user_blocked(session, uid, tg_id)
+                            except Exception:
+                                logger.exception("[nudges] mark blocked failed user_id=%s tg_id=%s", uid, tg_id)
+                            logger.warning(
+                                "[nudges] kind=%s send blocked user_id=%s tg_id=%s",
+                                current_kind,
+                                uid,
+                                tg_id,
+                            )
                             continue
+                        if "chat not found" in str(e).lower():
+                            counters["send_chat_not_found"] += 1
+                            logger.warning(
+                                "[nudges] kind=%s send chat_not_found user_id=%s tg_id=%s",
+                                current_kind,
+                                uid,
+                                tg_id,
+                            )
+                            continue
+                        counters["send_other_error"] += 1
+                        logger.exception(
+                            "[nudges] kind=%s send error user_id=%s tg_id=%s",
+                            current_kind,
+                            uid,
+                            tg_id,
+                        )
                         # не стопаем массовую рассылку — просто лог
-                        print(f"[nudges] send error for user {uid} ({tg_id}): {e}")
 
                 total_checked += checked
-                total_sent += sent
-                results.append({"kind": current_kind, "checked": checked, "sent": 0 if dry_run else sent})
+                _add_counters(total_counters, counters)
+                results.append(
+                    {
+                        "kind": current_kind,
+                        "checked": checked,
+                        "sent": 0 if dry_run else sent,
+                        "counters": counters,
+                    }
+                )
 
     if run_kind == "all":
-        return {"kind": "all", "checked": total_checked, "sent": 0 if dry_run else total_sent, "results": results}
-    return {"kind": run_kind, "checked": total_checked, "sent": 0 if dry_run else total_sent}
+        return {
+            "kind": "all",
+            "checked": total_checked,
+            "sent": 0 if dry_run else total_sent,
+            "counters": total_counters,
+            "db_preflight": db_preflight,
+            "results": results,
+        }
+    return {
+        "kind": run_kind,
+        "checked": total_checked,
+        "sent": 0 if dry_run else total_sent,
+        "counters": total_counters,
+        "db_preflight": db_preflight,
+        "results": results,
+    }
 
 
 @router.post("/send_one")
@@ -564,8 +755,12 @@ async def send_one(
                         uid = r.scalar()
                         if uid:
                             await mark_user_blocked(session, int(uid), int(tg_id))
-                            print(f"[tg] user blocked bot; marked blocked user_id={uid} tg_id={tg_id}")
+                            logger.warning(
+                                "[nudges] send_one blocked marked user_id=%s tg_id=%s",
+                                uid,
+                                tg_id,
+                            )
                 except Exception:
-                    pass
+                    logger.exception("[nudges] send_one mark blocked failed tg_id=%s", tg_id)
                 return {"ok": False, "error": "blocked"}
             return {"ok": False, "error": str(e)}
