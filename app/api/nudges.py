@@ -154,10 +154,7 @@ async def _log_nudge(user_id: int, tg_id: int, kind: str, payload: Dict[str, Any
     try:
         async with async_session() as s:
             await s.execute(
-                text("""
-                    INSERT INTO public.nudges (user_id, tg_id, kind, payload, created_at)
-                    VALUES (:uid, :tg, :kind, :payload::jsonb, CURRENT_TIMESTAMP)
-                """),
+                text(_NUDGE_INSERT_SQL),
                 {"uid": user_id, "tg": tg_id, "kind": kind, "payload": json_dumps(payload)},
             )
             await s.commit()
@@ -409,6 +406,12 @@ def _msg_for_kind(kind: str, has_access: Optional[bool] = None) -> Tuple[str, Op
 def json_dumps(obj: Dict[str, Any]) -> str:
     import json
     return json.dumps(obj, ensure_ascii=False)
+
+
+_NUDGE_INSERT_SQL = """
+    INSERT INTO public.nudges (user_id, tg_id, kind, payload, created_at)
+    VALUES (:uid, :tg, :kind, CAST(:payload AS jsonb), CURRENT_TIMESTAMP)
+"""
 
 
 def _msg_for_user(has_access: bool, period: str) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
@@ -720,6 +723,75 @@ async def run_nudges(
         "db_preflight": db_preflight,
         "results": results,
     }
+
+
+@router.post("/diag")
+async def nudges_diag(
+    x_admin_secret: str = Header(default="", alias="X-Admin-Secret"),
+    secret: Optional[str] = Query(default=None),
+):
+    _check_admin_secret(x_admin_secret, secret)
+    out: Dict[str, Any] = {"ok": False, "preflight": None, "insert_ok": False}
+
+    async with async_session() as s:
+        try:
+            res = await s.execute(
+                text("SELECT current_database() AS db, inet_server_addr() AS addr, now() AS now")
+            )
+            row = res.mappings().first() or {}
+            res2 = await s.execute(
+                text("SELECT to_regclass('public.nudges') AS nudges_table")
+            )
+            row2 = res2.mappings().first() or {}
+            out["preflight"] = {
+                "database": row.get("db"),
+                "server_addr": row.get("addr"),
+                "now": row.get("now"),
+                "nudges_table": row2.get("nudges_table"),
+            }
+            logger.info(
+                "[nudges] diag preflight db=%s addr=%s now=%s nudges_table=%s",
+                out["preflight"].get("database"),
+                out["preflight"].get("server_addr"),
+                out["preflight"].get("now"),
+                out["preflight"].get("nudges_table"),
+            )
+        except Exception:
+            logger.exception("[nudges] diag preflight failed")
+            return out
+
+        try:
+            rowu = await s.execute(
+                text("SELECT id, tg_id FROM public.users ORDER BY id ASC LIMIT 1")
+            )
+            user_row = rowu.mappings().first()
+            if not user_row:
+                out["ok"] = True
+                out["insert_ok"] = False
+                out["insert_error"] = "no users found"
+                return out
+
+            uid = int(user_row["id"])
+            tg_id = int(user_row["tg_id"])
+            payload = json_dumps({"diag": True})
+
+            await s.execute(
+                text(_NUDGE_INSERT_SQL),
+                {"uid": uid, "tg": tg_id, "kind": "diag", "payload": payload},
+            )
+            await s.rollback()
+            out["insert_ok"] = True
+        except Exception as e:
+            out["insert_ok"] = False
+            out["insert_error"] = repr(e)
+            logger.exception("[nudges] diag insert failed")
+            try:
+                await s.rollback()
+            except Exception:
+                logger.exception("[nudges] diag rollback failed")
+
+    out["ok"] = True
+    return out
 
 
 @router.post("/send_one")
