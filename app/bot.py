@@ -6,6 +6,7 @@ import hashlib
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
+import logging
 
 from aiogram import Router, F, BaseMiddleware
 from aiogram.filters import Command, CommandStart
@@ -73,12 +74,14 @@ from app.intents import is_subscription_intent
 from app.texts_pay import get_pay_help_text
 from app.services.access_state import get_access_state
 from app.billing.prices import plan_price_int, plan_price_stars, PLAN_PRICES_INT
+from app.services.short_reply import is_short_reply, normalize_short_reply
 
 from zoneinfo import ZoneInfo
 from collections import deque
 import re
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 # ===== Админы =====
 def _parse_admin_ids(raw: str) -> set[int]:
@@ -752,7 +755,8 @@ def _env_float(name: str, default: float) -> float:
     except Exception:
         return float(default)
 
-TALK_DEBOUNCE_SEC = _env_float("TALK_DEBOUNCE_SEC", 2.5)
+TALK_DEBOUNCE_SEC = _env_float("TALK_DEBOUNCE_SEC", 0.9)
+TALK_DEBOUNCE_SHORT_SEC = _env_float("TALK_DEBOUNCE_SHORT_SEC", 1.1)
 TALK_DEBOUNCE_MAX_WAIT_SEC = _env_float("TALK_DEBOUNCE_MAX_WAIT_SEC", 12.0)
 TALK_TYPING_INTERVAL_SEC = 2.0
 SOFT_QUESTIONS_IN_TALK = os.getenv("SOFT_QUESTIONS_IN_TALK", "1") == "1"
@@ -764,6 +768,13 @@ def _debounce_stats(texts: List[str]) -> tuple[int, int]:
     parts = len(texts)
     chars = sum(len(t or "") for t in texts)
     return parts, chars
+
+def _text_hint(text: str, limit: int = 40) -> str:
+    t = (text or "").replace("\n", " ").replace("\r", " ").strip()
+    if len(t) > limit:
+        t = t[:limit] + "…"
+    h = hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:8]
+    return f"{t}#{h}"
 
 async def _typing_loop(bot, chat_id: int) -> None:
     try:
@@ -817,27 +828,25 @@ async def _enqueue_talk_message(m: Message, text: str, *, handler=None) -> None:
         buf["flush_handler"] = handler
 
     parts, chars = _debounce_stats(buf["texts"])
-    try:
-        print(f"[debounce] enqueue parts={parts} chars={chars}")
-    except Exception:
-        pass
+    logger.debug("[debounce] enqueue parts=%s chars=%s", parts, chars)
 
     elapsed = now - float(buf.get("started_at") or now)
     if elapsed >= TALK_DEBOUNCE_MAX_WAIT_SEC:
-        try:
-            print(f"[debounce] max_wait reached parts={parts} chars={chars}")
-        except Exception:
-            pass
+        logger.info("[debounce] max_wait reached parts=%s chars=%s", parts, chars)
         task = buf.get("timer_task")
         if task and not task.done():
             task.cancel()
         await _flush_talk_buffer(tg_id, reason="max_wait")
         return
 
+    delay = TALK_DEBOUNCE_SEC
+    if is_short_reply(text):
+        delay = max(delay, TALK_DEBOUNCE_SHORT_SEC)
+
     task = buf.get("timer_task")
     if task and not task.done():
         task.cancel()
-    buf["timer_task"] = asyncio.create_task(_debounce_wait_and_flush(tg_id, TALK_DEBOUNCE_SEC))
+    buf["timer_task"] = asyncio.create_task(_debounce_wait_and_flush(tg_id, delay))
 
 async def _flush_talk_buffer(key: int, *, reason: str = "manual", handler=None) -> None:
     buf = TALK_DEBOUNCE_BUFFER.get(key)
@@ -860,12 +869,15 @@ async def _flush_talk_buffer(key: int, *, reason: str = "manual", handler=None) 
         return
 
     parts, chars = _debounce_stats(texts)
-    try:
-        print(f"[debounce] flush reason={reason} parts={parts} chars={chars}")
-    except Exception:
-        pass
-
     combined = "\n".join(texts)
+    logger.info(
+        "[debounce] merge reason=%s parts=%s final_len=%s hint=%s",
+        reason,
+        parts,
+        len(combined),
+        _text_hint(combined),
+    )
+
     try:
         if buffer_handler is not None:
             await buffer_handler(message, combined)
@@ -1734,14 +1746,45 @@ async def _answer_with_llm(m: Message, user_text: str):
     if sum_block:
         messages.append({"role": "system", "content": sum_block})
     messages += history_msgs
-    messages.append({"role": "user", "content": user_text})
+
+    last_bot_turn: Optional[str] = None
+    try:
+        for hm in reversed(history_msgs):
+            if hm.get("role") == "assistant" and hm.get("content"):
+                last_bot_turn = hm.get("content")
+                break
+    except Exception:
+        last_bot_turn = None
+
+    user_text_for_llm = user_text
+    short_flag = is_short_reply(user_text)
+    if short_flag:
+        words = [w for w in (user_text or "").strip().split() if w]
+        logger.info(
+            "[short-reply] detected user_id=%s len=%s words=%s hint=%s",
+            getattr(m.from_user, "id", None),
+            len(user_text or ""),
+            len(words),
+            _text_hint(user_text),
+        )
+        user_text_for_llm = normalize_short_reply(user_text, last_bot_turn)
+    else:
+        logger.debug(
+            "[short-reply] detected user_id=%s len=%s words=%s hint=%s",
+            getattr(m.from_user, "id", None),
+            len(user_text or ""),
+            len((user_text or "").split()),
+            _text_hint(user_text),
+        )
+
+    messages.append({"role": "user", "content": user_text_for_llm})
 
     if chat_with_style is None:
         await send_and_log(m, "Я тебя слышу. Сейчас подключаюсь…", reply_markup=kb_main_menu())
         return
 
     salt = getattr(m, "message_id", None) or getattr(m, "date", None) or ""
-    seed = f"{user_text}|{turn_idx}|{salt}"
+    seed = f"{user_text_for_llm}|{turn_idx}|{salt}"
     temp = 0.66 + (abs(hash(seed)) % 17) / 100.0  # 0.66–0.82
     LLM_MAX_TOKENS = 480
     trace_info: Dict[str, Any] = {"route": "talk", "mode": mode, "user_id": m.from_user.id}
@@ -1824,7 +1867,7 @@ async def _answer_with_llm(m: Message, user_text: str):
                 if sum_block:
                     messages_r.append({"role": "system", "content": sum_block})
                 messages_r += history_msgs
-                messages_r.append({"role": "user", "content": user_text})
+                messages_r.append({"role": "user", "content": user_text_for_llm})
                 try:
                     reply_r = await chat_with_style(messages=messages_r, temperature=temp, max_completion_tokens=LLM_MAX_TOKENS)
                 except TypeError:
