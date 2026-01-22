@@ -48,6 +48,10 @@ class User(Base):
     # быстрый флаг подписки
     subscription_status: Mapped[str | None] = mapped_column(String(16))
 
+    # Telegram блокировка бота
+    tg_is_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    tg_blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -3,6 +3,7 @@ import os, asyncio
 from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import text
 
@@ -22,6 +23,11 @@ MESSAGE = (
     "Спасибо, что остаёшься ❤️"
 )
 
+def _is_bot_blocked_error(err: Exception) -> bool:
+    if not isinstance(err, TelegramForbiddenError):
+        return False
+    return "bot was blocked by the user" in str(err).lower()
+
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is empty")
@@ -34,12 +40,39 @@ async def main():
     Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
     async with Session() as session:
-        rows = (await session.execute(text("SELECT tg_id FROM users WHERE tg_id IS NOT NULL"))).all()
-        ids = [r[0] for r in rows]
+        rows = (
+            await session.execute(
+                text("SELECT id, tg_id FROM users WHERE tg_id IS NOT NULL AND tg_is_blocked IS NOT TRUE")
+            )
+        ).all()
+        user_id_by_tg = {int(r[1]): int(r[0]) for r in rows}
+        ids = [r[1] for r in rows]
 
     print(f"Sending to {len(ids)} users...")
     import asyncio
     sem = asyncio.Semaphore(25)
+
+    async def mark_blocked(tg_id: int) -> None:
+        uid = user_id_by_tg.get(int(tg_id))
+        if not uid:
+            return
+        try:
+            async with Session() as s:
+                await s.execute(
+                    text(
+                        """
+                        UPDATE users
+                        SET tg_is_blocked = TRUE,
+                            tg_blocked_at = NOW()
+                        WHERE id = :uid AND tg_id = :tg
+                        """
+                    ),
+                    {"uid": int(uid), "tg": int(tg_id)},
+                )
+                await s.commit()
+            print(f"[tg] user blocked bot; marked blocked user_id={uid} tg_id={tg_id}")
+        except Exception:
+            pass
 
     async def send_safe(chat_id: int):
         async with sem:
@@ -48,6 +81,9 @@ async def main():
                     await bot.send_message(chat_id, MESSAGE, disable_web_page_preview=True)
                     return
                 except Exception as e:
+                    if _is_bot_blocked_error(e):
+                        await mark_blocked(int(chat_id))
+                        return
                     try:
                         from aiogram.exceptions import TelegramRetryAfter
                         if isinstance(e, TelegramRetryAfter):

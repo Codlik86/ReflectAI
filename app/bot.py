@@ -68,6 +68,7 @@ from app.billing.service import (
     apply_success_payment,
 )
 from app.services.access_state import TRIAL_DAYS, get_access_state
+from app.services.tg_blocked import mark_user_unblocked
 from app.intents import is_subscription_intent
 from app.texts_pay import get_pay_help_text
 from app.services.access_state import get_access_state
@@ -2324,6 +2325,16 @@ class GateMiddleware(BaseMiddleware):
             tg_id = getattr(getattr(event, "from_user", None), "id", None)
             if not tg_id:
                 return await handler(event, data)
+
+            try:
+                async with async_session() as session:
+                    from app.db.models import User
+                    u = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
+                    if u and getattr(u, "tg_is_blocked", False):
+                        await mark_user_unblocked(session, int(u.id))
+                        print(f"[tg] user active again; marked unblocked user_id={u.id} tg_id={tg_id}")
+            except Exception:
+                pass
             
             # успешные платежи не блокируем, даём им пройти к хендлеру
             if isinstance(event, Message) and getattr(event, "successful_payment", None):

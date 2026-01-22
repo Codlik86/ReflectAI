@@ -9,10 +9,12 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.exceptions import TelegramForbiddenError
 
 from sqlalchemy import text
 from app.db.core import async_session, get_session
 from app.billing.service import check_access
+from app.services.tg_blocked import mark_user_blocked
 
 router = APIRouter(prefix="/api/admin/nudges", tags=["admin-nudges"])
 
@@ -102,6 +104,13 @@ def _normalize_kind(kind: str) -> str:
     if kind in ("week", "month"):
         return f"nudge_{kind}"
     return kind
+
+
+def _is_bot_blocked_error(err: Exception) -> bool:
+    if not isinstance(err, TelegramForbiddenError):
+        return False
+    msg = str(err).lower()
+    return "bot was blocked by the user" in msg
 
 
 def _dt_to_iso(val: Any) -> Optional[str]:
@@ -200,6 +209,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LEFT JOIN last_msg l ON l.user_id = u.id
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE s.user_id IS NULL
+          AND u.tg_is_blocked IS NOT TRUE
           AND COALESCE(l.last_at, u.created_at) IS NOT NULL
           AND {cond}
         ORDER BY COALESCE(l.last_at, u.created_at) DESC NULLS LAST
@@ -241,6 +251,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
             LEFT JOIN sent s ON s.user_id = u.id
             WHERE u.policy_accepted_at IS NULL
               AND u.tg_id IS NOT NULL
+              AND u.tg_is_blocked IS NOT TRUE
               AND s.user_id IS NULL
               AND COALESCE(a.ad_start_at, u.created_at) IS NOT NULL
         )
@@ -276,6 +287,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE u.policy_accepted_at IS NOT NULL
           AND u.tg_id IS NOT NULL
+          AND u.tg_is_blocked IS NOT TRUE
           AND s.user_id IS NULL
           AND {cond}
           AND NOT EXISTS (
@@ -305,6 +317,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         WHERE u.trial_started_at IS NOT NULL
           AND u.trial_expires_at IS NOT NULL
           AND u.tg_id IS NOT NULL
+          AND u.tg_is_blocked IS NOT TRUE
           AND s.user_id IS NULL
           AND u.trial_expires_at > NOW() + INTERVAL '2 days'
           AND u.trial_expires_at <= NOW() + INTERVAL '3 days'
@@ -334,6 +347,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE u.trial_expires_at IS NOT NULL
           AND u.tg_id IS NOT NULL
+          AND u.tg_is_blocked IS NOT TRUE
           AND s.user_id IS NULL
           AND u.trial_expires_at <= NOW() - INTERVAL '3 days'
           AND u.trial_expires_at > NOW() - INTERVAL '4 days'
@@ -356,6 +370,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LEFT JOIN sent s ON s.user_id = u.id
         WHERE u.trial_expires_at IS NOT NULL
           AND u.tg_id IS NOT NULL
+          AND u.tg_is_blocked IS NOT TRUE
           AND s.user_id IS NULL
           AND u.trial_expires_at <= NOW() - INTERVAL '12 days'
           AND u.trial_expires_at > NOW() - INTERVAL '13 days'
@@ -500,6 +515,10 @@ async def run_nudges(
                         sent += 1
                         await _log_nudge(uid, tg_id, nudge_kind, payload)
                     except Exception as e:
+                        if _is_bot_blocked_error(e):
+                            await mark_user_blocked(session, uid, tg_id)
+                            print(f"[tg] user blocked bot; marked blocked user_id={uid} tg_id={tg_id}")
+                            continue
                         # не стопаем массовую рассылку — просто лог
                         print(f"[nudges] send error for user {uid} ({tg_id}): {e}")
 
@@ -535,4 +554,18 @@ async def send_one(
                 await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
             return {"ok": True}
         except Exception as e:
+            if _is_bot_blocked_error(e):
+                try:
+                    async with async_session() as session:
+                        r = await session.execute(
+                            text("SELECT id FROM public.users WHERE tg_id = :tg"),
+                            {"tg": int(tg_id)},
+                        )
+                        uid = r.scalar()
+                        if uid:
+                            await mark_user_blocked(session, int(uid), int(tg_id))
+                            print(f"[tg] user blocked bot; marked blocked user_id={uid} tg_id={tg_id}")
+                except Exception:
+                    pass
+                return {"ok": False, "error": "blocked"}
             return {"ok": False, "error": str(e)}
