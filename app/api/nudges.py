@@ -13,7 +13,7 @@ from aiogram.exceptions import TelegramForbiddenError
 
 import logging
 
-from sqlalchemy import text
+from sqlalchemy import text as sa_text
 from app.db.core import async_session, get_session
 from app.billing.service import check_access
 from app.services.tg_blocked import mark_user_blocked
@@ -137,7 +137,7 @@ def _check_admin_secret(x_admin_secret: str, secret: Optional[str]) -> None:
 
 async def _was_sent_recently(session, user_id: int, kind: str) -> bool:
     res = await session.execute(
-        text("""
+        sa_text("""
             SELECT 1
             FROM public.nudges
             WHERE user_id = :uid
@@ -154,7 +154,7 @@ async def _log_nudge(user_id: int, tg_id: int, kind: str, payload: Dict[str, Any
     try:
         async with async_session() as s:
             await s.execute(
-                text(_NUDGE_INSERT_SQL),
+                sa_text(_NUDGE_INSERT_SQL),
                 {"uid": user_id, "tg": tg_id, "kind": kind, "payload": json_dumps(payload)},
             )
             await s.commit()
@@ -218,7 +218,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LIMIT 2000
         """
         async with async_session() as s:
-            rows = (await s.execute(text(sql), {"kind": dedupe_kind})).mappings().all()
+            rows = (await s.execute(sa_text(sql), {"kind": dedupe_kind})).mappings().all()
         return [dict(r) for r in rows]
 
     if kind in ("onb_12h", "onb_48h"):
@@ -262,7 +262,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LIMIT 2000
         """
         async with async_session() as s:
-            rows = (await s.execute(text(sql), {"kind": dedupe_kind})).mappings().all()
+            rows = (await s.execute(sa_text(sql), {"kind": dedupe_kind})).mappings().all()
         return [dict(r) for r in rows]
 
     if kind in ("dormant_12h", "dormant_48h"):
@@ -302,7 +302,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LIMIT 2000
         """
         async with async_session() as s:
-            rows = (await s.execute(text(sql), {"kind": dedupe_kind})).mappings().all()
+            rows = (await s.execute(sa_text(sql), {"kind": dedupe_kind})).mappings().all()
         return [dict(r) for r in rows]
 
     if kind == "trial_3days_left_inactive":
@@ -333,7 +333,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LIMIT 2000
         """
         async with async_session() as s:
-            rows = (await s.execute(text(sql), {"kind": dedupe_kind})).mappings().all()
+            rows = (await s.execute(sa_text(sql), {"kind": dedupe_kind})).mappings().all()
         return [dict(r) for r in rows]
 
     if kind == "trial_expired_3d":
@@ -356,7 +356,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LIMIT 2000
         """
         async with async_session() as s:
-            rows = (await s.execute(text(sql), {"kind": dedupe_kind})).mappings().all()
+            rows = (await s.execute(sa_text(sql), {"kind": dedupe_kind})).mappings().all()
         return [dict(r) for r in rows]
 
     if kind == "trial_expired_12d":
@@ -379,7 +379,7 @@ async def _pick_targets(kind: str, min_days: int | None = None, max_days: int | 
         LIMIT 2000
         """
         async with async_session() as s:
-            rows = (await s.execute(text(sql), {"kind": dedupe_kind})).mappings().all()
+            rows = (await s.execute(sa_text(sql), {"kind": dedupe_kind})).mappings().all()
         return [dict(r) for r in rows]
 
     return []
@@ -513,11 +513,11 @@ async def run_nudges(
         async for session in get_session():
             try:
                 res = await session.execute(
-                    text("SELECT current_database() AS db, inet_server_addr() AS addr, now() AS now")
+                    sa_text("SELECT current_database() AS db, inet_server_addr() AS addr, now() AS now")
                 )
                 row = res.mappings().first() or {}
                 res2 = await session.execute(
-                    text("SELECT to_regclass('public.nudges') AS nudges_table")
+                    sa_text("SELECT to_regclass('public.nudges') AS nudges_table")
                 )
                 row2 = res2.mappings().first() or {}
                 db_preflight = {
@@ -621,8 +621,8 @@ async def run_nudges(
                         )
                         continue
 
-                    text, kb = _msg_for_kind(current_kind, has_access=access_ok)
-                    if not text:
+                    nudge_text, kb = _msg_for_kind(current_kind, has_access=access_ok)
+                    if not nudge_text:
                         counters["skipped_no_text"] += 1
                         logger.warning("[nudges] kind=%s skip no_text user_id=%s tg_id=%s", current_kind, uid, tg_id)
                         continue
@@ -651,9 +651,9 @@ async def run_nudges(
 
                     try:
                         if kb:
-                            await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+                            await bot.send_message(chat_id=tg_id, text=nudge_text, reply_markup=kb, disable_web_page_preview=True)
                         else:
-                            await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
+                            await bot.send_message(chat_id=tg_id, text=nudge_text, disable_web_page_preview=True)
                         sent += 1
                         total_sent += 1
                         counters["send_ok"] += 1
@@ -736,11 +736,11 @@ async def nudges_diag(
     async with async_session() as s:
         try:
             res = await s.execute(
-                text("SELECT current_database() AS db, inet_server_addr() AS addr, now() AS now")
+                sa_text("SELECT current_database() AS db, inet_server_addr() AS addr, now() AS now")
             )
             row = res.mappings().first() or {}
             res2 = await s.execute(
-                text("SELECT to_regclass('public.nudges') AS nudges_table")
+                sa_text("SELECT to_regclass('public.nudges') AS nudges_table")
             )
             row2 = res2.mappings().first() or {}
             out["preflight"] = {
@@ -762,7 +762,7 @@ async def nudges_diag(
 
         try:
             rowu = await s.execute(
-                text("SELECT id, tg_id FROM public.users ORDER BY id ASC LIMIT 1")
+                sa_text("SELECT id, tg_id FROM public.users ORDER BY id ASC LIMIT 1")
             )
             user_row = rowu.mappings().first()
             if not user_row:
@@ -776,7 +776,7 @@ async def nudges_diag(
             payload = json_dumps({"diag": True})
 
             await s.execute(
-                text(_NUDGE_INSERT_SQL),
+                sa_text(_NUDGE_INSERT_SQL),
                 {"uid": uid, "tg": tg_id, "kind": "diag", "payload": payload},
             )
             await s.rollback()
@@ -806,22 +806,22 @@ async def send_one(
     if not BOT_TOKEN:
         raise HTTPException(status_code=500, detail="TELEGRAM_BOT_TOKEN is missing")
 
-    text, kb = _msg_for_user(bool(has_access), "week" if kind == "week" else "month")
+    nudge_text, kb = _msg_for_user(bool(has_access), "week" if kind == "week" else "month")
 
     # тут тоже контекстный менеджер — чтобы не оставалась открытая сессия
     async with Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) as bot:
         try:
             if kb:
-                await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb, disable_web_page_preview=True)
+                await bot.send_message(chat_id=tg_id, text=nudge_text, reply_markup=kb, disable_web_page_preview=True)
             else:
-                await bot.send_message(chat_id=tg_id, text=text, disable_web_page_preview=True)
+                await bot.send_message(chat_id=tg_id, text=nudge_text, disable_web_page_preview=True)
             return {"ok": True}
         except Exception as e:
             if _is_bot_blocked_error(e):
                 try:
                     async with async_session() as session:
                         r = await session.execute(
-                            text("SELECT id FROM public.users WHERE tg_id = :tg"),
+                            sa_text("SELECT id FROM public.users WHERE tg_id = :tg"),
                             {"tg": int(tg_id)},
                         )
                         uid = r.scalar()
