@@ -113,7 +113,10 @@ def _is_bot_blocked_error(err: Exception) -> bool:
     if not isinstance(err, TelegramForbiddenError):
         return False
     msg = str(err).lower()
-    return "bot was blocked by the user" in msg
+    return (
+        "bot was blocked by the user" in msg
+        or "user is deactivated" in msg
+    )
 
 
 def _dt_to_iso(val: Any) -> Optional[str]:
