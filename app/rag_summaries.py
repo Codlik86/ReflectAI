@@ -10,12 +10,17 @@ import random
 # Универсальные модели Qdrant
 from qdrant_client.http import models as qm  # type: ignore
 
-from app.qdrant_client import get_client, detect_vector_name, QDRANT_VECTOR_NAME, qdrant_query, normalize_points
+from app.qdrant_client import (
+    get_client,
+    detect_vector_name,
+    qdrant_query,
+    normalize_points,
+    ensure_summaries_collection,
+)
 from app.rag_qdrant import embed  # тот же эмбеддер, что в основном RAG
 
 # === Конфиги ===
 SUMMARIES_COLLECTION = os.getenv("QDRANT_SUMMARIES_COLLECTION", "dialog_summaries_v1")
-_EMBED_DIM = int(os.getenv("QDRANT_EMBED_DIM", "1536"))
 
 def _safe_print(*args: Any) -> None:
     try:
@@ -26,41 +31,11 @@ def _safe_print(*args: Any) -> None:
 
 def _ensure_collection() -> None:
     """
-    Создаёт коллекцию, если её ещё нет.
-    Пытаемся сначала single-vector (VectorParams), при ошибке — named-vectors с именем из env/дефолт.
+    Гарантирует коллекцию саммарей и нужные payload indexes.
     """
-    client = get_client()
-    try:
-        client.get_collection(SUMMARIES_COLLECTION)
-        return  # уже есть
-    except Exception:
-        pass
-
-    vec_name = QDRANT_VECTOR_NAME or "default"
-
-    # Попытка single-vector
-    try:
-        client.recreate_collection(
-            collection_name=SUMMARIES_COLLECTION,
-            vectors_config=qm.VectorParams(size=_EMBED_DIM, distance=qm.Distance.COSINE),
-            optimizers_config=qm.OptimizersConfigDiff(default_segment_number=2),
-        )
-        _safe_print(f"[summaries] created collection '{SUMMARIES_COLLECTION}' (single-vector)")
+    if ensure_summaries_collection():
         return
-    except Exception as e:
-        _safe_print(f"[summaries] single-vector create failed, try named: {e!r}")
-
-    # Фолбэк: named-vectors
-    try:
-        client.recreate_collection(
-            collection_name=SUMMARIES_COLLECTION,
-            vectors_config={vec_name: qm.VectorParams(size=_EMBED_DIM, distance=qm.Distance.COSINE)},  # type: ignore
-            optimizers_config=qm.OptimizersConfigDiff(default_segment_number=2),
-        )
-        _safe_print(f"[summaries] created collection '{SUMMARIES_COLLECTION}' (named-vector '{vec_name}')")
-    except Exception as e:
-        # Пусть ошибка уйдёт наверх — так её будет видно в логе крона
-        raise RuntimeError(f"Failed to create summaries collection '{SUMMARIES_COLLECTION}': {e}") from e
+    raise RuntimeError(f"Failed to ensure summaries collection '{SUMMARIES_COLLECTION}'")
 
 
 _LOGGED_SUMMARY_ONCE = False

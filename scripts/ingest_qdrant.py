@@ -17,15 +17,22 @@ if str(_ROOT) not in sys.path:
 
 load_dotenv()
 
+from app.qdrant_client import normalize_lang_code
+from app.llm_adapter import build_llm_headers, get_router_api_key, get_router_base_url, resolve_model_name
+
 # ---------- Qdrant / Embeddings config ----------
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "reflectai_corpus_v2")  # согласовано с рантаймом
 
-OPENAI_BASE = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-# принимаем EMBED_MODEL (как в рантайме), либо старое имя OPENAI_EMBED_MODEL
-EMBED_MODEL = os.getenv("EMBED_MODEL") or os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+OPENROUTER_BASE = get_router_base_url()
+OPENROUTER_KEY = get_router_api_key()
+# принимаем EMBED_MODEL из рантайма, плюс старые алиасы для совместимости
+EMBED_MODEL = resolve_model_name(
+    os.getenv("EMBED_MODEL")
+    or os.getenv("OPENROUTER_EMBED_MODEL")
+    or "openai/text-embedding-3-small"
+)
 
 # ---------- Chunking / batching ----------
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 1200))          # рекомендовано 900–1200
@@ -141,12 +148,12 @@ except Exception:
 
 async def _openai_embed_many(texts: List[str]) -> List[List[float]]:
     """
-    Fallback-эмбеддер через OpenAI /embeddings с экспоненциальными ретраями.
+    Fallback-эмбеддер через прямой OpenRouter /embeddings с экспоненциальными ретраями.
     """
-    if not OPENAI_KEY:
-        raise RuntimeError("OPENAI_API_KEY is missing and runtime embedder is unavailable")
+    if not OPENROUTER_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY is missing and runtime embedder is unavailable")
 
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}"}
+    headers = build_llm_headers(OPENROUTER_KEY)
     payload = {"model": EMBED_MODEL, "input": texts}
 
     backoff = 1.0
@@ -154,7 +161,7 @@ async def _openai_embed_many(texts: List[str]) -> List[List[float]]:
     for attempt in range(6):
         try:
             async with httpx.AsyncClient(timeout=120) as client:
-                r = await client.post(f"{OPENAI_BASE.rstrip('/')}/embeddings", json=payload, headers=headers)
+                r = await client.post(f"{OPENROUTER_BASE.rstrip('/')}/embeddings", json=payload, headers=headers)
                 r.raise_for_status()
                 data = r.json()
                 return [item["embedding"] for item in data["data"]]
@@ -167,7 +174,7 @@ async def _openai_embed_many(texts: List[str]) -> List[List[float]]:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2.0, 15.0)
 
-    raise RuntimeError(f"OpenAI embeddings failed after retries: {last_err}")
+    raise RuntimeError(f"OpenRouter embeddings failed after retries: {last_err}")
 
 async def embed_many(texts: List[str]) -> List[List[float]]:
     if _RUNTIME_EMBED is not None:
@@ -196,7 +203,7 @@ def iter_corpus() -> Iterable[Dict[str, Any]]:
         meta, body = parse_front_matter(raw)
         source = meta.get("source") or path
         title = meta.get("title") or os.path.basename(path)
-        lang = meta.get("lang") or "ru"
+        lang = normalize_lang_code(meta.get("lang")) or "ru"
         raw_tags = []
         if meta.get("tags"):
             raw_tags = [t.strip() for t in re.split(r"[;,]", meta["tags"]) if t.strip()]
@@ -234,7 +241,7 @@ def iter_corpus() -> Iterable[Dict[str, Any]]:
             source = raw.get("source") or raw.get("url") or raw.get("path") or raw.get("file") or "embeddings_index.json"
 
             # Вставляем дефолты, если метаданных нет
-            lang = raw.get("lang") or "ru"
+            lang = normalize_lang_code(raw.get("lang")) or "ru"
             tags = expand_tags_bilingual([t for t in (raw.get("tags") or [])]) if isinstance(raw.get("tags"), list) else []
 
             if isinstance(vec, list) and isinstance(text, str) and text.strip():

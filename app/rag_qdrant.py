@@ -8,8 +8,15 @@ RAG via Qdrant: тихое подмешивание контекста.
 """
 from __future__ import annotations
 
-import os, math, asyncio
+import os, math, asyncio, logging
 from typing import Any, Dict, List, Optional, Tuple
+
+from app.llm_adapter import (
+    get_router_api_key,
+    get_router_base_url,
+    get_openrouter_headers,
+    resolve_model_name,
+)
 
 # --- Конфиг из окружения
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -17,9 +24,9 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "reflectai_corpus_v2")
 
 EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "openai").lower()  # openai | sbert
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")  # поддержка прокси
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+OPENROUTER_BASE_URL = get_router_base_url()
+OPENROUTER_API_KEY = get_router_api_key()
+EMBED_MODEL = resolve_model_name(os.getenv("EMBED_MODEL", "openai/text-embedding-3-small"))
 SBERT_MODEL = os.getenv("SBERT_MODEL", "intfloat/multilingual-e5-small")
 
 RAG_COMPRESS = os.getenv("RAG_COMPRESS", "0") == "1"
@@ -29,11 +36,25 @@ RAG_TRACE = os.getenv("RAG_TRACE", "0") == "1"
 
 # --- Qdrant client (локальный грузовичок)
 try:
-    from app.qdrant_client import get_client, detect_vector_name, qdrant_query, normalize_points  # type: ignore
+    from app.qdrant_client import (  # type: ignore
+        get_client,
+        detect_vector_name,
+        qdrant_query,
+        normalize_points,
+        ensure_collection,
+        normalize_lang_code,
+    )
 except Exception:
     from qdrant_client import QdrantClient  # type: ignore
     def get_client() -> "QdrantClient":  # type: ignore
         return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)  # type: ignore
+    def ensure_collection() -> bool:  # type: ignore
+        return True
+    def normalize_lang_code(value: Optional[str]) -> Optional[str]:  # type: ignore
+        return value
+
+logger = logging.getLogger(__name__)
+_LANG_FILTER_WARNING_LOGGED = False
 
 # --- Embeddings
 def _get_embedder():
@@ -46,9 +67,9 @@ def _get_embedder():
 
     provider = (os.getenv("EMBED_PROVIDER", "openai|sbert") or "").lower()
 
-    # 1) OpenAI путь — используем, если провайдер включает 'openai' и ключ задан
-    if "openai" in provider and (os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY".lower())):
-        from .llm_adapter import embed_texts as _openai_embed  # функция, которая зовет text-embedding-3-small
+    # 1) OpenAI-compatible путь через прямой OpenRouter
+    if "openai" in provider and get_router_api_key():
+        from .llm_adapter import embed_texts as _openai_embed
         return _openai_embed
 
     # 2) SBERT — только если явно разрешён
@@ -69,7 +90,8 @@ def _get_embedder():
             pass
 
     raise RuntimeError(
-        "No embedding provider available. Укажи EMBED_PROVIDER=openai (и OPENAI_API_KEY/OPENAI_BASE_URL) "
+        "No embedding provider available. Укажи EMBED_PROVIDER=openai "
+        "(и OPENROUTER_API_KEY/OPENROUTER_BASE_URL) "
         "или установи sentence-transformers и EMBED_PROVIDER=sbert."
     )
 
@@ -117,6 +139,45 @@ async def _qdrant_search_async(client, *, vector, limit, flt=None, with_payload=
         vector_name=vector_name,
     )
 
+
+def _lang_filter_values(lang: Optional[str]) -> List[str]:
+    raw = (lang or "").strip()
+    if not raw:
+        return []
+    values: List[str] = []
+    normalized = normalize_lang_code(raw)
+    for item in (normalized, raw.lower()):
+        if item and item not in values:
+            values.append(item)
+    return values
+
+
+def _build_lang_filter(qm, lang: Optional[str]):
+    values = _lang_filter_values(lang)
+    if not values:
+        return None, None
+    if len(values) == 1:
+        match = qm.MatchValue(value=values[0])
+    else:
+        try:
+            match = qm.MatchAny(any=values)
+        except Exception:
+            match = qm.MatchValue(value=values[0])
+    return qm.Filter(must=[qm.FieldCondition(key="lang", match=match)]), values[0]
+
+
+def _log_lang_filter_fallback(err: Exception, *, requested_lang: Optional[str]) -> None:
+    global _LANG_FILTER_WARNING_LOGGED
+    if _LANG_FILTER_WARNING_LOGGED:
+        return
+    _LANG_FILTER_WARNING_LOGGED = True
+    logger.warning(
+        "[rag] lang filter fallback collection=%s requested_lang=%s error=%r",
+        QDRANT_COLLECTION,
+        requested_lang,
+        err,
+    )
+
 # --- MMR контекст
 async def build_context_mmr(
     query: str,
@@ -141,22 +202,41 @@ async def build_context_mmr(
     qvec = await embed(query)
     _, vec_name = detect_vector_name(client, QDRANT_COLLECTION)
 
-    qfilter = None
-    if lang:
-        qfilter = qm.Filter(must=[qm.FieldCondition(key="lang", match=qm.MatchValue(value=lang))])  # type: ignore
+    qfilter, normalized_lang = _build_lang_filter(qm, lang)
 
     # допускаем старый search (он проще), но можно заменить на query_points
-    try:
-        hits = await _qdrant_search_async(
-            client,
-            vector=qvec,  # type: ignore[arg-type]
-            limit=initial_limit,
-            with_payload=True,
-            flt=qfilter,
-            vector_name=vec_name,
-        )
-    except Exception:
-        # если что — без фильтра (на случай отсутствия индекса по lang)
+    if qfilter is not None:
+        try:
+            hits = await _qdrant_search_async(
+                client,
+                vector=qvec,  # type: ignore[arg-type]
+                limit=initial_limit,
+                with_payload=True,
+                flt=qfilter,
+                vector_name=vec_name,
+            )
+        except Exception as e:
+            _log_lang_filter_fallback(e, requested_lang=normalized_lang)
+            # Пробуем самовосстановить индекс через bootstrap, затем мягко деградируем в unfiltered retrieval.
+            try:
+                ensure_collection()
+                hits = await _qdrant_search_async(
+                    client,
+                    vector=qvec,  # type: ignore[arg-type]
+                    limit=initial_limit,
+                    with_payload=True,
+                    flt=qfilter,
+                    vector_name=vec_name,
+                )
+            except Exception:
+                hits = await _qdrant_search_async(
+                    client,
+                    vector=qvec,  # type: ignore[arg-type]
+                    limit=initial_limit,
+                    with_payload=True,
+                    vector_name=vec_name,
+                )
+    else:
         hits = await _qdrant_search_async(
             client,
             vector=qvec,  # type: ignore[arg-type]
@@ -264,7 +344,11 @@ async def compress_context(ctx: str, query: str, *, max_chars: int) -> str:
         return ctx
     try:
         from openai import OpenAI  # type: ignore
-        cli = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL or None)
+        cli = OpenAI(
+            api_key=OPENROUTER_API_KEY,
+            base_url=OPENROUTER_BASE_URL or None,
+            default_headers=get_openrouter_headers() or None,
+        )
         sys = "Ты лаконично сжимаешь русские выдержки по психологии и КПТ, сохраняя факты и практические шаги."
         usr = (
             "Запрос пользователя:\н"
@@ -275,7 +359,7 @@ async def compress_context(ctx: str, query: str, *, max_chars: int) -> str:
             "Если есть короткие практические шаги — оставь их."
         )
         r = cli.chat.completions.create(
-            model=RAG_COMPRESS_MODEL,
+            model=resolve_model_name(RAG_COMPRESS_MODEL),
             temperature=0.2,
             messages=[{"role":"system","content":sys},{"role":"user","content":usr}],
         )

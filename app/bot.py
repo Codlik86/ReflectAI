@@ -1711,7 +1711,7 @@ async def _answer_with_llm(m: Message, user_text: str):
             qlen = len((user_text or "").split())
             k = 3 if qlen < 8 else 6 if qlen < 20 else 8
             max_chars = 600 if qlen < 8 else 1000 if qlen < 30 else 1400
-            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang="ру")
+            rag_ctx = await rag_search(user_text, k=k, max_chars=max_chars, lang=os.getenv("RAG_LANG", "ru"))
             _record_memory_status(error=None, source="rag_qdrant", summaries_count=0, qdrant_error=None)
         except Exception as e:
             print(f"[memory] rag_qdrant error: {e!r}")

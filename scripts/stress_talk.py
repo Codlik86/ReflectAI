@@ -5,8 +5,8 @@ Stress test: few topics, but LONG multi-turn dialogs to check deep context,
 1-question rule, and thematic coherence.
 
 Env:
-  OPENAI_API_KEY (required)
-  OPENAI_BASE_URL (optional; defaults from llm_adapter)
+  OPENROUTER_API_KEY (required)
+  OPENROUTER_BASE_URL (optional; defaults from llm_adapter)
   CHAT_MODEL (optional)
 
 Outputs (in a timestamped dir by default):

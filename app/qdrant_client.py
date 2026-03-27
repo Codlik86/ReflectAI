@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import logging
 from urllib.parse import urlparse
 from typing import Dict, Optional, Tuple, List, Any, Iterable
@@ -40,6 +41,16 @@ QDRANT_GRPC_PORT = int(os.getenv("QDRANT_GRPC_PORT", "6334") or "6334")
 
 _client: QdrantClient | None = None
 _capabilities_logged = False
+
+_LANG_CANONICAL = {
+    "ру": "ru",
+    "рус": "ru",
+    "русский": "ru",
+    "russian": "ru",
+    "англ": "en",
+    "английский": "en",
+    "english": "en",
+}
 
 
 def _log_capabilities(client: QdrantClient) -> None:
@@ -314,39 +325,65 @@ def qdrant_query(
         raise
 
 
-def _ensure_user_id_index(client: QdrantClient, collection: str) -> None:
+def normalize_lang_code(value: Optional[str]) -> Optional[str]:
     """
-    Создаёт payload-индекс по полю user_id (integer) для заданной коллекции.
+    Приводит lang к каноническому short-code виду (ru, en, ...).
+    """
+    if value is None:
+        return None
+    lang = str(value).strip().lower()
+    if not lang:
+        return None
+    lang = lang.replace("_", "-")
+    lang = _LANG_CANONICAL.get(lang, lang)
+    if re.fullmatch(r"[a-z]{2}-[a-z]{2}", lang):
+        return lang.split("-", 1)[0]
+    return lang
+
+
+def _build_payload_schema(schema_type: str):
+    schema_enum = getattr(qm, "PayloadSchemaType", None)
+    if schema_enum is not None:
+        enum_value = getattr(schema_enum, schema_type.upper(), None)
+        if enum_value is not None:
+            return enum_value
+    return {"type": schema_type}
+
+
+def _ensure_payload_index(client: QdrantClient, collection: str, *, field_name: str, schema_type: str) -> None:
+    """
+    Создаёт payload-индекс по полю для заданной коллекции.
     Безопасно: не падает, если индекс уже есть или версия клиента иная.
     """
     try:
-        # Попытка через enum типа
-        schema_enum = getattr(qm, "PayloadSchemaType", None)
-        if schema_enum is not None:
-            client.create_payload_index(
-                collection_name=collection,
-                field_name="user_id",
-                field_schema=schema_enum.INTEGER,
-                wait=True,
-            )
-            return
-        # Фолбэк: явный словарь-схема
         client.create_payload_index(
             collection_name=collection,
-            field_name="user_id",
-            field_schema={"type": "integer"},
+            field_name=field_name,
+            field_schema=_build_payload_schema(schema_type),
             wait=True,
         )
     except Exception as e:
         # Обычно приходит AlreadyExists / BadRequest при повторном создании — игнорируем.
-        msg = str(e)
-        if "already exists" in msg.lower():
+        msg = str(e).lower()
+        if "already exists" in msg:
             return
         # Если коллекции ещё нет — её создадут выше, после чего снова вызовут этот метод.
-        if "not found" in msg.lower():
+        if "not found" in msg:
             return
         # Логируем предупреждение, но не валим процесс.
-        print(f"[qdrant] ensure user_id index warning: {e}")
+        print(
+            f"[qdrant] ensure payload index warning: collection={collection} "
+            f"field={field_name} type={schema_type} error={e}"
+        )
+
+
+def _ensure_collection_payload_indexes(client: QdrantClient, collection: str) -> None:
+    if collection == QDRANT_COLLECTION:
+        _ensure_payload_index(client, collection, field_name="lang", schema_type="keyword")
+        return
+    if collection == QDRANT_SUMMARIES_COLLECTION:
+        _ensure_payload_index(client, collection, field_name="user_id", schema_type="integer")
+        _ensure_payload_index(client, collection, field_name="kind", schema_type="keyword")
 
 
 def get_collection_name() -> str:
@@ -371,6 +408,7 @@ def ensure_collection() -> bool:
                 collection_name=QDRANT_COLLECTION,
                 vectors_config=vectors_cfg,
             )
+        _ensure_collection_payload_indexes(client, QDRANT_COLLECTION)
         return True
     except Exception as e:
         print(f"[qdrant] ensure_collection WARNING: {e}")
@@ -385,7 +423,6 @@ def ensure_summaries_collection() -> bool:
     """
     try:
         client = get_client()
-        created_now = False
         if not _collection_exists_safe(client, QDRANT_SUMMARIES_COLLECTION):
             # Именованный вектор: {"text": VectorParams(...)}
             vname = QDRANT_VECTOR_NAME or "default"
@@ -394,10 +431,8 @@ def ensure_summaries_collection() -> bool:
                 collection_name=QDRANT_SUMMARIES_COLLECTION,
                 vectors_config=named_cfg,
             )
-            created_now = True
 
-        # В любом случае убедимся, что есть индекс по user_id
-        _ensure_user_id_index(client, QDRANT_SUMMARIES_COLLECTION)
+        _ensure_collection_payload_indexes(client, QDRANT_SUMMARIES_COLLECTION)
         return True
     except Exception as e:
         print(f"[qdrant] ensure_summaries_collection WARNING: {e}")
@@ -431,5 +466,5 @@ __all__ = [
     "get_client", "ensure_collection", "ensure_summaries_collection", "ensure_qdrant_ready", "close_client",
     "get_collection_name", "get_summaries_collection_name",
     "QDRANT_COLLECTION", "QDRANT_SUMMARIES_COLLECTION",
-    "QDRANT_URL", "QDRANT_API_KEY", "EMBED_DIM", "ping_qdrant"
+    "QDRANT_URL", "QDRANT_API_KEY", "EMBED_DIM", "ping_qdrant", "normalize_lang_code"
 ]

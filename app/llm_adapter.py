@@ -9,7 +9,7 @@ import logging
 """
 llm_adapter.py
 --------------
-Асинхронный адаптер к OpenAI-совместимому /chat/completions API.
+Асинхронный адаптер к прямому OpenRouter /chat/completions API.
 
 Возможности:
 - Класс LLMAdapter с методом complete_chat(...)
@@ -17,10 +17,108 @@ llm_adapter.py
 - Обёртка chat_with_style(...): подмешивает style/style_hint в system
 - Опциональное подмешивание RAG-контекста отдельным system-сообщением
 - Конфиги из ENV:
-    OPENAI_API_KEY
-    OPENAI_BASE_URL (например, https://api.proxyapi.ru/openai/v1)
+    OPENROUTER_API_KEY
+    OPENROUTER_BASE_URL (по умолчанию https://openrouter.ai/api/v1)
     CHAT_MODEL (по умолчанию gpt-5.2)
 """
+
+
+def _env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value.strip()
+    return default
+
+
+def _ascii_header(value: str, *, fallback: str = "") -> str:
+    text = (value or "").strip()
+    if not text:
+        return fallback
+    try:
+        text.encode("ascii")
+        return text
+    except UnicodeEncodeError:
+        return fallback
+
+
+def get_router_api_key() -> str:
+    return _env_first("OPENROUTER_API_KEY")
+
+
+def get_router_base_url() -> str:
+    return _env_first(
+        "OPENROUTER_BASE_URL",
+        default="https://openrouter.ai/api/v1",
+    ).rstrip("/")
+
+
+def get_openrouter_headers() -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    referer = _ascii_header(_env_first("OPENROUTER_HTTP_REFERER", "WEBHOOK_BASE_URL", "FRONTEND_ORIGIN"))
+    title = _ascii_header(_env_first("OPENROUTER_TITLE", default="ReflectAI"), fallback="ReflectAI")
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if title:
+        headers["X-Title"] = title
+    return headers
+
+
+def build_llm_headers(api_key: Optional[str] = None, *, include_content_type: bool = True) -> Dict[str, str]:
+    key = api_key or get_router_api_key()
+    headers: Dict[str, str] = {"Authorization": f"Bearer {key}"}
+    if include_content_type:
+        headers["Content-Type"] = "application/json"
+    headers.update(get_openrouter_headers())
+    return headers
+
+
+def _extract_text_from_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+                continue
+            if isinstance(text, dict):
+                value = text.get("value")
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _extract_chat_text(data: Dict[str, Any]) -> str:
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("LLM response has no choices")
+
+    choice = choices[0] or {}
+    message = choice.get("message") or {}
+
+    text = _extract_text_from_content(message.get("content"))
+    if text:
+        return text
+
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal.strip():
+        return refusal.strip()
+
+    reasoning = message.get("reasoning")
+    reasoning_text = _extract_text_from_content(reasoning)
+    if reasoning_text:
+        return reasoning_text
+
+    finish_reason = choice.get("finish_reason")
+    raise RuntimeError(f"LLM returned empty completion (finish_reason={finish_reason!r})")
 
 # ===== Новые переменные и алиасы для гибкой маршрутизации моделей =====
 DEFAULT_MODEL = os.getenv("CHAT_MODEL", "gpt-5.2")
@@ -46,19 +144,29 @@ def _supports_penalties(model: str) -> bool:
         return False
     return True
 
-# Алиасы имён моделей на случай отличий в прокси-доке
+# Алиасы bare model ids -> канонические OpenRouter ids.
 MODEL_ALIASES: Dict[str, str] = {
-    "chat-gpt5": "gpt-5.2",
-    "chat-gpt5.2": "gpt-5.2",
-    "gpt-5-thinking": "gpt-5.2",
-    "gpt5": "gpt-5.2",
-    "gpt5.2": "gpt-5.2",
-    "gpt-5": "gpt-5.2",
-    "gpt-4o-mini": "gpt-4o-mini",
+    "chat-gpt5": "openai/gpt-5.2",
+    "chat-gpt5.2": "openai/gpt-5.2",
+    "gpt-5-thinking": "openai/gpt-5.2",
+    "gpt5": "openai/gpt-5.2",
+    "gpt5.2": "openai/gpt-5.2",
+    "gpt-5": "openai/gpt-5.2",
+    "gpt-5.2": "openai/gpt-5.2",
+    "gpt-5.2-chat": "openai/gpt-5.2-chat",
+    "gpt-5.2-codex": "openai/gpt-5.2-codex",
+    "gpt-4o-mini": "openai/gpt-4o-mini",
+    "text-embedding-3-small": "openai/text-embedding-3-small",
+    "text-embedding-3-large": "openai/text-embedding-3-large",
+    "text-embedding-ada-002": "openai/text-embedding-ada-002",
 }
 
 def _resolve_model(name: str) -> str:
     return MODEL_ALIASES.get(name, name)
+
+
+def resolve_model_name(name: str) -> str:
+    return _resolve_model(name)
 
 def _pick_model(ctx: Dict[str, Any]) -> str:
     """
@@ -71,20 +179,20 @@ def _pick_model(ctx: Dict[str, Any]) -> str:
         return _resolve_model(TALK_MODEL or STRONG_MODEL)
     return _resolve_model(DEFAULT_MODEL)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.proxyapi.ru/openai/v1").rstrip("/")
+OPENROUTER_API_KEY = get_router_api_key()
+OPENROUTER_BASE_URL = get_router_base_url()
 
 
 # --------- Core adapter ---------
 
 class LLMAdapter:
     def __init__(self, *, api_key: Optional[str] = None, base_url: Optional[str] = None, model: Optional[str] = None):
-        self.api_key = api_key or OPENAI_API_KEY
-        self.base_url = (base_url or OPENAI_BASE_URL).rstrip("/")
+        self.api_key = api_key or OPENROUTER_API_KEY
+        self.base_url = (base_url or OPENROUTER_BASE_URL).rstrip("/")
         self.model = _resolve_model(model or DEFAULT_MODEL)
 
         if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY не задан в окружении")
+            raise RuntimeError("OPENROUTER_API_KEY не задан в окружении")
 
         self._client: Optional[httpx.AsyncClient] = None
 
@@ -92,10 +200,7 @@ class LLMAdapter:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
+                headers=build_llm_headers(self.api_key),
                 timeout=90.0,  # ↑ запас по времени
             )
         return self._client
@@ -146,7 +251,7 @@ class LLMAdapter:
         if top_p is not None:
             payload["top_p"] = top_p
         if max_completion_tokens is not None:
-            payload["max_completion_tokens"] = max_completion_tokens
+            payload["max_tokens"] = max_completion_tokens
 
         # Pass-through (stop, n, penalties и т.п.)
         for k, v in kwargs.items():
@@ -200,7 +305,7 @@ class LLMAdapter:
                 data = r.json()
                 # Expected OpenAI-like schema
                 _emit_trace("ok", err=None)
-                return data["choices"][0]["message"]["content"].strip()
+                return _extract_chat_text(data)
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
                 try:
@@ -223,7 +328,7 @@ class LLMAdapter:
                             r2.raise_for_status()
                             data2 = r2.json()
                             _emit_trace("ok", err=None)
-                            return data2["choices"][0]["message"]["content"].strip()
+                            return _extract_chat_text(data2)
                         except Exception:
                             pass
                 # Попытки и бэкофф
@@ -246,7 +351,7 @@ class LLMAdapter:
                         r2.raise_for_status()
                         data2 = r2.json()
                         _emit_trace("ok", err=None)
-                        return data2["choices"][0]["message"]["content"].strip()
+                        return _extract_chat_text(data2)
                     except Exception:
                         pass
                 _emit_trace("error", err=f"HTTP {status}")
@@ -273,7 +378,7 @@ class LLMAdapter:
                         r2.raise_for_status()
                         data2 = r2.json()
                         _emit_trace("ok", err=None)
-                        return data2["choices"][0]["message"]["content"].strip()
+                        return _extract_chat_text(data2)
                     except Exception:
                         pass
                 _emit_trace("error", err=str(e))
@@ -442,22 +547,22 @@ async def chat_with_style(
     )
 
 
-# --- Embeddings via OpenAI ---
-_OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-_OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+# --- Embeddings via OpenRouter ---
+_OPENROUTER_BASE_URL = get_router_base_url()
+_OPENROUTER_API_KEY = get_router_api_key()
+_OPENROUTER_EMBED_MODEL = _resolve_model(os.getenv("EMBED_MODEL") or os.getenv("OPENROUTER_EMBED_MODEL") or "openai/text-embedding-3-small")
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     """
-    Синхронная обёртка над OpenAI /embeddings.
+    Синхронная обёртка над OpenRouter /embeddings.
     Возвращает список векторов такой же длины, как входной список `texts`.
     """
-    if not _OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not set")
+    if not _OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY is not set")
 
-    url = f"{_OPENAI_BASE_URL}/embeddings"
-    headers = {"Authorization": f"Bearer {_OPENAI_API_KEY}"}
-    payload = {"model": _OPENAI_EMBED_MODEL, "input": texts}
+    url = f"{_OPENROUTER_BASE_URL}/embeddings"
+    headers = build_llm_headers(_OPENROUTER_API_KEY)
+    payload = {"model": _OPENROUTER_EMBED_MODEL, "input": texts}
 
     with httpx.Client(timeout=30.0) as client:
         resp = client.post(url, json=payload, headers=headers)

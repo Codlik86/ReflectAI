@@ -2,16 +2,23 @@ import os, sys, pathlib
 from typing import List
 from openai import OpenAI
 
-BASE_URL = os.getenv("OPENAI_BASE_URL", "")
-API_KEY  = os.getenv("OPENAI_API_KEY", "")
-MODEL    = os.getenv("GPT_MODEL", "gpt-5.2")
+BASE_URL = (os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1").rstrip("/")
+API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+MODEL = os.getenv("GPT_MODEL") or os.getenv("CHAT_MODEL") or "openai/gpt-5.2"
+EXTRA_HEADERS = {}
+referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+title = os.getenv("OPENROUTER_TITLE", "").strip()
+if referer and referer.isascii():
+    EXTRA_HEADERS["HTTP-Referer"] = referer
+if title and title.isascii():
+    EXTRA_HEADERS["X-Title"] = title
 
 if not API_KEY:
-    sys.exit("OPENAI_API_KEY is empty")
+    sys.exit("OPENROUTER_API_KEY is empty")
 if not BASE_URL:
-    sys.exit("OPENAI_BASE_URL is empty")
+    sys.exit("OPENROUTER_BASE_URL is empty")
 
-cli = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+cli = OpenAI(base_url=BASE_URL, api_key=API_KEY, default_headers=EXTRA_HEADERS or None)
 
 SYS_PROMPT = (
     "Ты профессиональный переводчик психол. и мед. текстов. "

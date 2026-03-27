@@ -4,8 +4,8 @@
 Regression: multi-turn 'talk' conversations to check context adherence.
 
 Env:
-  OPENAI_API_KEY (required)
-  OPENAI_BASE_URL (optional; defaults from llm_adapter)
+  OPENROUTER_API_KEY (required)
+  OPENROUTER_BASE_URL (optional; defaults from llm_adapter)
   CHAT_MODEL (optional)
 
 Outputs:
